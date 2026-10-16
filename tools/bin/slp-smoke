@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+// End-to-end smoke test against the REAL daemon and real agents (costs model tokens).
+// Creates a throw-away git repo, starts an SLP run, plays the Supreme Manager (sends the
+// requirement, approves every human gate, presses the final button) and verifies the result.
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { createPaseoClient } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+
+const cliArguments = process.argv.slice(2);
+if (cliArguments.includes("--desc")) {
+  console.log("Real-agent end-to-end smoke test of an SLP run (costs tokens)");
+  process.exit(0);
+}
+if (cliArguments.includes("--help") || cliArguments.includes("-h")) {
+  console.log(`Usage: slp-smoke [--mode STEP_BY_STEP_DEBUG|SEMI_AUTO|FULL_AUTO] [--tasks 1|2] [--timeout-min 20] [--keep]
+
+Runs a tiny slugify/word-count project through the whole pipeline and prints every phase change.
+Gates are approved automatically. Exit 0 only if the base branch ends with passing tests.
+  --keep   leave the temp repo and agents in place for inspection`);
+  process.exit(0);
+}
+
+function option(name, fallback) {
+  const optionIndex = cliArguments.indexOf(name);
+  return optionIndex === -1 ? fallback : cliArguments[optionIndex + 1];
+}
+const runMode = option("--mode", "FULL_AUTO");
+const taskCount = Number(option("--tasks", "1"));
+const timeoutMinutes = Number(option("--timeout-min", "20"));
+const keepArtifacts = cliArguments.includes("--keep");
+const pluginId = "paseo-slp-orchestrator";
+const daemonUrl = process.env.PASEO_URL ?? "ws://127.0.0.1:6767/ws";
+
+const demoRepoPath = mkdtempSync(join(tmpdir(), "slp-smoke-"));
+const gitInDemoRepo = (...gitArguments) => execFileSync("git", ["-c", "user.email=smoke@slp", "-c", "user.name=smoke", ...gitArguments], { cwd: demoRepoPath, encoding: "utf8" });
+gitInDemoRepo("init", "-q", "-b", "main");
+writeFileSync(join(demoRepoPath, "package.json"), JSON.stringify({ name: "slp-smoke", type: "module", scripts: { test: "node --test" } }));
+mkdirSync(join(demoRepoPath, "src"));
+mkdirSync(join(demoRepoPath, "tests"));
+writeFileSync(join(demoRepoPath, "README.md"), "# smoke\n");
+gitInDemoRepo("add", "-A");
+gitInDemoRepo("commit", "-qm", "init");
+
+const requirementByTaskCount = {
+  1: "Tạo src/slug.js (ESM) xuất hàm slugify(text): chữ thường, bỏ dấu tiếng Việt, ký tự không phải chữ/số thành '-', gộp '-' liên tiếp, cắt '-' đầu cuối; kèm unit test node:test tại tests/slug.test.js. Chỉ MỘT task. Tiêu chí đã rõ, hãy ủy quyền luôn.",
+  2: "Làm hai việc ĐỘC LẬP thành HAI task riêng (writable scope không chồng lấn): (A) src/slug.js xuất slugify(text) (chữ thường, bỏ dấu tiếng Việt, ký tự lạ thành '-', gộp và cắt '-'), test ở tests/slug.test.js; (B) src/words.js xuất countWords(text) (đếm từ tách bởi khoảng trắng), test ở tests/words.test.js. ESM, test bằng node:test. Tiêu chí đã rõ, hãy ủy quyền luôn.",
+};
+
+const daemonClient = new DaemonClient({ url: daemonUrl, clientId: `slp-smoke-${randomUUID()}`, clientType: "cli" });
+const paseoClient = createPaseoClient({ url: daemonUrl });
+await daemonClient.connect();
+await paseoClient.connect();
+const callRpc = (method, input) => daemonClient.invokePluginRpc(pluginId, method, input);
+
+let exitCode = 1;
+try {
+  const startedRun = await callRpc("slp.run.start", { repoPath: demoRepoPath, title: `smoke ${runMode}`, mode: runMode });
+  console.log(`run ${startedRun.runId} started in ${demoRepoPath}`);
+  await paseoClient.agents.ref(startedRun.supervisorAgentId).waitForFinish(120_000);
+  await paseoClient.agents.ref(startedRun.supervisorAgentId).send(requirementByTaskCount[taskCount]);
+
+  const deadline = Date.now() + timeoutMinutes * 60_000;
+  let previousSnapshot = "";
+  while (Date.now() < deadline) {
+    const { run } = await callRpc("slp.run.get", { runId: startedRun.runId });
+    const taskSnapshot = Object.values(run.tasks).map((task) => `${task.id}:${task.phase}${task.gate ? `[gate:${task.gate.kind}]` : ""}:fix${task.fixLoopCount}`).join(" ");
+    const currentSnapshot = `${run.status} ${taskSnapshot}`;
+    if (currentSnapshot !== previousSnapshot) {
+      console.log(`${new Date().toISOString().slice(11, 19)} ${currentSnapshot}`);
+      previousSnapshot = currentSnapshot;
+    }
+    // the Supreme Manager approves every task gate; the run level gate is the final button
+    for (const task of Object.values(run.tasks)) {
+      if (task.gate) await callRpc("slp.gate.approve", { runId: run.id, taskId: task.id });
+    }
+    if (run.status === "awaiting_user") {
+      const approval = await callRpc("slp.run.approve_main", { runId: run.id });
+      console.log(approval.message);
+    }
+    if (run.status === "completed") break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 3_000));
+  }
+
+  const testOutput = execFileSync("npm", ["test", "--silent"], { cwd: demoRepoPath, encoding: "utf8" });
+  const passedTests = /pass (\d+)/.exec(testOutput)?.[1] ?? "?";
+  const baseBranchLog = gitInDemoRepo("log", "--oneline", "-8");
+  console.log(`base branch tests passed: ${passedTests}\n${baseBranchLog}`);
+  exitCode = Number(passedTests) > 0 ? 0 : 1;
+} catch (smokeError) {
+  console.error("SMOKE FAILED:", smokeError instanceof Error ? smokeError.message : smokeError);
+} finally {
+  await paseoClient.close();
+  await daemonClient.close();
+  console.log(keepArtifacts ? `kept ${demoRepoPath}` : "(temp repo left in /tmp; remove it manually if no longer needed)");
+}
+process.exit(exitCode);

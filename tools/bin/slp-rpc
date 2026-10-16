@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+// Invoke one RPC of the installed SLP plugin from the shell (the app UI is the normal caller).
+// Useful for smoke tests and for driving a run without opening the Paseo app.
+import { randomUUID } from "node:crypto";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+
+const pluginId = "paseo-slp-orchestrator";
+const commandLineArguments = process.argv.slice(2);
+
+if (commandLineArguments.includes("--desc")) {
+  console.log("Call an SLP plugin RPC (e.g. slp.run.list) against the local Paseo daemon");
+  process.exit(0);
+}
+if (commandLineArguments.length === 0 || commandLineArguments.includes("--help") || commandLineArguments.includes("-h")) {
+  console.log(`Usage: slp-rpc <method> [json-input]
+
+Methods: slp.run.list | slp.run.get | slp.run.start | slp.run.set_mode | slp.gate.approve
+         slp.task.resume | slp.run.approve_main | slp.run.abort | slp.log.tail
+Env:     PASEO_URL (default ws://127.0.0.1:6767/ws)
+
+Examples:
+  slp-rpc slp.run.list
+  slp-rpc slp.run.start '{"repoPath":"/tmp/demo","mode":"FULL_AUTO"}'
+  slp-rpc slp.log.tail '{"runId":"<id>","limit":20}'`);
+  process.exit(0);
+}
+
+const [rpcMethod, rawInput] = commandLineArguments;
+const daemonUrl = process.env.PASEO_URL ?? "ws://127.0.0.1:6767/ws";
+const daemonClient = new DaemonClient({ url: daemonUrl, clientId: `slp-rpc-${randomUUID()}`, clientType: "cli" });
+
+try {
+  await daemonClient.connect();
+  const rpcOutput = await daemonClient.invokePluginRpc(pluginId, rpcMethod, rawInput ? JSON.parse(rawInput) : {});
+  console.log(JSON.stringify(rpcOutput, null, 2));
+} catch (rpcError) {
+  // a non-zero exit lets shell scripts detect a rejected RPC
+  console.error(`RPC ${rpcMethod} failed:`, rpcError instanceof Error ? rpcError.message : rpcError);
+  process.exitCode = 1;
+} finally {
+  await daemonClient.close();
+}

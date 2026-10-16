@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Typecheck the plugin (server, client and shared) with the project's tsc.
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+case "${1:-}" in
+  --desc) echo "Typecheck the plugin sources with tsc --noEmit"; exit 0 ;;
+  --help | -h)
+    cat <<'EOF'
+Usage: typecheck [--verbose]
+
+Runs `tsc --noEmit` for server/, client/, shared/ and tests/.
+Prints nothing and exits 0 when clean; otherwise prints file:line errors and exits 1.
+
+Options:
+  -v, --verbose   also print the tsc command being run
+EOF
+    exit 0 ;;
+  -v | --verbose) echo "+ tsc --noEmit (cwd: $project_root)" ;;
+esac
+
+cd "$project_root"
+# tsc already prints concise file:line diagnostics, so its output is passed through untouched
+exec npx --no-install tsc --noEmit

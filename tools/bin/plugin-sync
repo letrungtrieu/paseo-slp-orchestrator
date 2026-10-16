@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Install the plugin into the local Paseo daemon, or reload it when already installed,
+# then verify it reaches `running` and show the last backend log lines.
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+plugin_id="paseo-slp-orchestrator"
+
+case "${1:-}" in
+  --desc) echo "Install or reload the plugin in the local Paseo daemon and show its status"; exit 0 ;;
+  --help | -h)
+    cat <<'EOF'
+Usage: plugin-sync [--logs N]
+
+Typechecks first, then `paseo plugin install` (first time) or `paseo plugin reload`.
+Exits non-zero unless `paseo plugin ls` reports the plugin as running.
+Never restarts the daemon (that could kill running agents).
+
+Options:
+  --logs N   number of backend log lines to print afterwards (default 15)
+EOF
+    exit 0 ;;
+esac
+
+log_lines=15
+if [[ "${1:-}" == "--logs" ]]; then log_lines="${2:?--logs needs a number}"; fi
+
+"$project_root/tools/bin/typecheck"
+# `plugin ls` lists installed ids; grep -q on a captured string avoids pipefail SIGPIPE false negatives
+installed_plugins="$(paseo plugin ls 2>&1 || true)"
+if [[ "$installed_plugins" == *"$plugin_id"* ]]; then
+  paseo plugin reload "$plugin_id"
+else
+  paseo plugin install "$project_root"
+fi
+
+plugin_status="$(paseo plugin ls 2>&1)"
+echo "$plugin_status" | grep "$plugin_id" || true
+echo "--- last $log_lines log lines ---"
+paseo plugin logs "$plugin_id" 2>&1 | tail -n "$log_lines" || true
+[[ "$plugin_status" == *"running"* ]] || { echo "plugin is not running" >&2; exit 1; }

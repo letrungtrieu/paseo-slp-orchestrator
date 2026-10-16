@@ -1,0 +1,174 @@
+// Messages the pipeline sends to agents at each transition. Each one names the bus tool the
+// recipient must call next, so a nudge can repeat the instruction when the agent forgets.
+import { FIX_LOOP_LIMIT } from "../../shared/roles";
+import type { Plan, Task, TaskDefinition } from "../../shared/state";
+import { ACCEPTANCE_DOC_PATH, ACCEPTANCE_DOC_SECTIONS } from "./task-spec";
+
+export function supervisorBriefing(): string {
+  return "You are the Supervisor of an SLP run. Greet the Supreme Manager in Vietnamese in one sentence and wait for their requirement. Do not call any tool yet.";
+}
+
+export function masterLeadBriefing(devCwd: string): string {
+  return `You are the Master Lead of an SLP run. Your checkout is ${devCwd} (integration branch). Reply with the single word READY and wait; the Supervisor will delegate acceptance criteria to you.`;
+}
+
+export function delegationMessage(acceptanceCriteria: string, masterSpecPath: string): string {
+  return [
+    "The Supervisor delegated this project. Overall acceptance criteria:",
+    "",
+    acceptanceCriteria,
+    "",
+    `Survey the codebase, write the Master Spec to ${masterSpecPath}, split the work into tasks with non-overlapping writable scopes, then call slp_define_tasks (once, with all tasks).`,
+  ].join("\n");
+}
+
+export function forkedLeadBriefing(task: TaskDefinition, degradedReason: string | null, masterSpecPath: string | null): string {
+  const memoryNote = degradedReason
+    ? `Native session fork was unavailable (${degradedReason}). Read ${masterSpecPath ?? ".slp/MASTER_SPEC.md"} and the codebase to rebuild the context.`
+    : "You inherited the Master Lead's memory.";
+  return `You are the Forked Lead for task "${task.id}" (${task.title}). ${memoryNote} An Implementer will send you its plan; answer each plan with one fenced JSON verdict block. Reply with READY now.`;
+}
+
+export function implementerHandshakeBrief(task: Task, taskSpecPath: string): string {
+  return [
+    `New task "${task.id}": ${task.title}.`,
+    `Read ${taskSpecPath} (TASK_SPEC.md), then open the real code and compare it with the Lead's assumptions. You are READ-ONLY until approved.`,
+    "Call slp_submit_plan with: your own restatement of the goal, every place where the real code differs from the Lead's assumptions, and the exact files/functions you plan to change. Then end your turn.",
+  ].join("\n");
+}
+
+export function planReviewRequest(task: Task, plan: Plan, round: number): string {
+  const bullet = (lines: string[]) => (lines.length ? lines.map((line) => `- ${line}`).join("\n") : "- (none)");
+  return [
+    `Implementer plan for task "${task.id}" (round ${round}).`,
+    `Restated goal: ${plan.restatedGoal}`,
+    "Discrepancies the Implementer found between your assumptions and the real code:",
+    bullet(plan.discrepancies),
+    "Planned files/functions:",
+    bullet(plan.plannedFiles),
+    "Answer with one fenced JSON block: {\"verdict\":\"approve|clarify|escalate\",\"message\":\"...\"}.",
+  ].join("\n");
+}
+
+export function clarificationForImplementer(message: string): string {
+  return `The Forked Lead reviewed your plan and needs changes:\n${message}\n\nRevise and call slp_submit_plan again. Still READ-ONLY.`;
+}
+
+export function planApprovedForImplementer(task: Task): string {
+  return [
+    "Your plan is APPROVED. Writing is now unlocked inside your writable scope:",
+    ...task.writableScope.map((scope) => `- ${scope}`),
+    "Implement the plan with unit tests, commit on your branch, then call slp_stage_done with a short summary. Do not touch TASK_SPEC.md.",
+  ].join("\n");
+}
+
+export function handshakeSummaryForMaster(task: Task): string {
+  return `Task "${task.id}": handshake finished, plan approved after ${task.handshakeRounds} round(s). Implementer is now coding. No action needed.`;
+}
+
+export function scopeViolationMessage(outOfScopeFiles: string[], protectedFiles: string[]): string {
+  return [
+    "Stage rejected by the scope gate. Restore these changes (git checkout/rm) and commit again:",
+    ...outOfScopeFiles.map((file) => `- outside writable scope: ${file}`),
+    ...protectedFiles.map((file) => `- protected file modified: ${file}`),
+    "Then call slp_stage_done again.",
+  ].join("\n");
+}
+
+export function verificationRequest(task: Task, role: "qa" | "security", round: number): string {
+  const roleInstruction =
+    role === "qa"
+      ? "Write extra edge-case tests (only under tests/), run the real test suite and report."
+      : "Review the new code read-only for vulnerabilities, data leaks and architecture violations.";
+  return [
+    `Verification round ${round} for task "${task.id}". Read TASK_SPEC.md and review the committed work on this branch.`,
+    roleInstruction,
+    "Call slp_verdict with APPROVED or REJECTED plus a concrete issue list. End your turn afterwards.",
+  ].join("\n");
+}
+
+export function fixRequest(issuesByRole: Record<string, string[]>, loop: number): string {
+  const sections = Object.entries(issuesByRole).map(
+    ([role, issues]) => `From ${role}:\n${issues.map((issue) => `- ${issue}`).join("\n")}`,
+  );
+  return [
+    `Review REJECTED (fix loop ${loop}/${FIX_LOOP_LIMIT}). Fix every issue below, commit, then call slp_stage_done.`,
+    ...sections,
+  ].join("\n\n");
+}
+
+export function documentationRequest(): string {
+  return [
+    `All reviews APPROVED. Write ${ACCEPTANCE_DOC_PATH} with these level-2 sections: ${ACCEPTANCE_DOC_SECTIONS.join(", ")}.`,
+    "Include what was built, changed files, reasons behind key technical decisions, QA test results and the security verdict. Then call slp_doc_done.",
+  ].join("\n");
+}
+
+export function documentationInvalidMessage(missingSections: string[]): string {
+  return `${ACCEPTANCE_DOC_PATH} is missing or incomplete. Missing sections: ${missingSections.join(", ") || "(file not found)"}. Fix it and call slp_doc_done again.`;
+}
+
+export function readyForMergeNotice(task: Task, acceptanceDocPath: string): string {
+  return [
+    `Task "${task.id}" (${task.title}) is READY FOR MERGE.`,
+    `Branch: ${task.workspace?.branch ?? "?"}. Worktree: ${task.workspace?.cwd ?? "?"}.`,
+    `Read ${acceptanceDocPath} first, then merge the branch into your checkout, run tests and call slp_archive_task with taskId "${task.id}".`,
+    "For a hard conflict or unclear intent use slp_consult_peer.",
+  ].join("\n");
+}
+
+export function circuitBreakerNotice(task: Task, issuesByRole: Record<string, string[]>): string {
+  const issueLines = Object.entries(issuesByRole).flatMap(([role, issues]) => issues.map((issue) => `- [${role}] ${issue}`));
+  return [
+    `CIRCUIT BREAKER: task "${task.id}" was rejected more than ${FIX_LOOP_LIMIT} times and is PAUSED.`,
+    "Latest issues:",
+    ...issueLines,
+    `Decide how to proceed and call slp_spec_decision with taskId "${task.id}" (guidance for the Implementer, or amend the approach).`,
+  ].join("\n");
+}
+
+export function consultQuestion(questionId: string, taskId: string, question: string): string {
+  return `The Master Lead asks about task "${taskId}" (you remember writing it):\n${question}\nAnswer with slp_answer using questionId "${questionId}".`;
+}
+
+export function siblingQuestion(questionId: string, fromTaskId: string, question: string): string {
+  return [
+    `Read-only query from the Implementer of task "${fromTaskId}":`,
+    question,
+    "Answer ONLY with facts about the current code. You must not change code or agree to design changes because another branch asked.",
+    `Reply with slp_answer using questionId "${questionId}".`,
+  ].join("\n");
+}
+
+export function questionAnswered(questionId: string, answer: string): string {
+  return `Answer to your question ${questionId}:\n${answer}`;
+}
+
+export function escalationNotice(task: Task, reason: string): string {
+  return `ESCALATION from task "${task.id}": ${reason}\nDecide and call slp_spec_decision with taskId "${task.id}".`;
+}
+
+export function specDecisionForAgent(decision: string): string {
+  return `The Master Lead decided:\n${decision}\nContinue accordingly.`;
+}
+
+export function allTasksMergedNotice(): string {
+  return "All tasks are merged into your branch. Run the full integration/e2e test suite, critique the combined result against the acceptance criteria, then call slp_report with a summary and the ACCEPTANCE_DOC paths.";
+}
+
+export function reportForSupervisor(report: string, docPaths: string[], baseBranch: string, integrationBranch: string): string {
+  return [
+    "The Master Lead reports the project is done:",
+    report,
+    `Acceptance docs: ${docPaths.join(", ") || "(none)"}`,
+    `Independently verify: git diff ${baseBranch}..${integrationBranch}, run the tests. If anything is missing call slp_request_rework, else call slp_present_to_manager.`,
+  ].join("\n");
+}
+
+export function reworkNotice(feedback: string): string {
+  return `The Supervisor rejected the result:\n${feedback}\nFix it (you may define follow-up work yourself), then call slp_report again.`;
+}
+
+export function nudgeReminder(awaitTool: string): string {
+  return `Reminder: you ended your turn without calling ${awaitTool}. Call ${awaitTool} now with your result; do not reply in plain text only.`;
+}

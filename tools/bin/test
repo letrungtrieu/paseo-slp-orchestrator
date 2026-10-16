@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Run the unit and pipeline-simulation tests with vitest.
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+case "${1:-}" in
+  --desc) echo "Run the vitest suite (unit + pipeline simulation)"; exit 0 ;;
+  --help | -h)
+    cat <<'EOF'
+Usage: test [vitest-file-or-pattern ...] [--verbose]
+
+Runs `vitest run`. Without arguments every tests/**/*.test.ts file runs.
+Default output is the compact summary and failing assertions only.
+
+Examples:
+  test                       # whole suite
+  test tests/scope.test.ts   # one file
+  test --verbose             # full reporter
+EOF
+    exit 0 ;;
+esac
+
+cd "$project_root"
+# the default reporter prints one line per file plus a summary; NO_COLOR keeps logs free of escape codes
+reporter="default"
+forwarded_arguments=()
+for argument in "$@"; do
+  # --verbose switches to the full reporter instead of being forwarded to vitest
+  if [[ "$argument" == "--verbose" || "$argument" == "-v" ]]; then reporter="verbose"; else forwarded_arguments+=("$argument"); fi
+done
+NO_COLOR=1 exec npx --no-install vitest run --reporter="$reporter" "${forwarded_arguments[@]}"
