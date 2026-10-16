@@ -16,10 +16,12 @@ if (commandLineArguments.length === 0 || commandLineArguments.includes("--help")
 
 Methods: slp.run.list | slp.run.get | slp.run.start | slp.run.set_mode | slp.gate.approve
          slp.task.resume | slp.run.approve_main | slp.run.abort | slp.log.tail
+         slp.project.prompts.init
 Env:     PASEO_URL (default ws://127.0.0.1:6767/ws)
 
 Examples:
   slp-rpc slp.run.list
+  slp-rpc slp.project.prompts.init '{"repoPath":"/path/to/project"}'
   slp-rpc slp.run.start '{"repoPath":"/tmp/demo","mode":"FULL_AUTO"}'
   slp-rpc slp.log.tail '{"runId":"<id>","limit":20}'`);
   process.exit(0);

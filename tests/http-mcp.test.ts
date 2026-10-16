@@ -138,10 +138,11 @@ describe("tools/list", () => {
     expect(exposedToolNames).toEqual(toolNamesForRole(role));
   });
 
-  it("shows the supervisor only the supervisor tools", async () => {
+  it("shows the Supervisor shared read tools and its own workflow tools", async () => {
     const listResponse = await post("tok-sup", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const exposedToolNames = (await listResponse.json()).result.tools.map((tool: { name: string }) => tool.name);
-    expect(exposedToolNames).toEqual(["slp_delegate", "slp_request_rework", "slp_present_to_manager"]);
+    // Read access does not grant the Supervisor the Lead's task-creation or merge-report tools.
+    expect(exposedToolNames).toEqual(["slp_list_peer_roles", "slp_get_run", "slp_list_tasks", "slp_get_task", "slp_get_report", "slp_delegate", "slp_request_rework", "slp_present_to_manager"]);
   });
 
   // agents build their calls from these schemas

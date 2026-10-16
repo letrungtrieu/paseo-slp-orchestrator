@@ -88,13 +88,13 @@ describe("checkScope", () => {
     expect(scopeOutcome.protectedFileTouched).toEqual(["TASK_SPEC.md"]);
   });
 
-  // acceptance docs and the comm log are produced by the pipeline's own flow
-  it("ignores pipeline output under .slp/", () => {
+  // SQLite replaced these outputs, so a broad scope must not reintroduce the retired document layout.
+  it("rejects obsolete report and log files under .slp/", () => {
     const scopeOutcome = checkScope({
       changedFiles: [".slp/ACCEPTANCE_DOC.md", ".slp/comm-log.jsonl"],
       writableScope: ["src/"],
     });
-    expect(scopeOutcome).toEqual({ outOfScopeFiles: [], protectedFileTouched: [] });
+    expect(scopeOutcome).toEqual({ outOfScopeFiles: [], protectedFileTouched: [".slp/ACCEPTANCE_DOC.md", ".slp/comm-log.jsonl"] });
   });
 
   // QA's test files are legitimate additions on top of the Implementer's scope

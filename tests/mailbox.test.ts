@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { abortRun } from "../server/pipeline/run-lifecycle";
-import { tailCommLog } from "../server/store/comm-log";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { eventually } from "./helpers/flow-steps";
 
@@ -11,6 +10,9 @@ const ENQUEUE_NO_REPLY = { taskId: null, awaitTool: null, from: "test", summary:
 async function runWithTwoAgents() {
   const flow = await createFlow({ mode: "FULL_AUTO" });
   const runId = await flow.startRun();
+  // These scenarios begin after the Supervisor's greeting has completed, before any mailbox traffic.
+  flow.gateway.markEveryAgentIdle();
+  flow.gateway.prompts.length = 0;
   const { masterLeadAgentId, supervisorAgentId } = flow.run(runId);
   const flush = async () => flow.ctx.mailbox.flush(runId, await flow.gateway.liveStatuses(runId));
   return { flow, runId, masterLeadAgentId, supervisorAgentId, flush };
@@ -183,7 +185,7 @@ describe("failed sends", () => {
     await flush();
 
     await eventually(async () => {
-      const mailOutcomes = (await tailCommLog(flow.repoPath, runId, 100)).filter((entry) => entry.kind === "mail").map((entry) => entry.outcome);
+      const mailOutcomes = (await flow.store.tailLog(runId, 100)).filter((entry) => entry.kind === "mail").map((entry) => entry.outcome);
       // appends are fire-and-forget, so file order is not guaranteed; compare as a set
       if (mailOutcomes.sort().join() !== "delivered,error,queued") throw new Error(`got ${mailOutcomes.join()}`);
     });

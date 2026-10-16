@@ -5,7 +5,6 @@ import type { ForkRegistry } from "../fork/session-forker";
 import type { AgentGateway } from "../runtime/agent-gateway";
 import { Mailbox } from "../runtime/mailbox";
 import type { PaseoHolder } from "../runtime/paseo-holder";
-import { appendCommLog } from "../store/comm-log";
 import type { RunStore } from "../store/run-store";
 import type { PipelineContext } from "./context";
 import { resumeTask } from "./task-pause";
@@ -20,13 +19,16 @@ export interface PipelineDependencies {
 }
 
 export function createPipeline(dependencies: PipelineDependencies): PipelineContext {
-  // every log call is fire and forget: the audit trail must never slow down or fail a flow
+  // Diagnostic failures must not undo a successful pipeline transition.
   const logEvent: PipelineContext["logEvent"] = (runId, entry) => {
-    // A run that vanished (aborted and cleaned up) simply drops the line; the log lives in the run's repo so it needs repoPath.
-    const run = dependencies.store.find(runId);
-    if (run) void appendCommLog(run.repoPath, { ...entry, runId });
+    if (!dependencies.store.find(runId)) return;
+    try {
+      dependencies.store.appendLog({ ...entry, runId });
+    } catch (logError) {
+      console.error("[slp] SQLite audit append failed", logError);
+    }
   };
-  // The mailbox logs its own deliveries through the same sink so mail and tool traffic land in one ordered audit file.
+  // Mail and tool traffic share one ordered SQLite audit trail.
   const mailbox = new Mailbox(dependencies.store, dependencies.gateway, (runId, mailEntry) =>
     logEvent(runId, mailEntry),
   );

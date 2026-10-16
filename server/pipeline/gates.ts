@@ -29,7 +29,8 @@ function describeGate(gateKind: GateKind, taskId: string | null): Gate {
   const gateNotes: Record<GateKind, string> = {
     after_handshake: "Handshake finished. Review the plan, then approve to unlock coding.",
     after_implementation: "Implementation committed. Approve to start QA/Security.",
-    after_verification: "QA/Security approved. Approve to write the acceptance doc.",
+    // Approval authorizes a structured report submission; no worktree document is generated.
+    after_verification: "QA/Security approved. Approve to submit the acceptance report.",
     before_merge: "Ready for merge. Approve to notify the Master Lead.",
     circuit_breaker: "Fix loop limit exceeded. Approve (with guidance) to resume the task.",
     final_approval: "Result verified by the Supervisor. Approve to merge into the base branch.",

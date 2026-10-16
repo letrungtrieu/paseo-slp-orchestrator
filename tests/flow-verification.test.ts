@@ -57,7 +57,7 @@ describe("parallel verification", () => {
     await waitForPhase(flow, runId, TASK_ID, "documenting");
     const docMail = flow.mailTo(runId, flow.task(runId, TASK_ID).agentIds.implementer).at(-1);
     expect(docMail).toMatchObject({ awaitTool: "slp_doc_done" });
-    expect(docMail?.text).toContain(".slp/ACCEPTANCE_DOC.md");
+    expect(docMail?.text).toContain("slp_doc_done");
   });
 
   // late verdicts must not reopen a finished round

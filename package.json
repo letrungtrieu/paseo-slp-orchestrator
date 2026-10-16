@@ -5,13 +5,15 @@
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",
+    "docs/",
     "index.client.ts",
     "index.client.tsx",
     "index.server.ts",
     "index.server.tsx",
     "client/",
     "server/",
-    "shared/"
+    "shared/",
+    "assets/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -27,5 +29,8 @@
     "typescript": "^5.9.3",
     "vitest": "5.0.5",
     "zod": "^4.4.3"
+  },
+  "dependencies": {
+    "yaml": "2.9.1"
   }
 }

@@ -1,6 +1,6 @@
 // Session forking (spec section 2.2): a Forked Lead starts from a copy of the Master Lead's
 // provider session, so it knows everything from the survey without touching the Lead's history.
-// Each provider family gets an adapter; a failure degrades to a spec-file briefing, never to a crash.
+// Each provider family gets an adapter; a failure degrades to a stored-spec briefing, never to a crash.
 
 export interface ForkSource {
   provider: string;
@@ -21,7 +21,7 @@ export interface SessionForker {
 }
 
 export interface DegradedForkBinding {
-  mode: "spec-file";
+  mode: "stored-spec";
   reason: string;
 }
 
@@ -36,24 +36,24 @@ export class ForkRegistry {
   constructor(private readonly forkers: readonly SessionForker[]) {}
 
   async resolve(source: ForkSource | null, provider: string): Promise<ForkBinding> {
-    // Without a session id there is nothing to resume, so the Forked Lead falls back to reading the spec files.
+    // Without a session id there is nothing to resume, so the Forked Lead falls back to reading the stored spec through tools.
     if (!source) {
-      return { mode: "spec-file", reason: "master lead has no provider session id yet" };
+      return { mode: "stored-spec", reason: "master lead has no provider session id yet" };
     }
     const family = providerFamily(provider);
     // Matched on the provider family, so any Claude model reuses the same adapter without being listed.
     const matchingForker = this.forkers.find((forker) => forker.family === family);
     if (!matchingForker) {
-      return { mode: "spec-file", reason: `no session forker for provider '${family}'` };
+      return { mode: "stored-spec", reason: `no session forker for provider '${family}'` };
     }
     try {
       const nativeBinding = await matchingForker.bind(source);
       if (nativeBinding) return nativeBinding;
-      return { mode: "spec-file", reason: `${family} native fork is not wired into this plugin` };
+      return { mode: "stored-spec", reason: `${family} native fork is not wired into this plugin` };
     } catch (forkError) {
       // a broken adapter must degrade the handshake context, not abort the whole run
       return {
-        mode: "spec-file",
+        mode: "stored-spec",
         reason: `${family} fork failed: ${forkError instanceof Error ? forkError.message : String(forkError)}`,
       };
     }

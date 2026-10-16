@@ -2,6 +2,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Text, View } from "react-native";
 import { describeRpcError, useRunDetail } from "../use-run";
 import type { UiStyles } from "../styles";
+import { ActionButton } from "./action-button";
 import { RunControls } from "./run-controls";
 import { TaskRow } from "./task-row";
 
@@ -9,9 +10,10 @@ interface RunDetailProps {
   styles: UiStyles;
   theme: PluginTheme;
   selectedRunId: string;
+  onOpenSupervisor?: (supervisorAgentId: string) => void;
 }
 
-export function RunDetail({ styles, theme, selectedRunId }: RunDetailProps) {
+export function RunDetail({ styles, theme, selectedRunId, onOpenSupervisor }: RunDetailProps) {
   // The detail owns its own poll so a 2 s refresh re-renders only this panel, not the form or the list.
   const runDetailQuery = useRunDetail(selectedRunId);
   // Null both while loading and when unknown; the isLoading flag below tells the two apart.
@@ -42,7 +44,16 @@ export function RunDetail({ styles, theme, selectedRunId }: RunDetailProps) {
       <Text style={styles.mutedText}>
         {selectedRun.status} · {selectedRun.baseBranch} ← {selectedRun.integrationBranch}
       </Text>
-      {/* Surfaced because a degraded fork means the Forked Lead got a spec-file briefing, which changes how much to trust the handshake. */}
+      {/* Keep the user-facing agent one tap away after returning from its chat to inspect this run. */}
+      {onOpenSupervisor ? (
+        <ActionButton
+          styles={styles}
+          label="Open Supervisor chat"
+          accessibilityLabel={`Open Supervisor chat for ${selectedRun.title}`}
+          onPress={() => onOpenSupervisor(selectedRun.supervisorAgentId)}
+        />
+      ) : null}
+      {/* A degraded fork rebuilds context through stored-spec tools, so the manager should know it lacks inherited session history. */}
       {selectedRun.forkDegradedReason ? (
         <Text style={styles.warningText}>Fork degraded: {selectedRun.forkDegradedReason}</Text>
       ) : null}

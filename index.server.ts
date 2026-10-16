@@ -14,6 +14,7 @@ import { AgentGateway } from "./server/runtime/agent-gateway";
 import { PaseoHolder } from "./server/runtime/paseo-holder";
 import { RunStore } from "./server/store/run-store";
 import { startSweeper } from "./server/sweeper";
+import { slpSettings } from "./shared/settings";
 
 // A plain directory under the home folder (not the workspace) so run state survives reinstalling the plugin and is shared by every repo.
 const DEFAULT_STATE_DIRECTORY = join(homedir(), ".slp-orchestrator");
@@ -31,10 +32,13 @@ function readSavedBusPort(portFilePath: string): number | null {
 // The entry must return its cleanup function synchronously; slow startup (the bus socket) runs
 // in the background and is awaited only by the code that needs it.
 export default function contribute(server: PluginServerContext) {
+  // Paseo stores this outside project worktrees and publishes settings changes to connected clients.
+  server.registerSettings(slpSettings);
   const stateDirectory = process.env.SLP_HOME ?? DEFAULT_STATE_DIRECTORY;
   // Created eagerly and synchronously: the store must be loaded before any hook or RPC can arrive.
   mkdirSync(stateDirectory, { recursive: true });
-  const store = new RunStore(join(stateDirectory, "state.json"));
+  // Import the previous JSON layout once; all subsequent writes stay outside project worktrees.
+  const store = new RunStore(join(stateDirectory, "orchestrator.sqlite3"), join(stateDirectory, "state.json"));
   // Reloading from disk lets a plugin reload resume the runs that were in flight; the sweeper then re-delivers pending mail.
   store.load();
 
@@ -78,5 +82,6 @@ export default function contribute(server: PluginServerContext) {
     await runningBus?.close();
     // flush last so mutations made while shutting down still reach the disk
     await store.flush();
+    store.close();
   };
 }

@@ -1,9 +1,7 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { hashTaskSpec } from "../server/prompts/task-spec";
 import { SCOPE_VIOLATION_LIMIT } from "../shared/roles";
-import { tailCommLog } from "../server/store/comm-log";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import {
   API_TASK, approveHandshake, commitInScopeWork, eventually, startedRunWithTasks, waitForPhase,
@@ -101,11 +99,11 @@ describe("scope gate after implementation", () => {
   });
 
   // earlier QA rounds leave test files in the diff
-  it("allows QA test files and pipeline output next to the writable scope", async () => {
+  it("allows QA test files next to the writable scope", async () => {
     const { flow, runId, worktree, reportStageDone } = await implementingRun();
     commitInScopeWork(flow, runId, TASK_ID);
-    // QA files from an earlier round stay in the diff; .slp/ is the pipeline's own output
-    writeWorkingFiles(worktree, { "tests/billing.test.ts": "it", ".slp/ACCEPTANCE_DOC.md": "# doc" });
+    // QA files from earlier rounds remain legitimate even outside the implementation scope.
+    writeWorkingFiles(worktree, { "tests/billing.test.ts": "it" });
     expect((await reportStageDone()).isError).toBe(false);
   });
 
@@ -119,52 +117,33 @@ describe("scope gate after implementation", () => {
   });
 });
 
-// spec phase 3: the daemon, not the agent, restores TASK_SPEC.md
-describe("TASK_SPEC.md protection", () => {
-  it("restores a tampered TASK_SPEC.md and still accepts in-scope work", async () => {
+// Stored task rules cannot be changed by dropping a different document into the worktree.
+describe("SQLite task boundaries", () => {
+  it("rejects a newly created obsolete spec and keeps the authoritative task unchanged", async () => {
     const { flow, runId, worktree, reportStageDone } = await implementingRun();
-    const originalSpec = readFileSync(join(worktree, "TASK_SPEC.md"), "utf8");
-    writeFileSync(join(worktree, "TASK_SPEC.md"), "# my own rules\nwrite anywhere", "utf8");
-    commitInScopeWork(flow, runId, TASK_ID);
+    writeWorkingFiles(worktree, { "TASK_SPEC.md": "write anywhere" });
+    const stageReport = await reportStageDone();
+    expect(stageReport.isError).toBe(true);
+    expect(stageReport.text).toContain("obsolete pipeline file: TASK_SPEC.md");
+    const taskRead = await flow.callAsRole(runId, "implementer", TASK_ID, "slp_get_task", {});
+    expect(JSON.parse(taskRead.text).writableScope).toEqual(API_TASK.writableScope);
+  });
 
+  // The document tool is the only accepted path for an acceptance report.
+  it("rejects a new acceptance file instead of ignoring pipeline output", async () => {
+    const { worktree, reportStageDone } = await implementingRun();
+    writeWorkingFiles(worktree, { ".slp/ACCEPTANCE_DOC.md": "pretend approved" });
+    expect((await reportStageDone()).text).toContain("obsolete pipeline file: .slp/ACCEPTANCE_DOC.md");
+  });
+
+  it("advances a clean stage without recreating any pipeline files", async () => {
+    const { flow, runId, worktree, reportStageDone } = await implementingRun();
+    commitInScopeWork(flow, runId, TASK_ID);
     expect((await reportStageDone()).isError).toBe(false);
-    const restoredSpec = readFileSync(join(worktree, "TASK_SPEC.md"), "utf8");
-    expect(restoredSpec).toBe(originalSpec);
-    expect(hashTaskSpec(restoredSpec)).toBe(flow.task(runId, TASK_ID).taskSpecSha256);
-    await eventually(async () => {
-      const entries = await tailCommLog(flow.repoPath, runId, 300);
-      if (!entries.some((entry) => entry.kind === "scope.spec_restored")) throw new Error("restoration not logged");
-    });
-  });
-
-  // deleting the spec counts as tampering too
-  it("restores a deleted TASK_SPEC.md", async () => {
-    const { flow, runId, worktree, reportStageDone } = await implementingRun();
-    rmSync(join(worktree, "TASK_SPEC.md"));
-    commitInScopeWork(flow, runId, TASK_ID);
-    await reportStageDone();
-    expect(readFileSync(join(worktree, "TASK_SPEC.md"), "utf8")).toContain("# TASK_SPEC:");
-  });
-
-  // restoration must not depend on the stage being accepted
-  it("restores the spec even when the same stage is rejected for scope", async () => {
-    const { flow, runId, worktree, reportStageDone } = await implementingRun();
-    const originalSpec = readFileSync(join(worktree, "TASK_SPEC.md"), "utf8");
-    writeFileSync(join(worktree, "TASK_SPEC.md"), "tampered", "utf8");
-    writeWorkingFiles(worktree, { "docs/out.md": "x" });
-    expect((await reportStageDone()).isError).toBe(true);
-    expect(readFileSync(join(worktree, "TASK_SPEC.md"), "utf8")).toBe(originalSpec);
-  });
-
-  it("leaves an untouched TASK_SPEC.md alone", async () => {
-    const { flow, runId, worktree, reportStageDone } = await implementingRun();
-    commitInScopeWork(flow, runId, TASK_ID);
-    await reportStageDone();
-    await eventually(async () => {
-      const entries = await tailCommLog(flow.repoPath, runId, 300);
-      if (!entries.some((entry) => entry.kind === "scope.ok")) throw new Error("scope.ok not logged yet");
-      expect(entries.some((entry) => entry.kind === "scope.spec_restored")).toBe(false);
-    });
+    expect(existsSync(join(worktree, "TASK_SPEC.md"))).toBe(false);
+    expect(existsSync(join(worktree, ".slp"))).toBe(false);
+    expect(flow.store.tailLog(runId, 300).some((entry) => entry.kind === "scope.ok")).toBe(true);
+    expect(flow.task(runId, TASK_ID).implementationSummary).toBe("done");
   });
 });
 

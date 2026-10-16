@@ -98,7 +98,8 @@ describe("slp_ask_sibling (worktree A -> worktree B)", () => {
   it("lets verifiers of one task query another task too", async () => {
     const { flow, runId, implementerOf } = await twoTaskRun();
     flow.store.mutate(runId, (run) => {
-      run.agents["qa-x"] = { agentId: "qa-x", role: "qa", taskId: API_TASK.id, token: "t-qa", awaitingTool: null, awaitingSince: null, nudges: 0, createdAt: new Date().toISOString() };
+      // This legacy-style reviewer has no project profile or additional write grant.
+      run.agents["qa-x"] = { agentId: "qa-x", role: "qa", projectRole: null, writeScope: [], leadContinuationTool: null, taskId: API_TASK.id, token: "t-qa", awaitingTool: null, awaitingSince: null, nudges: 0, createdAt: new Date().toISOString() };
     });
     const query = await flow.callAs("qa-x", "slp_ask_sibling", { taskId: UI_TASK.id, question: "q" });
     expect(query.isError).toBe(false);

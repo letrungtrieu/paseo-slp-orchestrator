@@ -1,70 +1,74 @@
-// In-memory run state with atomic JSON persistence. Plugin events are best effort and
-// the subprocess can restart at any time, so every decision the pipeline makes is written here.
-import { readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
-import { StateFileSchema, type AgentRecord, type Run, type StateFile } from "../../shared/state";
+// The pipeline keeps live object identities; SQLite commits each mutation before acknowledging it.
+import type { DatabaseSync } from "node:sqlite";
+import { CommLogEntrySchema, type AgentRecord, type CommLogEntry, type Run } from "../../shared/state";
+import type { CommLogInput } from "./comm-log";
+import { openDatabase, transaction } from "./database";
+import { importLegacyState } from "./legacy-import";
+import { readRuns, writeRun } from "./run-repository";
 
-export interface CallerLookup {
-  run: Run;
-  agentRecord: AgentRecord;
-}
+export interface CallerLookup { run: Run; agentRecord: AgentRecord }
 
 export class RunStore {
-  private stateFile: StateFile = { version: 1, runs: {} };
-  // writes are chained so concurrent mutations never interleave partial files
-  private pendingWrite: Promise<void> = Promise.resolve();
+  private runs: Record<string, Run> = {};
+  private connection: DatabaseSync | null = null;
+  private closed = false;
 
-  constructor(private readonly stateFilePath: string) {}
+  constructor(private readonly databasePath: string, private readonly legacyStatePath?: string) {}
 
-  // Synchronous on purpose: the plugin entry must return its cleanup function immediately,
-  // and every RPC handler needs the state to be present before the first call arrives.
+  private database(): DatabaseSync {
+    // A closed store cannot reopen during a detached shutdown callback.
+    if (this.closed) throw new Error("SLP store is closed");
+    return this.connection ??= openDatabase(this.databasePath);
+  }
+
   load(): void {
-    let rawState: string;
+    const database = this.database();
     try {
-      rawState = readFileSync(this.stateFilePath, "utf8");
-    } catch (readError) {
-      // first start: nothing persisted yet
-      if ((readError as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw readError;
+      if (this.legacyStatePath) importLegacyState(database, this.legacyStatePath);
+      this.runs = Object.fromEntries(readRuns(database).map((run) => [run.id, run]));
+    } catch (loadError) {
+      // A failed plugin contribution has no cleanup callback, so release its connection immediately.
+      database.close();
+      this.connection = null;
+      throw loadError;
     }
-    // a corrupt file must not wipe history silently, so surface the parse error to the caller
-    this.stateFile = StateFileSchema.parse(JSON.parse(rawState));
   }
 
-  list(): Run[] {
-    return Object.values(this.stateFile.runs);
-  }
-
-  find(runId: string): Run | undefined {
-    return this.stateFile.runs[runId];
-  }
+  list(): Run[] { return Object.values(this.runs); }
+  // RPC callers can submit arbitrary IDs; an inherited key is never a persisted run.
+  find(runId: string): Run | undefined { return Object.hasOwn(this.runs, runId) ? this.runs[runId] : undefined; }
 
   require(runId: string): Run {
     const run = this.find(runId);
+    // Unknown run IDs must fail before any SQL or agent action is attempted.
     if (!run) throw new Error(`Unknown SLP run: ${runId}`);
     return run;
   }
 
   insert(run: Run): void {
-    this.stateFile.runs[run.id] = run;
-    this.scheduleWrite();
+    transaction(this.database(), () => writeRun(this.database(), run));
+    this.runs[run.id] = run;
   }
 
-  // Mutations are synchronous on purpose: JS is single threaded, so a mutator can never
-  // observe another flow halfway through its own update.
   mutate<Outcome>(runId: string, mutator: (run: Run) => Outcome): Outcome {
     const run = this.require(runId);
-    const mutationOutcome = mutator(run);
-    run.updatedAt = new Date().toISOString();
-    this.scheduleWrite();
-    return mutationOutcome;
+    const beforeMutation = structuredClone(run);
+    try {
+      const mutationOutcome = mutator(run);
+      run.updatedAt = new Date().toISOString();
+      // Preserve the live run object because in-flight pipeline steps already reference it.
+      transaction(this.database(), () => writeRun(this.database(), run));
+      return mutationOutcome;
+    } catch (mutationError) {
+      Object.assign(run, beforeMutation);
+      throw mutationError;
+    }
   }
 
-  // Bus requests carry only a token; this resolves it to the run and agent that own it.
   findCallerByToken(token: string): CallerLookup | null {
     for (const run of this.list()) {
       for (const agentRecord of Object.values(run.agents)) {
+        // Roles always come from persisted ownership, never an agent's tool arguments.
         if (agentRecord.token === token) return { run, agentRecord };
       }
     }
@@ -79,22 +83,25 @@ export class RunStore {
     return null;
   }
 
-  flush(): Promise<void> {
-    return this.pendingWrite;
+  appendLog(input: CommLogInput): void {
+    const logEntry = { ts: new Date().toISOString(), reason: null, durationMs: null, ...input };
+    this.database().prepare("INSERT INTO comm_logs(run_id, ts, payload) VALUES (?, ?, ?)")
+      .run(logEntry.runId, logEntry.ts, JSON.stringify(logEntry));
   }
 
-  private scheduleWrite(): void {
-    this.pendingWrite = this.pendingWrite.then(() => this.writeAtomically()).catch((writeError) => {
-      // a failed write is logged but must not break the chain for later writes
-      console.error("[slp] failed to persist state", writeError);
-    });
+  tailLog(runId: string, limit: number): CommLogEntry[] {
+    // Query only the requested tail; an old run's entire history need not enter memory.
+    return this.database().prepare("SELECT payload FROM comm_logs WHERE run_id = ? ORDER BY ts DESC, log_id DESC LIMIT ?")
+      .all(runId, Math.max(1, Math.min(1000, Math.trunc(limit))))
+      .reverse().map((logRow) => CommLogEntrySchema.parse(JSON.parse(String(logRow.payload))));
   }
 
-  private async writeAtomically(): Promise<void> {
-    await mkdir(dirname(this.stateFilePath), { recursive: true });
-    const temporaryPath = `${this.stateFilePath}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(this.stateFile, null, 2), "utf8");
-    // rename is atomic on one filesystem, so readers never see a half written state
-    await rename(temporaryPath, this.stateFilePath);
+  // Writes are synchronous and durable, but callers may still await this lifecycle boundary.
+  flush(): Promise<void> { return Promise.resolve(); }
+
+  close(): void {
+    this.connection?.close();
+    this.connection = null;
+    this.closed = true;
   }
 }

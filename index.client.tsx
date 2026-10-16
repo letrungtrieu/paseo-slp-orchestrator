@@ -4,6 +4,7 @@ import { TASK_CARD_KIND, TASK_CARD_VERSION, TaskCardSchema } from "./shared/card
 import { MonitorPanel } from "./client/monitor-panel";
 import { RunControlScreen } from "./client/run-control-screen";
 import { TaskCard } from "./client/task-card";
+import { SlpSettingsScreen } from "./client/settings-screen";
 
 // A single stable id is shared by the screen and the sidebar row so the row can tell when its own screen is the one on display.
 const RUN_SCREEN_ID = "slp";
@@ -24,6 +25,8 @@ function SlpSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
 export default function contribute(client: PluginClientContext) {
   // Each add* returns a remover; collecting them lets the entry cleanup undo everything in one go.
   const removers = [
+    // A native settings entry exposes the same persisted defaults as the Start run form.
+    client.addSettingsScreen({ id: RUN_SCREEN_ID, title: "SLP Orchestrator", icon: "Workflow", Component: SlpSettingsScreen }),
     client.addScreen({ id: RUN_SCREEN_ID, title: "SLP Orchestrator", Component: RunControlScreen }),
     client.addSidebarHeaderItem({ id: RUN_SCREEN_ID, title: "SLP Orchestrator", Component: SlpSidebarItem }),
     client.addWorkspacePanel({

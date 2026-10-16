@@ -11,6 +11,8 @@ export const SLP_ROLES = [
   "qa",
   "security",
   "doc",
+  // Business role IDs live in project configuration; this capability represents a Lead-assigned additional peer.
+  "peer",
 ] as const;
 export const SlpRoleSchema = z.enum(SLP_ROLES);
 export type SlpRole = z.infer<typeof SlpRoleSchema>;
@@ -53,4 +55,5 @@ export const ROLE_LABELS: Record<SlpRole, string> = {
   qa: "QA Peer",
   security: "Security Peer",
   doc: "Doc Peer",
+  peer: "Peer",
 };

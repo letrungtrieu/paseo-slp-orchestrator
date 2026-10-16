@@ -21,7 +21,7 @@ describe("task start failures", () => {
     // occupy the branch name the pipeline will want for the task
     runGitSync(flow.repoPath, ["branch", `slp/${runId.slice(0, 8)}/${API_TASK.id}`]);
     await flow.callAsRole(runId, "supervisor", null, "slp_delegate", { acceptanceCriteria: "Billing works end to end." });
-    await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", { masterSpecPath: "spec.md", tasks: [API_TASK] });
+    await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", { masterSpec: "spec.md", tasks: [API_TASK] });
 
     await waitForPhase(flow, runId, API_TASK.id, "failed");
     expect(flow.task(runId, API_TASK.id).pausedReason).toMatch(/^Could not start:/);
@@ -106,8 +106,10 @@ describe("supervisor guards", () => {
   it("surfaces the progress of a failed start to the supervisor's card", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
+    // A worktree failure is exercised only after the Supervisor has actually delegated the project.
+    await flow.callAsRole(runId, "supervisor", null, "slp_delegate", { acceptanceCriteria: "Deliver billing with independent tasks." });
     runGitSync(flow.repoPath, ["branch", `slp/${runId.slice(0, 8)}/${API_TASK.id}`]);
-    await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", { masterSpecPath: "spec.md", tasks: [API_TASK] });
+    await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", { masterSpec: "spec.md", tasks: [API_TASK] });
     await eventually(() => {
       if (!flow.paseo.cardsForTask(API_TASK.id).some((card) => card.phase === "failed")) throw new Error("no failed card");
     });

@@ -1,36 +1,57 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import type { RunMode } from "../../shared/roles";
+import type { ProviderRole } from "../../shared/settings";
 import { describeRpcError, useRunActions } from "../use-run";
+import { useProviderCatalog } from "../use-provider-catalog";
+import { useProjectPrompts } from "../use-project-prompts";
+import { useSlpSettings } from "../use-slp-settings";
 import type { UiStyles } from "../styles";
 import { ActionButton } from "./action-button";
 import { LabeledInput } from "./labeled-input";
-import { ModeSelector } from "./mode-selector";
-
-// Shown as a placeholder (not a default value) so an empty field really means 'let the daemon pick'.
-const PROVIDER_PLACEHOLDER = "claude/claude-sonnet-5-5";
+import { AgentDefaultSettings } from "./agent-default-settings";
+import { RepositoryFolderPicker } from "./repository-folder-picker";
+import { resolvePermissionModeId, resolveProviderModel, resolveThinkingOptionId } from "../models/provider-selection";
 
 interface StartRunFormProps {
   styles: UiStyles;
   theme: PluginTheme;
-  onRunStarted: (startedRunId: string) => void;
+  onRunStarted: (startedRunId: string, supervisorAgentId: string) => void;
 }
 
 export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps) {
   const { startRun } = useRunActions();
-  // Form state is local: nothing is sent until Start run, so typing never touches the daemon.
+  // Project and session fields belong to this run; reusable agent defaults come from Paseo settings.
   const [repoPath, setRepoPath] = useState("");
   const [runTitle, setRunTitle] = useState("");
   const [baseBranch, setBaseBranch] = useState("");
-  // Starts in STEP_BY_STEP_DEBUG: the safest mode for a first run, and it can be switched later from the run controls.
-  const [runMode, setRunMode] = useState<RunMode>("STEP_BY_STEP_DEBUG");
-  const [supervisorProvider, setSupervisorProvider] = useState("");
-  const [leadProvider, setLeadProvider] = useState("");
-  const [peerProvider, setPeerProvider] = useState("");
+  const providerCatalog = useProviderCatalog(repoPath);
+  const settings = useSlpSettings(providerCatalog);
+  const { mode: runMode, roles: roleSelections } = settings.configuration;
+  const projectPrompts = useProjectPrompts(repoPath);
 
   // Empty optional fields must be omitted, not sent as "", so the daemon applies its defaults.
-  const omitIfBlank = (typedText: string) => (typedText.trim() === "" ? undefined : typedText.trim());
+  const omitIfBlank = (optionalInputText: string) =>
+    optionalInputText.trim() === "" ? undefined : optionalInputText.trim();
+
+  // Resolve the catalog defaults once so the visible selection and submitted settings cannot diverge.
+  const providerModelForRole = (providerRole: ProviderRole) =>
+    resolveProviderModel(roleSelections[providerRole], providerCatalog.modelChoices);
+  const roleProviderModels = {
+    supervisor: providerModelForRole("supervisor"),
+    lead: providerModelForRole("lead"),
+    peer: providerModelForRole("peer"),
+  };
+  const roleThinkingOptionIds = {
+    supervisor: resolveThinkingOptionId(roleSelections.supervisor, roleProviderModels.supervisor),
+    lead: resolveThinkingOptionId(roleSelections.lead, roleProviderModels.lead),
+    peer: resolveThinkingOptionId(roleSelections.peer, roleProviderModels.peer),
+  };
+  const rolePermissionModeIds = {
+    supervisor: resolvePermissionModeId(roleSelections.supervisor, roleProviderModels.supervisor, providerCatalog.permissionModesByProvider),
+    lead: resolvePermissionModeId(roleSelections.lead, roleProviderModels.lead, providerCatalog.permissionModesByProvider),
+    peer: resolvePermissionModeId(roleSelections.peer, roleProviderModels.peer, providerCatalog.permissionModesByProvider),
+  };
 
   // Trimmed here because a pasted path often carries a trailing newline that git would reject.
   const submitRun = () => {
@@ -40,35 +61,60 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
         title: omitIfBlank(runTitle),
         baseBranch: omitIfBlank(baseBranch),
         mode: runMode,
-        supervisorProvider: omitIfBlank(supervisorProvider),
-        leadProvider: omitIfBlank(leadProvider),
-        peerProvider: omitIfBlank(peerProvider),
+        supervisorProvider: roleProviderModels.supervisor?.value,
+        leadProvider: roleProviderModels.lead?.value,
+        peerProvider: roleProviderModels.peer?.value,
+        supervisorThinkingOptionId: roleThinkingOptionIds.supervisor ?? undefined,
+        leadThinkingOptionId: roleThinkingOptionIds.lead ?? undefined,
+        peerThinkingOptionId: roleThinkingOptionIds.peer ?? undefined,
+        supervisorPermissionModeId: rolePermissionModeIds.supervisor ?? undefined,
+        leadPermissionModeId: rolePermissionModeIds.lead ?? undefined,
+        peerPermissionModeId: rolePermissionModeIds.peer ?? undefined,
       },
-      // The new run is selected on success so the operator lands on its gates and tasks immediately.
-      { onSuccess: (startedRun) => onRunStarted(startedRun.runId) },
+      // The Supervisor is the human's control point; pass its id so the client can open that chat after creation.
+      { onSuccess: (startedRun) => onRunStarted(startedRun.runId, startedRun.supervisorAgentId) },
     );
   };
 
   // Daemon-side failures (not a git repo, detached HEAD) arrive as thrown RPC errors and are shown inline under the button.
   const startErrorMessage = describeRpcError(startRun.error);
+  const isStartDisabled =
+    !settings.isEditable ||
+    repoPath.trim() === "" ||
+    providerCatalog.isPending ||
+    providerCatalog.modelChoices.length === 0 ||
+    projectPrompts.isFetching || projectPrompts.isPending || projectPrompts.isError ||
+    startRun.isPending;
   return (
     <View style={styles.card}>
       <Text style={styles.sectionTitle}>Start run</Text>
-      <LabeledInput styles={styles} theme={theme} label="Repository path" value={repoPath} onChangeText={setRepoPath} placeholder="/absolute/path/to/repo" />
+      <RepositoryFolderPicker
+        styles={styles}
+        theme={theme}
+        selectedRepositoryPath={repoPath}
+        onSelectRepositoryPath={setRepoPath}
+      />
+      {repoPath ? (
+        <View style={styles.stack}>
+          {/* Showing the path makes the generated configuration useful before the first agent is created. */}
+          <Text style={styles.mutedText}>{projectPrompts.data
+            ? `Role workflows: ${projectPrompts.data.directory} · ${projectPrompts.data.peers.length} peer roles`
+            : projectPrompts.isError ? "Project role workflows need correction" : "Loading project role workflows..."}</Text>
+          <ActionButton styles={styles} label={projectPrompts.isFetching ? "Loading workflows..." : "Reload role workflows"}
+            disabled={projectPrompts.isFetching} onPress={() => { void projectPrompts.refetch(); }} />
+          {projectPrompts.error ? <Text style={styles.dangerText}>{describeRpcError(projectPrompts.error)}</Text> : null}
+        </View>
+      ) : null}
       <LabeledInput styles={styles} theme={theme} label="Title (optional)" value={runTitle} onChangeText={setRunTitle} />
       <LabeledInput styles={styles} theme={theme} label="Base branch (optional)" value={baseBranch} onChangeText={setBaseBranch} placeholder="main" />
-      <Text style={styles.fieldLabel}>Mode</Text>
-      <ModeSelector styles={styles} selectedMode={runMode} onSelectMode={setRunMode} />
-      <LabeledInput styles={styles} theme={theme} label="Supervisor provider" value={supervisorProvider} onChangeText={setSupervisorProvider} placeholder={PROVIDER_PLACEHOLDER} />
-      <LabeledInput styles={styles} theme={theme} label="Lead provider" value={leadProvider} onChangeText={setLeadProvider} placeholder={PROVIDER_PLACEHOLDER} />
-      <LabeledInput styles={styles} theme={theme} label="Peer provider" value={peerProvider} onChangeText={setPeerProvider} placeholder={PROVIDER_PLACEHOLDER} />
+      <AgentDefaultSettings styles={styles} theme={theme} catalog={providerCatalog} settings={settings} />
       <ActionButton
         styles={styles}
         tone="primary"
         label={startRun.isPending ? "Starting..." : "Start run"}
         accessibilityLabel="Start SLP run"
-        // A blank repo path can never succeed, and double-submit would spawn two runs.
-        disabled={repoPath.trim() === "" || startRun.isPending}
+        // Missing project or model choices are blocked before a run can leave worktrees behind.
+        disabled={isStartDisabled}
         onPress={submitRun}
       />
       {startErrorMessage ? <Text style={styles.dangerText}>{startErrorMessage}</Text> : null}

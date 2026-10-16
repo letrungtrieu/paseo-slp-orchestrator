@@ -1,28 +1,27 @@
 // Phase 3 of the spec: scope gate after implementation, verification rounds, the intra-worktree
-// fix loop with its circuit breaker, and the acceptance document that makes a worktree mergeable.
-import { join } from "node:path";
-import { FIX_LOOP_LIMIT, SCOPE_VIOLATION_LIMIT, type VerifierRole } from "../../shared/roles";
+// fix loop with its circuit breaker, and the persisted acceptance report that makes a worktree mergeable.
+import { FIX_LOOP_LIMIT, SCOPE_VIOLATION_LIMIT } from "../../shared/roles";
 import type { VerdictRecord } from "../../shared/state";
+import { AcceptanceReportSchema, type AcceptanceReport } from "../../shared/reports";
 import { QA_WRITABLE_SCOPE, checkScope } from "../git/scope";
 import { listChangedFiles } from "../git/git";
-import { readAcceptanceDoc, restoreTaskSpecIfTampered } from "../git/worktree";
 import {
-  documentationInvalidMessage,
   documentationRequest,
   fixRequest,
   readyForMergeNotice,
   scopeViolationMessage,
   verificationRequest,
 } from "../prompts/messages";
-import { ACCEPTANCE_DOC_PATH, missingAcceptanceSections } from "../prompts/task-spec";
 import { agentIdForRole, requireTask, tell, updateTask, type PipelineContext } from "./context";
 import { openGateIfRequired } from "./gates";
 import { pauseForCircuitBreaker, pauseForEscalation } from "./task-pause";
 import { ToolError } from "./tool-error";
+import { peerRole } from "../project-prompts/defaults";
+import { reviewerAgentKey, reviewerCapability } from "./peer-assignments";
 
 // ---------- implementation done -> scope gate ----------
 
-export async function onStageDone(ctx: PipelineContext, runId: string, taskId: string): Promise<string> {
+export async function onStageDone(ctx: PipelineContext, runId: string, taskId: string, summary: string): Promise<string> {
   const run = ctx.store.require(runId);
   const task = requireTask(run, taskId);
   // Only the two writing phases can end in a stage report; a late or duplicate call must not restart review.
@@ -30,22 +29,19 @@ export async function onStageDone(ctx: PipelineContext, runId: string, taskId: s
     throw new ToolError(`Stage report not expected now: task is in phase '${task.phase}'.`);
   }
   if (!task.workspace) throw new ToolError("Task has no worktree.");
-  // TASK_SPEC.md is restored by the pipeline itself: asking an agent to undo it adds a round trip for nothing
-  const specRestored = await restoreTaskSpecIfTampered(task.workspace.cwd, run, task);
   const changedFiles = await listChangedFiles(task.workspace.cwd, run.integrationBranch);
   // QA's earlier test files from a previous round remain in the diff, so they stay allowed
   // Scope is judged on the git diff against the integration branch, not on what the agent says it touched, so shell writes are caught too.
   const scopeOutcome = checkScope({ changedFiles, writableScope: task.writableScope, additionalAllowedScope: QA_WRITABLE_SCOPE });
-  const hasViolation = scopeOutcome.outOfScopeFiles.length > 0;
-  if (specRestored) {
-    ctx.logEvent(runId, { taskId, from: "pipeline", to: "implementer", kind: "scope.spec_restored", summary: "TASK_SPEC.md was modified and has been restored", outcome: "blocked" });
-  }
+  // Specs live in SQLite now; writing an obsolete pipeline document is a scope violation.
+  const hasViolation = scopeOutcome.outOfScopeFiles.length > 0 || scopeOutcome.protectedFileTouched.length > 0;
   // Out-of-scope work never reaches QA: rejecting here is cheaper than a full review round on a diff that cannot merge.
   if (hasViolation) return rejectOutOfScope(ctx, runId, taskId, scopeOutcome.outOfScopeFiles, scopeOutcome.protectedFileTouched);
   // A clean pass resets the counter so only consecutive violations trip the pause.
   updateTask(ctx, runId, taskId, (mutableTask) => {
     mutableTask.phase = "verifying";
     mutableTask.scopeViolations = 0;
+    mutableTask.implementationSummary = summary;
   });
   ctx.logEvent(runId, { taskId, from: "pipeline", to: "implementer", kind: "scope.ok", summary: `${changedFiles.length} changed file(s) inside scope`, outcome: "delivered" });
   // The gate is a continuation: we return now and the gate's approval handler resumes verification later.
@@ -63,11 +59,12 @@ function rejectOutOfScope(ctx: PipelineContext, runId: string, taskId: string, o
   updateTask(ctx, runId, taskId, (task) => {
     task.scopeViolations = violationCount;
   });
-  ctx.logEvent(runId, { taskId, from: "pipeline", to: "implementer", kind: "scope.violation", summary: outOfScopeFiles.join(", "), outcome: "blocked", reason: `violation ${violationCount}/${SCOPE_VIOLATION_LIMIT}` });
+  const rejectedFiles = [...outOfScopeFiles, ...protectedFiles];
+  ctx.logEvent(runId, { taskId, from: "pipeline", to: "implementer", kind: "scope.violation", summary: rejectedFiles.join(", "), outcome: "blocked", reason: `violation ${violationCount}/${SCOPE_VIOLATION_LIMIT}` });
   // Repeated violations mean the Implementer is not converging, so escalate to the Master Lead instead of looping forever.
   if (violationCount >= SCOPE_VIOLATION_LIMIT) {
     // the Master Lead must hear about it, otherwise nobody can decide and the task stays paused forever
-    pauseForEscalation(ctx, runId, taskId, `Repeated scope violations: ${outOfScopeFiles.join(", ")}`);
+    pauseForEscalation(ctx, runId, taskId, `Repeated scope violations: ${rejectedFiles.join(", ")}`);
     return "Stage rejected again; the task is paused for the Master Lead.";
   }
   // Thrown (not returned) so the Implementer's tool call is marked as an error and it must fix the diff.
@@ -84,7 +81,7 @@ export async function startVerification(ctx: PipelineContext, runId: string, tas
     return;
   }
   // Parallel wakes everyone at once; sequential wakes only the first and queues the rest.
-  const verifiersToWakeNow: VerifierRole[] = task.verifyParallel ? [...task.verifiers] : [task.verifiers[0]];
+  const verifiersToWakeNow = task.verifyParallel ? [...task.verifiers] : [task.verifiers[0]];
   updateTask(ctx, runId, taskId, (mutableTask) => {
     // Verdicts are per round: clearing them stops a previous round's APPROVED from satisfying this one.
     mutableTask.phase = "verifying";
@@ -94,11 +91,15 @@ export async function startVerification(ctx: PipelineContext, runId: string, tas
   for (const verifierRole of verifiersToWakeNow) await wakeVerifier(ctx, runId, taskId, verifierRole);
 }
 
-async function wakeVerifier(ctx: PipelineContext, runId: string, taskId: string, verifierRole: VerifierRole): Promise<void> {
+async function wakeVerifier(ctx: PipelineContext, runId: string, taskId: string, verifierRole: string): Promise<void> {
   const run = ctx.store.require(runId);
   const task = requireTask(run, taskId);
-  const verificationPrompt = verificationRequest(task, verifierRole, task.fixLoopCount + 1);
-  const existingVerifierId = agentIdForRole(task, verifierRole);
+  const projectReviewer = peerRole(run.promptConfig, verifierRole);
+  const capability = reviewerCapability(task, verifierRole);
+  // The same expertise may be used read-only here and with test-writing access in a different task.
+  const verificationPrompt = verificationRequest(task, capability, task.fixLoopCount + 1);
+  const participantKey = reviewerAgentKey(verifierRole);
+  const existingVerifierId = agentIdForRole(task, participantKey);
   // Verifiers are reused across rounds so they keep their context of what they already flagged.
   if (existingVerifierId) {
     tell(ctx, runId, existingVerifierId, verificationPrompt, { taskId, awaitTool: "slp_verdict", from: "pipeline", summary: `verify round ${task.fixLoopCount + 1}` });
@@ -107,16 +108,21 @@ async function wakeVerifier(ctx: PipelineContext, runId: string, taskId: string,
   if (!task.workspace) throw new Error(`Task '${taskId}' has no worktree`);
   const createdVerifier = await ctx.gateway.createAgent({
     runId,
-    role: verifierRole,
+    role: capability,
+    projectRole: projectReviewer.role,
     taskId,
     provider: run.providers.peer,
+    thinkingOptionId: run.providers.peerThinkingOptionId ?? undefined,
+    permissionModeId: run.providers.peerPermissionModeId ?? undefined,
+    peerWorktreePath: task.workspace.cwd,
     workspaceId: task.workspace.workspaceId,
-    title: `[SLP ${taskId}] ${verifierRole.toUpperCase()}`,
+    // Role and task identity lead the title so parallel reviewers are easy to tell apart.
+    title: `[${projectReviewer.name}] [${task.id} · ${task.title}]`,
     initialPrompt: verificationPrompt,
     awaitTool: "slp_verdict",
   });
   updateTask(ctx, runId, taskId, (mutableTask) => {
-    mutableTask.agentIds[verifierRole] = createdVerifier.agentId;
+    mutableTask.agentIds[participantKey] = createdVerifier.agentId;
   });
 }
 
@@ -124,11 +130,12 @@ export function onVerdict(
   ctx: PipelineContext,
   runId: string,
   taskId: string,
-  verifierRole: VerifierRole,
+  verifierRole: string,
   verdictRecord: VerdictRecord,
 ): string {
   const task = requireTask(ctx.store.require(runId), taskId);
   if (task.phase !== "verifying") throw new ToolError(`Verdict not expected now: task is in phase '${task.phase}'.`);
+  if (!task.verifiers.includes(verifierRole)) throw new ToolError(`Role '${verifierRole}' is not assigned to review this task.`);
   updateTask(ctx, runId, taskId, (mutableTask) => {
     mutableTask.roundVerdicts[verifierRole] = verdictRecord;
   });
@@ -144,7 +151,8 @@ export function onVerdict(
     return "Verdict recorded. The next reviewer was woken. End your turn.";
   }
   // A parallel round waits for every verdict so the Implementer gets all issues in one fix request.
-  const everyVerifierAnswered = updatedTask.verifiers.every((role) => updatedTask.roundVerdicts[role]);
+  // Business role IDs are user-defined; an inherited object property is never an actual review verdict.
+  const everyVerifierAnswered = updatedTask.verifiers.every((role) => Object.hasOwn(updatedTask.roundVerdicts, role));
   const roundRejected = verdictRecord.verdict === "REJECTED";
   if (everyVerifierAnswered || (roundRejected && !updatedTask.verifyParallel)) {
     void closeVerificationRound(ctx, runId, taskId).catch((roundError) => logPipelineError(ctx, runId, taskId, roundError));
@@ -189,7 +197,7 @@ async function afterVerificationPassed(ctx: PipelineContext, runId: string, task
   await startDocumentation(ctx, runId, taskId);
 }
 
-// ---------- acceptance document ----------
+// ---------- acceptance report ----------
 
 export async function startDocumentation(ctx: PipelineContext, runId: string, taskId: string): Promise<void> {
   const run = ctx.store.require(runId);
@@ -198,16 +206,21 @@ export async function startDocumentation(ctx: PipelineContext, runId: string, ta
     mutableTask.phase = "documenting";
   });
   // The doc may be written by a dedicated peer or by the Implementer, which already knows the change.
-  const useDocPeer = task.documentedBy === "doc";
+  const useDocPeer = task.documentedBy !== "implementer";
   const existingDocPeerId = agentIdForRole(task, "doc");
   if (useDocPeer && !existingDocPeerId && task.workspace) {
+    const documentationRole = peerRole(run.promptConfig, task.documentedBy);
     const createdDocPeer = await ctx.gateway.createAgent({
       runId,
       role: "doc",
+      projectRole: documentationRole.role,
       taskId,
       provider: run.providers.peer,
+      thinkingOptionId: run.providers.peerThinkingOptionId ?? undefined,
+      permissionModeId: run.providers.peerPermissionModeId ?? undefined,
+      peerWorktreePath: task.workspace.cwd,
       workspaceId: task.workspace.workspaceId,
-      title: `[SLP ${taskId}] Doc`,
+      title: `[${documentationRole.name}] [${task.id} · ${task.title}]`,
       initialPrompt: documentationRequest(),
       awaitTool: "slp_doc_done",
     });
@@ -217,36 +230,33 @@ export async function startDocumentation(ctx: PipelineContext, runId: string, ta
     // The new peer received the request as its initial prompt, so no extra tell is needed.
     return;
   }
-  const documentWriterId = (useDocPeer ? existingDocPeerId : null) ?? agentIdForRole(task, "implementer");
-  if (!documentWriterId) throw new Error(`Task '${taskId}' has no agent to write the acceptance doc`);
-  tell(ctx, runId, documentWriterId, documentationRequest(), { taskId, awaitTool: "slp_doc_done", from: "pipeline", summary: "write acceptance doc" });
+  const reportAuthorId = (useDocPeer ? existingDocPeerId : null) ?? agentIdForRole(task, "implementer");
+  if (!reportAuthorId) throw new Error(`Task '${taskId}' has no agent to submit the acceptance report`);
+  tell(ctx, runId, reportAuthorId, documentationRequest(), { taskId, awaitTool: "slp_doc_done", from: "pipeline", summary: "submit acceptance report" });
 }
 
-export async function onDocDone(ctx: PipelineContext, runId: string, taskId: string): Promise<string> {
+export async function onDocDone(ctx: PipelineContext, runId: string, taskId: string, report: AcceptanceReport, agentId: string): Promise<string> {
   const task = requireTask(ctx.store.require(runId), taskId);
   if (task.phase !== "documenting" || !task.workspace) {
     throw new ToolError(`Doc report not expected now: task is in phase '${task.phase}'.`);
   }
-  // The acceptance doc lives in the worktree; the pipeline reads the file instead of trusting the agent's claim that it wrote it.
-  const docText = await readAcceptanceDoc(task.workspace.cwd, ACCEPTANCE_DOC_PATH);
-  const missingSections = docText === null ? [] : missingAcceptanceSections(docText);
-  if (docText === null || missingSections.length > 0) {
-    throw new ToolError(documentationInvalidMessage(missingSections));
-  }
+  // Validate content before the same commit both saves the report and makes the task mergeable.
+  const acceptedReport = AcceptanceReportSchema.parse(report);
   updateTask(ctx, runId, taskId, (mutableTask) => {
+    mutableTask.acceptanceReport = { report: acceptedReport, submittedBy: agentId, submittedAt: new Date().toISOString() };
     mutableTask.phase = "ready_for_merge";
   });
-  ctx.logEvent(runId, { taskId, from: "pipeline", to: "master_lead", kind: "task.ready_for_merge", summary: ACCEPTANCE_DOC_PATH, outcome: "delivered" });
+  ctx.logEvent(runId, { taskId, from: "pipeline", to: "master_lead", kind: "task.ready_for_merge", summary: "Acceptance report stored in SQLite", outcome: "delivered" });
   // With a before_merge gate the Master Lead is only told once the human approves, so it cannot merge early.
   if (!openGateIfRequired(ctx, runId, taskId, "before_merge")) notifyMasterLeadReady(ctx, runId, taskId);
-  return "Acceptance doc accepted. The task is ready for merge. End your turn.";
+  return "Acceptance report saved. The task is ready for merge. End your turn.";
 }
 
 export function notifyMasterLeadReady(ctx: PipelineContext, runId: string, taskId: string): void {
   const run = ctx.store.require(runId);
   const task = requireTask(run, taskId);
   if (!task.workspace) return;
-  tell(ctx, runId, run.masterLeadAgentId, readyForMergeNotice(task, join(task.workspace.cwd, ACCEPTANCE_DOC_PATH)), {
+  tell(ctx, runId, run.masterLeadAgentId, readyForMergeNotice(task), {
     taskId,
     awaitTool: "slp_archive_task",
     from: "pipeline",

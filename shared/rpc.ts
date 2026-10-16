@@ -4,6 +4,14 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { RunModeSchema } from "./roles";
 import { CommLogEntrySchema, RunSchema, RunStatusSchema } from "./state";
+import { ProjectRoleSchema } from "./project-prompts";
+
+export const initializeProjectPromptsRpc = defineRpc({
+  name: "slp.project.prompts.init",
+  input: z.object({ repoPath: z.string().trim().min(1) }),
+  // The form only needs discovery metadata; large workflow bodies remain on the daemon.
+  output: z.object({ directory: z.string(), peers: z.array(ProjectRoleSchema.pick({ role: true, name: true, description: true, model: true, thinking: true, sourcePath: true })) }),
+});
 
 // Compact row for the run picker; the full Run is only fetched for the selected run.
 // Carries only what the picker renders, so a 3 s poll of many runs does not ship whole task tables.
@@ -42,11 +50,19 @@ export const startRunRpc = defineRpc({
     repoPath: z.string().min(1),
     title: z.string().optional(),
     baseBranch: z.string().optional(),
-    // STEP_BY_STEP_DEBUG is the safest default for callers that omit the mode, such as the CLI helper.
-    mode: RunModeSchema.default("STEP_BY_STEP_DEBUG"),
+    // Match new installations' autonomous mode even when a CLI caller omits the form settings.
+    mode: RunModeSchema.default("FULL_AUTO"),
     supervisorProvider: z.string().optional(),
     leadProvider: z.string().optional(),
     peerProvider: z.string().optional(),
+    // Thinking choices follow each role's selected model and are omitted when unsupported.
+    supervisorThinkingOptionId: z.string().optional(),
+    leadThinkingOptionId: z.string().optional(),
+    peerThinkingOptionId: z.string().optional(),
+    // Permission modes are provider-native IDs; the client sends only choices from Paseo's catalog.
+    supervisorPermissionModeId: z.string().optional(),
+    leadPermissionModeId: z.string().optional(),
+    peerPermissionModeId: z.string().optional(),
   }),
   output: z.object({
     runId: z.string(),

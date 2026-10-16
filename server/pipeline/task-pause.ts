@@ -59,7 +59,8 @@ const RESUME_INSTRUCTION: Partial<Record<TaskPhase, { awaitTool: string; nextPha
   fixing: { awaitTool: "slp_stage_done", nextPhase: "fixing", hint: "Fix the open review issues, commit, then call slp_stage_done." },
   // 'verifying' resumes as 'fixing': the open review issues are the work, and the next slp_stage_done restarts verification.
   verifying: { awaitTool: "slp_stage_done", nextPhase: "fixing", hint: "Address the open review issues, commit, then call slp_stage_done." },
-  documenting: { awaitTool: "slp_doc_done", nextPhase: "documenting", hint: "Finish .slp/ACCEPTANCE_DOC.md, then call slp_doc_done." },
+  // Resuming documentation must direct the agent to SQLite submission rather than the retired file layout.
+  documenting: { awaitTool: "slp_doc_done", nextPhase: "documenting", hint: "Submit the complete structured acceptance report through slp_doc_done; do not create a document file." },
 };
 
 export function resumeTask(ctx: PipelineContext, runId: string, taskId: string, guidance: string | null): void {

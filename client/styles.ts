@@ -40,6 +40,46 @@ export function createUiStyles(theme: PluginTheme, compact: boolean) {
       paddingVertical: compact ? 10 : 8,
       fontSize: 14,
     },
+    // Select controls keep the same hit area as text inputs while delegating option lists to Paseo's modal.
+    selectButton: {
+      minHeight: compact ? 42 : 38,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      borderRadius: 8,
+      backgroundColor: theme.colors.surface2,
+    },
+    selectButtonText: { color: theme.colors.foreground, fontSize: 14 },
+    selectButtonPlaceholder: { color: theme.colors.foregroundMuted, fontSize: 14 },
+    // Role cards show three controls side by side even on phones; shorter insets leave room for Full Access.
+    denseSelectButton: { minHeight: compact ? 40 : 34, gap: 4, paddingHorizontal: 8, paddingVertical: 6 },
+    denseSelectText: { fontSize: 12 },
+    providerRoleCard: {
+      gap: 6, padding: 8, borderRadius: 8, borderWidth: 1,
+      borderColor: theme.colors.border, backgroundColor: theme.colors.surface2,
+    },
+    // Three related agent settings share one row without forcing long labels to widen their neighbors.
+    providerSettingsRow: { flexDirection: "row", flexWrap: "nowrap", alignItems: "flex-start", gap: 8 },
+    providerSettingColumn: { flex: 1, minWidth: 0 },
+    // Option rows use a full-width press target so long model names remain easy to choose.
+    selectOption: {
+      minHeight: compact ? 48 : 44,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderBottomWidth: 1,
+      borderBottomColor: theme.colors.border,
+    },
+    selectOptionSelected: { backgroundColor: theme.colors.surface2 },
+    selectOptionText: { color: theme.colors.foreground, fontSize: 14, flexShrink: 1 },
     // Wrap instead of overflow so the three mode buttons stack on narrow screens.
     row: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
     stack: { gap: 8 },

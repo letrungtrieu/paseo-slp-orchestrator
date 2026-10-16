@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tailCommLog } from "../server/store/comm-log";
 import { runGitSync } from "./helpers/git-fixture";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { API_TASK, UI_TASK, delegateAndDefineTasks, eventually, startedRunWithTasks } from "./helpers/flow-steps";
@@ -30,20 +29,23 @@ describe("run start (spec phase 1)", () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
     const run = flow.run(runId);
-    const [masterLead, supervisor] = flow.gateway.createdAgents;
+    const [supervisor, masterLead] = flow.gateway.createdAgents;
     expect(masterLead.spec).toMatchObject({ role: "master_lead", workspaceId: run.devWorkspaceId, awaitTool: null });
     expect(supervisor.spec).toMatchObject({ role: "supervisor", workspaceId: run.supervisorWorkspaceId, awaitTool: null });
     // providers come from the run choices
     expect(masterLead.spec.provider).toBe("claude/sonnet");
   });
 
-  // TASK_SPEC.md and .slp/ must never reach a merge commit
-  it("keeps pipeline files out of git through the repo exclude file", async () => {
+  // SQLite metadata must never require changes to the project checkout or its git excludes.
+  it("creates no pipeline documents or git exclude rules", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     await flow.startRun();
     const excludeContent = readFileSync(join(flow.repoPath, ".git", "info", "exclude"), "utf8");
-    expect(excludeContent).toContain(".slp/");
-    expect(excludeContent).toContain("/TASK_SPEC.md");
+    expect(excludeContent).not.toContain(".slp/");
+    // Editable workflow configuration is intentional; runtime metadata still never goes into project files.
+    expect(existsSync(join(flow.repoPath, ".slp/SUPERVISOR.md"))).toBe(true);
+    expect(existsSync(join(flow.repoPath, ".slp/comm-log.jsonl"))).toBe(false);
+    expect(excludeContent).not.toContain("/TASK_SPEC.md");
   });
 
   // starting on a non-repo would fail late and leave a half-created run
@@ -97,11 +99,12 @@ describe("task definition and fork checkpoint (spec phase 2)", () => {
       expect(task.agentIds.forked_lead).toBeTruthy();
       expect(task.agentIds.implementer).toBeTruthy();
       expect(task.workspace?.branch).toBe(`slp/${runId.slice(0, 8)}/${taskId}`);
-      expect(task.taskSpecSha256).toHaveLength(64);
-      // TASK_SPEC.md is placed in the real worktree
-      expect(readFileSync(join(task.workspace!.cwd, "TASK_SPEC.md"), "utf8")).toContain(`(\`${taskId}\`)`);
+      // Task knowledge is returned through the bus without a file in the new worktree.
+      expect(existsSync(join(task.workspace!.cwd, "TASK_SPEC.md"))).toBe(false);
+      const taskRead = await flow.callAsRole(runId, "implementer", taskId, "slp_get_task", {});
+      expect(JSON.parse(taskRead.text)).toMatchObject({ id: taskId, phase: "handshaking" });
     }
-    expect(run.masterSpecPath).toBe(".slp/MASTER_SPEC.md");
+    expect(run.masterSpec).toContain("Billing architecture");
   });
 
   // task branches must fork from dev so diffs against it are the task's own work
@@ -178,7 +181,7 @@ describe("task definition and fork checkpoint (spec phase 2)", () => {
     const flow = await createFlow({ mode: "FULL_AUTO", forker: "unwired" });
     const runId = await startedRunWithTasks(flow);
     await eventually(async () => {
-      const logEntries = await tailCommLog(flow.repoPath, runId, 200);
+      const logEntries = await flow.store.tailLog(runId, 200);
       if (!logEntries.some((entry) => entry.kind === "fork.checkpoint" && entry.outcome === "error")) throw new Error("no degraded checkpoint entry");
     });
   });
@@ -198,8 +201,10 @@ describe("task definition and fork checkpoint (spec phase 2)", () => {
   it("rejects tasks whose writable scopes overlap and registers nothing", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
+    // Enter planning through the real workflow before checking the task split's domain validation.
+    await flow.callAsRole(runId, "supervisor", null, "slp_delegate", { acceptanceCriteria: "Deliver billing with independent tasks." });
     const definition = await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", {
-      masterSpecPath: "spec.md",
+      masterSpec: "spec.md",
       tasks: [
         { id: "a", title: "A", purpose: "p", writableScope: ["src/"] },
         { id: "b", title: "B", purpose: "p", writableScope: ["src/api/"] },
@@ -214,8 +219,9 @@ describe("task definition and fork checkpoint (spec phase 2)", () => {
   it("rejects a duplicated task id and an id that already exists", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
+    await flow.callAsRole(runId, "supervisor", null, "slp_delegate", { acceptanceCriteria: "Deliver billing with independent tasks." });
     const duplicated = await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", {
-      masterSpecPath: "spec.md",
+      masterSpec: "spec.md",
       tasks: [
         { id: "same", title: "A", purpose: "p", writableScope: ["a/"] },
         { id: "same", title: "B", purpose: "p", writableScope: ["b/"] },
@@ -229,7 +235,7 @@ describe("task definition and fork checkpoint (spec phase 2)", () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
     const definition = await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", {
-      masterSpecPath: "spec.md",
+      masterSpec: "spec.md",
       tasks: [{ id: "a", title: "A", purpose: "p", writableScope: [] }],
     });
     expect(definition.text).toContain("Invalid arguments");

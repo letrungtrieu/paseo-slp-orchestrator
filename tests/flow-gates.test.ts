@@ -5,7 +5,7 @@ import { approveGate } from "../server/pipeline/gates";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import {
   API_TASK, approveHandshake, approveVerification, driveToReadyForMerge, eventually, finishImplementation,
-  startedRunWithTasks, waitForPhase, writeAcceptanceDoc,
+  startedRunWithTasks, waitForPhase, COMPLETE_ACCEPTANCE_REPORT,
 } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
@@ -106,8 +106,8 @@ describe("STEP_BY_STEP_DEBUG: each approval resumes exactly its own step", () =>
     await approveVerification(flow, runId, TASK_ID);
     await eventually(() => expect(gateOf()).toMatchObject({ kind: "after_verification" }));
     await approveGate(flow.ctx, runId, TASK_ID);
-    writeAcceptanceDoc(flow, runId, TASK_ID);
-    await flow.callAsRole(runId, "implementer", TASK_ID, "slp_doc_done", {});
+    // The merge gate opens only after the acceptance report has been saved through the tool.
+    await flow.callAsRole(runId, "implementer", TASK_ID, "slp_doc_done", { report: COMPLETE_ACCEPTANCE_REPORT });
 
     expect(flow.task(runId, TASK_ID).phase).toBe("ready_for_merge");
     expect(gateOf()).toMatchObject({ kind: "before_merge" });

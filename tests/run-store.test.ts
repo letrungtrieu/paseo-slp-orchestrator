@@ -1,89 +1,118 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunStore } from "../server/store/run-store";
-import { buildAgentRecord, buildRun } from "./helpers/run-factory";
+import { buildAgentRecord, buildRun, buildTask } from "./helpers/run-factory";
 import { useTemporaryDirectories } from "./helpers/temp-directory";
 
 const createTemporaryDirectory = useTemporaryDirectories();
-
 const openedStores: RunStore[] = [];
 
-// Pending background writes must finish before the directory is removed, otherwise the
-// atomic-write rename races with cleanup and the test fails with ENOTEMPTY.
-afterEach(async () => {
-  await Promise.all(openedStores.splice(0).map((openedStore) => openedStore.flush()));
-});
+// Release SQLite handles before temporary directory cleanup, including on failing assertions.
+afterEach(() => { for (const openedStore of openedStores.splice(0)) openedStore.close(); });
 
-async function newStore(prefix = "store") {
-  const stateDirectory = await createTemporaryDirectory(prefix);
-  const stateFilePath = join(stateDirectory, "nested", "state.json");
-  const store = new RunStore(stateFilePath);
+function openStore(databasePath: string): RunStore {
+  const store = new RunStore(databasePath);
   openedStores.push(store);
-  return { stateFilePath, store };
+  return store;
 }
 
-describe("RunStore persistence", () => {
-  // first plugin start has no state file and must not fail
-  it("starts empty when no state file exists yet", async () => {
-    const { store } = await newStore();
+async function newStore() {
+  const stateDirectory = await createTemporaryDirectory("store");
+  const databasePath = join(stateDirectory, "nested", "orchestrator.sqlite3");
+  return { databasePath, store: openStore(databasePath) };
+}
+
+describe("RunStore SQLite persistence", () => {
+  it("starts empty and creates a genuine SQLite database", async () => {
+    const { store, databasePath } = await newStore();
     store.load();
     expect(store.list()).toEqual([]);
+    expect(readFileSync(databasePath).subarray(0, 15).toString()).toBe("SQLite format 3");
   });
 
-  it("round-trips inserted and mutated runs through the state file", async () => {
-    const { store, stateFilePath } = await newStore();
-    store.insert(buildRun({ id: "run-a" }));
-    store.mutate("run-a", (run) => {
-      run.status = "planning";
-      run.criteria = "criteria text";
-    });
-    await store.flush();
-
-    const reloadedStore = new RunStore(stateFilePath);
+  // Reload through a second connection proves that acknowledgement follows a durable commit.
+  it("round-trips run context, tasks and separately stored reports", async () => {
+    const { store, databasePath } = await newStore();
+    const task = buildTask({ id: "api", acceptanceReport: {
+      report: "Imported historic acceptance text", submittedBy: "legacy-import", submittedAt: "2026-01-01",
+    } });
+    store.insert(buildRun({ tasks: { api: task }, masterSpec: "Architecture and contracts" }));
+    store.mutate("run-1", (run) => { run.status = "planning"; run.criteria = "criteria text"; });
+    const reloadedStore = openStore(databasePath);
     reloadedStore.load();
-    expect(reloadedStore.require("run-a")).toMatchObject({ status: "planning", criteria: "criteria text" });
+    expect(reloadedStore.require("run-1")).toMatchObject({ status: "planning", criteria: "criteria text",
+      masterSpec: "Architecture and contracts", tasks: { api: { acceptanceReport: task.acceptanceReport } } });
   });
 
-  // the state directory may not exist yet and a stale .tmp would break the atomic swap
-  it("creates the parent directory on first write and leaves no temp file behind", async () => {
-    const { store, stateFilePath } = await newStore();
+  it("persists the final state of repeated mutations", async () => {
+    const { store, databasePath } = await newStore();
     store.insert(buildRun());
-    await store.flush();
-    expect(JSON.parse(await readFile(stateFilePath, "utf8")).version).toBe(1);
-    // the atomic write renames the temp file away
-    await expect(readFile(`${stateFilePath}.tmp`, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  // writes are chained, so the last mutation must win on disk
-  it("serialises many concurrent mutations into a consistent final file", async () => {
-    const { store, stateFilePath } = await newStore();
-    store.insert(buildRun());
-    for (let counter = 1; counter <= 25; counter += 1) {
-      store.mutate("run-1", (run) => {
-        run.title = `title-${counter}`;
-      });
+    for (let mutationNumber = 1; mutationNumber <= 25; mutationNumber += 1) {
+      store.mutate("run-1", (run) => { run.title = `title-${mutationNumber}`; });
     }
-    await store.flush();
-    const persistedState = JSON.parse(await readFile(stateFilePath, "utf8"));
-    expect(persistedState.runs["run-1"].title).toBe("title-25");
+    const reloadedStore = openStore(databasePath);
+    reloadedStore.load();
+    expect(reloadedStore.require("run-1").title).toBe("title-25");
   });
 
-  // silently starting empty would wipe the run history
-  it("throws on a file that is not valid JSON instead of silently starting empty", async () => {
-    const { store, stateFilePath } = await newStore();
+  // A rejected mutator must not leave a live value ahead of the database.
+  it("rolls back memory when a mutator throws", async () => {
+    const { store, databasePath } = await newStore();
     store.insert(buildRun());
-    await store.flush();
-    await writeFile(stateFilePath, "{ this is not json", "utf8");
-    expect(() => new RunStore(stateFilePath).load()).toThrow();
+    expect(() => store.mutate("run-1", (run) => { run.title = "partial"; throw new Error("rejected"); })).toThrow("rejected");
+    expect(store.require("run-1").title).toBe("Test run");
+    const reloadedStore = openStore(databasePath);
+    reloadedStore.load();
+    expect(reloadedStore.require("run-1").title).toBe("Test run");
   });
 
-  it("throws on JSON that does not match the state schema", async () => {
-    const { store, stateFilePath } = await newStore();
-    store.insert(buildRun());
-    await store.flush();
-    await writeFile(stateFilePath, JSON.stringify({ version: 2, runs: {} }), "utf8");
-    expect(() => new RunStore(stateFilePath).load()).toThrow();
+  it("rolls back run and task rows together on an SQL failure", async () => {
+    const { store, databasePath } = await newStore();
+    store.insert(buildRun({ tasks: { api: buildTask({ id: "api" }) } }));
+    const database = new DatabaseSync(databasePath);
+    try {
+      // Force failure after the run row has changed, exercising the transaction's partial-write protection.
+      database.exec("CREATE TRIGGER reject_task BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'forced task failure'); END");
+      expect(() => store.mutate("run-1", (run) => {
+        run.title = "partial"; run.tasks.api.purpose = "partial task";
+      })).toThrow("forced task failure");
+      const reloadedStore = openStore(databasePath);
+      reloadedStore.load();
+      expect(reloadedStore.require("run-1").title).toBe("Test run");
+      expect(reloadedStore.require("run-1").tasks.api.purpose).toBe("test purpose");
+      expect(store.require("run-1").title).toBe("Test run");
+    } finally { database.close(); }
+  });
+
+  // Loading bad or newer storage must surface an error, never silently replace history.
+  it("rejects a corrupt SQLite file", async () => {
+    const { store, databasePath } = await newStore();
+    store.load(); store.close();
+    writeFileSync(databasePath, "not a database");
+    expect(() => openStore(databasePath).load()).toThrow();
+  });
+
+  it("rejects an unsupported schema version", async () => {
+    const { store, databasePath } = await newStore();
+    store.load();
+    const database = new DatabaseSync(databasePath);
+    try { database.exec("PRAGMA user_version = 99"); } finally { database.close(); }
+    expect(() => openStore(databasePath).load()).toThrow("Unsupported SLP database version");
+  });
+
+  it("queries only the requested run's bounded audit tail after reload", async () => {
+    const { store, databasePath } = await newStore();
+    store.insert(buildRun()); store.insert(buildRun({ id: "other" }));
+    for (const summary of ["first", "second", "third"]) {
+      store.appendLog({ runId: "run-1", taskId: null, from: "test", to: "pipeline", kind: "test", summary, outcome: "info" });
+    }
+    // Interleaved traffic from another run must not appear in this run's tail.
+    store.appendLog({ runId: "other", taskId: null, from: "test", to: "pipeline", kind: "test", summary: "foreign", outcome: "info" });
+    const reloadedStore = openStore(databasePath);
+    reloadedStore.load();
+    expect(reloadedStore.tailLog("run-1", 2).map((entry) => entry.summary)).toEqual(["second", "third"]);
   });
 });
 

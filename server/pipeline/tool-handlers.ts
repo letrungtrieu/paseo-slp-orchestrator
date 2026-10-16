@@ -24,6 +24,8 @@ import {
 } from "./task-collaboration";
 import { onDocDone, onStageDone, onVerdict } from "./task-execution";
 import { ToolError } from "./tool-error";
+import { listPeerRoles, listTasks, readReport, readRun, readTask } from "./read-tools";
+import { promptProjectPeer, reportProjectPeer, spawnProjectPeer } from "./project-peers";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
 type ToolHandler<Name extends BusToolName> = (ctx: PipelineContext, caller: BusCaller, input: ToolInput<Name>) => string | Promise<string>;
@@ -36,20 +38,29 @@ function requireTaskId(caller: BusCaller): string {
 
 // Mapped type: adding a tool to the catalogue without a handler becomes a compile error rather than a runtime 'unknown tool'.
 const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
+  slp_list_peer_roles: (ctx, caller) => listPeerRoles(ctx, caller),
+  slp_spawn_peer: (ctx, caller, input) => spawnProjectPeer(ctx, caller.runId, input),
+  slp_prompt_peer: (ctx, caller, input) => promptProjectPeer(ctx, caller.runId, input.agentId, input.brief),
+  slp_peer_report: (ctx, caller, input) => reportProjectPeer(ctx, caller, input),
+  // Reads return immediately and do not satisfy the caller's outstanding workflow obligation.
+  slp_get_run: (ctx, caller) => readRun(ctx, caller),
+  slp_list_tasks: (ctx, caller, input) => listTasks(ctx, caller, input),
+  slp_get_task: (ctx, caller, input) => readTask(ctx, caller, input.taskId),
+  slp_get_report: (ctx, caller, input) => readReport(ctx, caller, input.taskId),
   slp_delegate: (ctx, caller, input) => delegate(ctx, caller.runId, input.acceptanceCriteria),
   slp_request_rework: (ctx, caller, input) => requestRework(ctx, caller.runId, input.feedback),
-  slp_present_to_manager: (ctx, caller) => presentToManager(ctx, caller.runId),
-  slp_define_tasks: (ctx, caller, input) => defineTasks(ctx, caller.runId, input.masterSpecPath, input.tasks),
+  slp_present_to_manager: (ctx, caller, input) => presentToManager(ctx, caller.runId, input.report),
+  slp_define_tasks: (ctx, caller, input) => defineTasks(ctx, caller.runId, input.masterSpec, input.tasks),
   slp_consult_peer: (ctx, caller, input) => consultPeer(ctx, caller.runId, caller.agentId, input.taskId, input.question),
   slp_spec_decision: (ctx, caller, input) => specDecision(ctx, caller.runId, input.taskId, input.decision),
   slp_archive_task: (ctx, caller, input) => archiveTask(ctx, caller.runId, input.taskId),
-  slp_report: (ctx, caller, input) => report(ctx, caller.runId, input.summary, input.acceptanceDocPaths),
+  slp_report: (ctx, caller, input) => report(ctx, caller.runId, input.summary),
   slp_submit_plan: (ctx, caller, input) => onPlanSubmitted(ctx, caller.runId, requireTaskId(caller), input),
-  slp_stage_done: (ctx, caller) => onStageDone(ctx, caller.runId, requireTaskId(caller)),
-  slp_doc_done: (ctx, caller) => onDocDone(ctx, caller.runId, requireTaskId(caller)),
+  slp_stage_done: (ctx, caller, input) => onStageDone(ctx, caller.runId, requireTaskId(caller), input.summary),
+  slp_doc_done: (ctx, caller, input) => onDocDone(ctx, caller.runId, requireTaskId(caller), input.report, caller.agentId),
   // The verdict role comes from the authenticated token, never from the arguments, so a reviewer cannot vote as another role.
   slp_verdict: (ctx, caller, input) =>
-    onVerdict(ctx, caller.runId, requireTaskId(caller), caller.role as "qa" | "security", {
+    onVerdict(ctx, caller.runId, requireTaskId(caller), caller.projectRole ?? caller.role, {
       verdict: input.verdict,
       issues: input.issues,
     }),
@@ -59,7 +70,7 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
 };
 
 function describeCall(toolName: string, rawArguments: unknown): string {
-  // Audit lines are truncated so a pasted spec or diff cannot bloat comm-log.jsonl.
+  // Audit summaries are bounded; complete specifications and reports have their own database records.
   const argumentsText = JSON.stringify(rawArguments ?? {});
   return `${toolName} ${argumentsText.length > 240 ? `${argumentsText.slice(0, 240)}…` : argumentsText}`;
 }
@@ -67,6 +78,8 @@ function describeCall(toolName: string, rawArguments: unknown): string {
 // Cleared only after the handler succeeds: a rejected call leaves the debt in place so the sweeper still nudges the agent.
 // A caller that invokes the tool it owes is no longer waiting to be nudged.
 function clearOwedTool(ctx: PipelineContext, caller: BusCaller, toolName: string): void {
+  // Read queries must not rewrite run timestamps or pay a workflow obligation they did not complete.
+  if (ctx.store.require(caller.runId).agents[caller.agentId]?.awaitingTool !== toolName) return;
   ctx.store.mutate(caller.runId, (run: Run) => {
     const agentRecord = run.agents[caller.agentId];
     if (agentRecord && agentRecord.awaitingTool === toolName) agentRecord.awaitingTool = null;
@@ -83,6 +96,7 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
         runId: lookup.run.id,
         agentId: lookup.agentRecord.agentId,
         role: lookup.agentRecord.role,
+        ...(lookup.agentRecord.projectRole ? { projectRole: lookup.agentRecord.projectRole } : {}),
         taskId: lookup.agentRecord.taskId,
       };
     },

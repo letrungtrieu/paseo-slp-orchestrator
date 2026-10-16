@@ -1,7 +1,8 @@
-// Persistent state model of an SLP run. Everything here is plain JSON so it can be written to
-// .slp/state.json and rebuilt after a plugin or daemon restart (events are best effort, state is not).
+// SQLite records use these schemas so restarts and legacy imports restore the same domain model.
 import { z } from "zod";
-import { RunModeSchema, SlpRoleSchema, VerifierRoleSchema } from "./roles";
+import { RunModeSchema, SlpRoleSchema } from "./roles";
+import { StoredAcceptanceReportSchema, StoredPeerReportSchema } from "./reports";
+import { ProjectPromptConfigSchema, ProjectRoleIdSchema } from "./project-prompts";
 
 // Order follows the happy path; paused and failed are side states that any phase can fall into.
 export const TASK_PHASES = [
@@ -49,10 +50,14 @@ export const TaskDefinitionSchema = z.object({
   writableScope: z.array(z.string()).min(1),
   forbidden: z.array(z.string()).default([]),
   // Both reviewers by default; a Lead must opt out explicitly, so skipping review is a deliberate decision.
-  verifiers: z.array(VerifierRoleSchema).default(["qa", "security"]),
+  verifiers: z.array(ProjectRoleIdSchema).default(["qa", "security"]).describe("Project role IDs selected by the Lead to review this task"),
+  // A business role can occupy different assignments on different tasks; YAML does not prescribe its capabilities.
+  implementerRole: ProjectRoleIdSchema.default("implementer").describe("Project role ID for the primary implementation assignment"),
+  reviewerPermissions: z.record(ProjectRoleIdSchema, z.enum(["read-only", "tests"])).default({})
+    .describe("Per-task reviewer access; custom roles default to read-only, QA defaults to tests"),
   verifyParallel: z.boolean().default(true),
   // The Implementer documents by default because it already knows the change; a separate Doc peer costs an extra agent.
-  documentedBy: z.enum(["implementer", "doc"]).default("implementer"),
+  documentedBy: ProjectRoleIdSchema.default("implementer").describe("Use implementer to reuse the primary peer, or a project role ID to spawn a dedicated report author"),
 });
 export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
 
@@ -75,7 +80,7 @@ export const TaskWorkspaceSchema = z.object({
   branch: z.string(),
 });
 
-// Runtime fields all carry defaults, so a state file written by an older plugin version still parses after new fields are added (state file migration).
+// Defaults allow old JSON imports and earlier SQLite snapshots to acquire new runtime fields safely.
 export const TaskSchema = TaskDefinitionSchema.extend({
   phase: TaskPhaseSchema,
   pausedReason: z.string().nullable().default(null),
@@ -92,11 +97,14 @@ export const TaskSchema = TaskDefinitionSchema.extend({
   // verdicts collected for the current verification round only
   roundVerdicts: z.record(z.string(), VerdictRecordSchema).default({}),
   // verifiers still to be woken in a sequential (non parallel) stage
-  verifierQueue: z.array(VerifierRoleSchema).default([]),
+  verifierQueue: z.array(ProjectRoleIdSchema).default([]),
   // Task-level gate: parallel tasks can wait for the human independently of each other.
   gate: GateSchema.nullable().default(null),
-  // Hash of the rendered TASK_SPEC.md, used to detect edits without keeping a copy of the file.
-  taskSpecSha256: z.string().nullable().default(null),
+  // Reports travel through authenticated tools rather than files in the task worktree.
+  implementationSummary: z.string().nullable().default(null),
+  acceptanceReport: StoredAcceptanceReportSchema.nullable().default(null),
+  // Additional expert reports remain available even after the peer or task workspace is archived.
+  peerReports: z.array(StoredPeerReportSchema).default([]),
   updatedAt: z.string(),
 });
 export type Task = z.infer<typeof TaskSchema>;
@@ -105,6 +113,11 @@ export type Task = z.infer<typeof TaskSchema>;
 export const AgentRecordSchema = z.object({
   agentId: z.string(),
   role: SlpRoleSchema,
+  projectRole: z.string().nullable().default(null),
+  // Only additional peers use this explicit grant; primary agents derive access from their pipeline assignment.
+  writeScope: z.array(z.string()).default([]),
+  // A Lead waiting for an extra expert must not be nudged for the workflow tool it will resume afterward.
+  leadContinuationTool: z.string().nullable().default(null),
   taskId: z.string().nullable(),
   token: z.string(),
   // name of the bus tool the agent owes us; used to nudge agents that end a turn without it
@@ -159,6 +172,14 @@ export const ProviderChoicesSchema = z.object({
   supervisor: z.string(),
   lead: z.string(),
   peer: z.string(),
+  // Older saved runs have no reasoning choice, so missing values remain compatible.
+  supervisorThinkingOptionId: z.string().nullable().default(null),
+  leadThinkingOptionId: z.string().nullable().default(null),
+  peerThinkingOptionId: z.string().nullable().default(null),
+  // Missing values in older runs resolve to the provider's unattended mode when new agents are created.
+  supervisorPermissionModeId: z.string().nullable().default(null),
+  leadPermissionModeId: z.string().nullable().default(null),
+  peerPermissionModeId: z.string().nullable().default(null),
 });
 export type ProviderChoices = z.infer<typeof ProviderChoicesSchema>;
 
@@ -173,7 +194,9 @@ export const RunSchema = z.object({
   providers: ProviderChoicesSchema,
   // Null until the Supervisor delegates, so a run in 'initializing' is still a valid stored object.
   criteria: z.string().nullable().default(null),
-  masterSpecPath: z.string().nullable().default(null),
+  masterSpec: z.string().nullable().default(null),
+  // Legacy runs retain built-in defaults; new runs snapshot all project-authored role workflows.
+  promptConfig: ProjectPromptConfigSchema.nullable().default(null),
   supervisorAgentId: z.string(),
   supervisorWorkspaceId: z.string(),
   masterLeadAgentId: z.string(),
@@ -187,6 +210,10 @@ export const RunSchema = z.object({
   // Run-level gate, used only for final_approval; task gates live on the task.
   gate: GateSchema.nullable().default(null),
   finalReport: z.string().nullable().default(null),
+  // Keep the Supervisor's independent assessment alongside the Lead's integration report.
+  supervisorReport: z.string().nullable().default(null),
+  // Lead may consult domain experts before tasks exist; those reports belong to the run itself.
+  peerReports: z.array(StoredPeerReportSchema).default([]),
   forkDegradedReason: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -200,7 +227,7 @@ export const StateFileSchema = z.object({
 });
 export type StateFile = z.infer<typeof StateFileSchema>;
 
-// One line of .slp/comm-log.jsonl (spec section 5, "black box").
+// Audit entries share one SQLite database with the run they describe.
 export const CommLogEntrySchema = z.object({
   ts: z.string(),
   runId: z.string(),

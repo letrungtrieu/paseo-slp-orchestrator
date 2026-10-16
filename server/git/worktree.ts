@@ -1,10 +1,7 @@
 // Paseo workspace/worktree creation for a run: the Supervisor's main checkout, the integration
 // ("dev") worktree and one hidden worktree per task.
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { Run, Task } from "../../shared/state";
 import type { PaseoApi } from "../runtime/paseo-holder";
-import { hashTaskSpec, renderTaskSpec } from "../prompts/task-spec";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -48,42 +45,13 @@ export function taskBranchName(run: Pick<Run, "id">, task: Pick<Task, "id">): st
 
 export async function createTaskWorkspace(paseo: PaseoApi, run: Run, task: Task) {
   // Background (hidden) workspaces only exist in unreleased Paseo, so on 0.11.4 these are visible.
+  // The workspace title labels the peers that share this task's worktree in Paseo's sidebar.
   const createdWorkspace = await createWorktreeWorkspace(
     paseo,
     run.repoPath,
     run.integrationBranch,
     taskBranchName(run, task),
-    `SLP ${task.id}: ${task.title}`,
+    `SLP peers · ${taskBranchName(run, task)}: ${task.title}`,
   );
   return { ...createdWorkspace, branch: taskBranchName(run, task) };
-}
-
-export async function writeTaskSpecFile(taskWorktreePath: string, run: Run, task: Task): Promise<string> {
-  // The spec is rendered from stored task data, so it can be re-created byte for byte if a peer damages it.
-  const taskSpecText = renderTaskSpec(task, run.integrationBranch);
-  await writeFile(join(taskWorktreePath, "TASK_SPEC.md"), taskSpecText, "utf8");
-  return hashTaskSpec(taskSpecText);
-}
-
-// Restores TASK_SPEC.md when a peer changed it, instead of asking the peer to undo the edit.
-export async function restoreTaskSpecIfTampered(taskWorktreePath: string, run: Run, task: Task): Promise<boolean> {
-  let currentText = "";
-  try {
-    currentText = await readFile(join(taskWorktreePath, "TASK_SPEC.md"), "utf8");
-  } catch {
-    // a deleted file counts as tampering too
-  }
-  // Compared by hash (not by diff) so any change, even whitespace, counts and the pipeline, not the agent, undoes it.
-  if (task.taskSpecSha256 && hashTaskSpec(currentText) === task.taskSpecSha256) return false;
-  await writeTaskSpecFile(taskWorktreePath, run, task);
-  return true;
-}
-
-export async function readAcceptanceDoc(taskWorktreePath: string, relativeDocPath: string): Promise<string | null> {
-  try {
-    // A missing doc returns null instead of throwing so the caller can ask for it with a clear message.
-    return await readFile(join(taskWorktreePath, relativeDocPath), "utf8");
-  } catch {
-    return null;
-  }
 }

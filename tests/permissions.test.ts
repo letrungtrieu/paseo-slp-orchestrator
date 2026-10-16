@@ -37,9 +37,10 @@ describe("implementer file writes", () => {
     expect(decision).toMatchObject({ message: expect.stringContaining("slp_escalate") });
   });
 
-  it("may write only the acceptance doc while documenting", () => {
+  // Documentation now submits structured data, so the phase never unlocks file writes.
+  it("stays read-only while documenting", () => {
     const documenting = contextFor("implementer", "documenting");
-    expect(isAllowed(decidePermission(fileWriteRequest(".slp/ACCEPTANCE_DOC.md"), documenting))).toBe(true);
+    expect(isAllowed(decidePermission(fileWriteRequest(".slp/ACCEPTANCE_DOC.md"), documenting))).toBe(false);
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), documenting))).toBe(false);
   });
 });
@@ -65,17 +66,18 @@ describe("other roles' file writes", () => {
     }
   });
 
-  // the doc peer exists only to produce .slp/ACCEPTANCE_DOC.md
-  it("lets the doc peer write only the acceptance doc", () => {
+  // The Doc Peer collects evidence and submits it through the authenticated report tool.
+  it("keeps the doc peer read-only", () => {
     const docContext = contextFor("doc", "documenting");
-    expect(isAllowed(decidePermission(fileWriteRequest(".slp/ACCEPTANCE_DOC.md"), docContext))).toBe(true);
+    expect(isAllowed(decidePermission(fileWriteRequest(".slp/ACCEPTANCE_DOC.md"), docContext))).toBe(false);
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), docContext))).toBe(false);
   });
 
   it("lets the master lead write anywhere inside its checkout", () => {
     const masterLead = contextFor("master_lead", null);
     expect(isAllowed(decidePermission(fileWriteRequest("anything/at/all.md"), masterLead))).toBe(true);
-    expect(isAllowed(decidePermission(fileWriteRequest(`${WORKTREE}/.slp/MASTER_SPEC.md`), masterLead))).toBe(true);
+    // Reserved names stay blocked even for the owner of the integration checkout.
+    expect(isAllowed(decidePermission(fileWriteRequest(`${WORKTREE}/.slp/MASTER_SPEC.md`), masterLead))).toBe(false);
   });
 });
 
@@ -214,5 +216,21 @@ describe("extraction helpers", () => {
   it("returns null when a request has no command", () => {
     expect(extractShellCommand(permissionRequest({ name: "Bash", input: {} }))).toBeNull();
     expect(extractShellCommand(shellRequest("ls"))).toBe("ls");
+  });
+});
+
+describe("Lead-assigned additional peer access", () => {
+  it("keeps the default additional assignment read-only even during coding", () => {
+    const context = { ...contextFor("peer", "implementing"), writableScope: [] };
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), context))).toBe(false);
+    expect(isAllowed(decidePermission(shellRequest("git add -A"), context))).toBe(false);
+  });
+
+  // The Lead's explicit grant is scoped and still subject to the task's coding phase.
+  it("allows granted task files only during implementing or fixing", () => {
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("peer", "implementing")))).toBe(true);
+    expect(isAllowed(decidePermission(fileWriteRequest("docs/a.md"), contextFor("peer", "implementing")))).toBe(false);
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("peer", "verifying")))).toBe(false);
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("peer", null)))).toBe(false);
   });
 });

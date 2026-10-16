@@ -5,8 +5,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import type { TaskPhase } from "../../shared/state";
-import { QA_WRITABLE_SCOPE, matchesAnyScope } from "../git/scope";
-import { ACCEPTANCE_DOC_PATH } from "../prompts/task-spec";
+import { PROTECTED_TASK_FILES, QA_WRITABLE_SCOPE, matchesAnyScope } from "../git/scope";
 
 export interface PermissionContext {
   role: SlpRole;
@@ -63,6 +62,8 @@ export function extractShellCommand(request: AgentPermissionRequest): string | n
 }
 
 function roleMayWritePath(context: PermissionContext, relativePath: string): boolean {
+  // Even a Lead uses tools for pipeline documents; these filenames belong to the retired storage layout.
+  if ((PROTECTED_TASK_FILES as readonly string[]).includes(relativePath)) return false;
   switch (context.role) {
     case "master_lead":
       // the Master Lead owns its whole checkout (integration branch)
@@ -71,14 +72,17 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
       // Only the two coding phases open the task's writable scope; in the handshake the Implementer is read-only on purpose.
       const writablePhase = context.taskPhase === "implementing" || context.taskPhase === "fixing";
       if (writablePhase) return matchesAnyScope(relativePath, context.writableScope);
-      // the acceptance doc is the only file the Implementer may write while documenting
-      return context.taskPhase === "documenting" && relativePath === ACCEPTANCE_DOC_PATH;
+      // Documentation is now a report submission, so it grants no extra filesystem write access.
+      return false;
     }
+    case "peer":
+      // Extra domain peers follow the same coding gate, with an empty scope for read-only assignments.
+      return (context.taskPhase === "implementing" || context.taskPhase === "fixing") && matchesAnyScope(relativePath, context.writableScope);
     // QA may add tests only inside the test scope and only while verifying, so it cannot patch the code it is judging.
     case "qa":
       return context.taskPhase === "verifying" && matchesAnyScope(relativePath, QA_WRITABLE_SCOPE);
     case "doc":
-      return relativePath === ACCEPTANCE_DOC_PATH;
+      return false;
     default:
       return false;
   }
@@ -112,7 +116,7 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
     return { behavior: "deny", message: "Pushing is not part of the pipeline." };
   }
   const mayMutate = context.role === "master_lead" || context.role === "qa" || (
-    context.role === "implementer" && (context.taskPhase === "implementing" || context.taskPhase === "fixing" || context.taskPhase === "documenting")
+    (context.role === "implementer" || (context.role === "peer" && context.writableScope.length > 0)) && (context.taskPhase === "implementing" || context.taskPhase === "fixing")
   );
   if (!mayMutate && MUTATING_SHELL.test(shellCommand)) {
     return { behavior: "deny", message: `Command looks mutating but ${context.role} is read-only right now.` };

@@ -33,18 +33,19 @@ export interface Flow {
   paseo: FakePaseo;
   repoPath: string;
   baseBranch: string;
+  databasePath: string;
   startRun(): Promise<string>;
   run(runId: string): Run;
   task(runId: string, taskId: string): Task;
-  agentId(runId: string, role: SlpRole, taskId?: string | null): string;
+  agentId(runId: string, role: string, taskId?: string | null): string;
   callAs(agentId: string, toolName: string, toolArguments: unknown): Promise<BusToolOutcome>;
-  callAsRole(runId: string, role: SlpRole, taskId: string | null, toolName: string, toolArguments: unknown): Promise<BusToolOutcome>;
+  callAsRole(runId: string, role: string, taskId: string | null, toolName: string, toolArguments: unknown): Promise<BusToolOutcome>;
   mailTo(runId: string, agentId: string): MailboxMessage[];
   deliverMail(runId: string): Promise<number>;
 }
 
-// A forker that is registered but cannot fork: the degraded (spec-file) path.
-// Models a provider whose adapter exists but returns null, exercising the degraded spec-file path.
+// A forker that is registered but cannot fork: the degraded (stored-spec) path.
+// Models a provider whose adapter exists but returns null, exercising the degraded stored-spec path.
 const UNWIRED_CLAUDE_FORKER: SessionForker = { family: "claude", bind: async () => null };
 const THROWING_CLAUDE_FORKER: SessionForker = {
   family: "claude",
@@ -65,9 +66,8 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
   const createdStores: RunStore[] = [];
 
   afterEach(async () => {
-    // Flushing first matters because comm-log and state writes are detached; deleting the temp dir under them would flake.
-    // let detached comm-log and state writes land before the directories disappear
-    await Promise.all(createdStores.splice(0).map((createdStore) => createdStore.flush()));
+    // Close SQLite before temporary directories disappear, including their WAL and shared-memory files.
+    for (const createdStore of createdStores.splice(0)) createdStore.close();
     vi.restoreAllMocks();
   });
 
@@ -75,7 +75,8 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
     const rootDirectory = await createTemporaryDirectory("flow");
     // A real git repository is needed because the scope gate shells out to git diff.
     const { repoPath, baseBranch } = createGitRepository(join(rootDirectory, "repo"));
-    const store = new RunStore(join(rootDirectory, "state", "state.json"));
+    const databasePath = join(rootDirectory, "state", "orchestrator.sqlite3");
+    const store = new RunStore(databasePath);
     createdStores.push(store);
     const gateway = new FakeAgentGateway(store);
     const paseo = new FakePaseo(join(rootDirectory, "worktrees"));
@@ -90,10 +91,11 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
     // The dispatcher is the same one the HTTP bus uses, so tests exercise role checks and audit logging too.
     const dispatcher = createBusDispatcher(ctx);
 
-    const findRecord = (runId: string, role: SlpRole, taskId: string | null) => {
-      const matchingRecord = Object.values(store.require(runId).agents).find(
-        (agentRecord) => agentRecord.role === role && agentRecord.taskId === taskId,
-      );
+    const findRecord = (runId: string, role: string, taskId: string | null) => {
+      const taskAgents = Object.values(store.require(runId).agents).filter((agentRecord) => agentRecord.taskId === taskId);
+      // Prefer the business identity when several reviewers share the same runtime capability.
+      const matchingRecord = taskAgents.find((agentRecord) => agentRecord.projectRole === role)
+        ?? taskAgents.find((agentRecord) => agentRecord.role === role);
       if (!matchingRecord) throw new Error(`No ${role} agent for task ${taskId} in run ${runId}`);
       return matchingRecord;
     };
@@ -101,11 +103,12 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
     const callerOf = (agentId: string): BusCaller => {
       const lookup = store.findAgent(agentId);
       if (!lookup) throw new Error(`Unknown agent ${agentId}`);
-      return { runId: lookup.run.id, agentId, role: lookup.agentRecord.role, taskId: lookup.agentRecord.taskId };
+      return { runId: lookup.run.id, agentId, role: lookup.agentRecord.role, taskId: lookup.agentRecord.taskId,
+        ...(lookup.agentRecord.projectRole ? { projectRole: lookup.agentRecord.projectRole } : {}) };
     };
 
     return {
-      ctx, store, gateway, paseo, repoPath, baseBranch,
+      ctx, store, gateway, paseo, repoPath, baseBranch, databasePath,
       startRun: async () => {
         const startedRun = await startRun(ctx, {
           repoPath, baseBranch, mode: options.mode, title: "Flow test",

@@ -1,17 +1,18 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { RunStore } from "../server/store/run-store";
 import { approveMain, approveRunGate } from "../server/pipeline/run-lifecycle";
 import { useFlowFixture, type Flow } from "./helpers/flow-fixture";
 import {
-  API_TASK, UI_TASK, COMPLETE_ACCEPTANCE_DOC, approveHandshake, approveVerification, driveToReadyForMerge,
-  finishImplementation, startedRunWithTasks, waitForPhase, writeAcceptanceDoc,
+  API_TASK, UI_TASK, COMPLETE_ACCEPTANCE_REPORT, approveHandshake, approveVerification, driveToReadyForMerge,
+  finishImplementation, startedRunWithTasks, waitForPhase,
 } from "./helpers/flow-steps";
 import { mergeBranchInto, runGitSync } from "./helpers/git-fixture";
 
 const createFlow = useFlowFixture();
 
-// builds a task that passed verification and now owes the acceptance doc
+// Build a task whose next obligation is a structured acceptance report.
 async function documentingRun() {
   const flow = await createFlow({ mode: "FULL_AUTO" });
   const runId = await startedRunWithTasks(flow, [API_TASK]);
@@ -20,7 +21,7 @@ async function documentingRun() {
   await finishImplementation(flow, runId, API_TASK.id);
   await approveVerification(flow, runId, API_TASK.id);
   await waitForPhase(flow, runId, API_TASK.id, "documenting");
-  const reportDocDone = () => flow.callAsRole(runId, "implementer", API_TASK.id, "slp_doc_done", {});
+  const reportDocDone = (report: unknown = COMPLETE_ACCEPTANCE_REPORT) => flow.callAsRole(runId, "implementer", API_TASK.id, "slp_doc_done", { report });
   return { flow, runId, reportDocDone };
 }
 
@@ -30,51 +31,53 @@ async function mergeAndArchive(flow: Flow, runId: string, taskId: string) {
   return flow.callAsRole(runId, "master_lead", null, "slp_archive_task", { taskId });
 }
 
-describe("acceptance document (spec phase 3, step 4)", () => {
-  // the daemon checks the doc exists instead of trusting the agent
-  it("rejects slp_doc_done when the file does not exist", async () => {
-    const { reportDocDone, flow, runId } = await documentingRun();
-    const docReport = await reportDocDone();
+describe("acceptance reports in SQLite", () => {
+  it("rejects an empty completion acknowledgement", async () => {
+    const { flow, runId } = await documentingRun();
+    const docReport = await flow.callAsRole(runId, "implementer", API_TASK.id, "slp_doc_done", {});
     expect(docReport.isError).toBe(true);
-    expect(docReport.text).toContain("(file not found)");
+    expect(docReport.text).toContain("Invalid arguments");
     expect(flow.task(runId, API_TASK.id).phase).toBe("documenting");
   });
 
-  // the error names the missing sections so the agent can fix them in one go
-  it("rejects an incomplete document and names the missing sections", async () => {
+  // Missing evidence is rejected before either the phase or the saved report changes.
+  it("rejects an incomplete report and identifies missing fields", async () => {
     const { reportDocDone, flow, runId } = await documentingRun();
-    writeAcceptanceDoc(flow, runId, API_TASK.id, "## Summary\nx\n## Changed files\ny");
-    const docReport = await reportDocDone();
+    const docReport = await reportDocDone({ summary: "done", changedFiles: [] });
     expect(docReport.isError).toBe(true);
-    expect(docReport.text).toContain("Technical decisions, QA results, Security review");
-    expect(docReport.text).not.toContain("Summary,");
+    expect(docReport.text).toContain("qaResults");
+    expect(docReport.text).toContain("securityReview");
+    expect(flow.task(runId, API_TASK.id).acceptanceReport).toBeNull();
   });
 
-  // spec phase 3 step 4: valid doc -> ready for merge and the Lead is told
-  it("accepts a complete document and notifies the master lead", async () => {
+  it("persists a complete report with its authenticated author and notifies the Lead", async () => {
     const { reportDocDone, flow, runId } = await documentingRun();
-    writeAcceptanceDoc(flow, runId, API_TASK.id, COMPLETE_ACCEPTANCE_DOC);
-    const docReport = await reportDocDone();
-
-    expect(docReport.isError).toBe(false);
-    expect(flow.task(runId, API_TASK.id).phase).toBe("ready_for_merge");
-    const readyMail = flow.mailTo(runId, flow.run(runId).masterLeadAgentId).find((message) => message.text.includes("READY FOR MERGE"))!;
+    expect((await reportDocDone()).isError).toBe(false);
+    const readyMail = flow.mailTo(runId, flow.run(runId).masterLeadAgentId)
+      .find((message) => message.text.includes("READY FOR MERGE"))!;
     expect(readyMail.awaitTool).toBe("slp_archive_task");
-    expect(readyMail.text).toContain(join(flow.task(runId, API_TASK.id).workspace!.cwd, ".slp/ACCEPTANCE_DOC.md"));
-    expect(readyMail.text).toContain(flow.task(runId, API_TASK.id).workspace!.branch);
+    expect(readyMail.text).toContain("slp_get_report");
+    expect(readyMail.text).toContain(API_TASK.id);
+    const reloadedStore = new RunStore(flow.databasePath);
+    try {
+      // A fresh connection proves report content and merge readiness survive a plugin restart.
+      reloadedStore.load();
+      expect(reloadedStore.require(runId).tasks[API_TASK.id]).toMatchObject({ phase: "ready_for_merge",
+        acceptanceReport: { report: COMPLETE_ACCEPTANCE_REPORT, submittedBy: flow.agentId(runId, "implementer", API_TASK.id) } });
+    } finally { reloadedStore.close(); }
+    expect(existsSync(join(flow.task(runId, API_TASK.id).workspace!.cwd, ".slp"))).toBe(false);
   });
 
-  it("lets a retry succeed after the first attempt was refused", async () => {
-    const { reportDocDone, flow, runId } = await documentingRun();
-    expect((await reportDocDone()).isError).toBe(true);
-    writeAcceptanceDoc(flow, runId, API_TASK.id);
+  it("allows a corrected report after a validation failure", async () => {
+    const { reportDocDone } = await documentingRun();
+    expect((await reportDocDone({ summary: "incomplete" })).isError).toBe(true);
     expect((await reportDocDone()).isError).toBe(false);
   });
 
-  it("refuses slp_doc_done outside the documenting phase", async () => {
+  it("refuses a report outside the documenting phase", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await startedRunWithTasks(flow, [API_TASK]);
-    const docReport = await flow.callAsRole(runId, "implementer", API_TASK.id, "slp_doc_done", {});
+    const docReport = await flow.callAsRole(runId, "implementer", API_TASK.id, "slp_doc_done", { report: COMPLETE_ACCEPTANCE_REPORT });
     expect(docReport.text).toContain("Doc report not expected now");
   });
 });
@@ -130,13 +133,13 @@ describe("merge, archive and reporting (spec phases 4-6)", () => {
   // the Supervisor verifies independently, using the diff command in the mail
   it("slp_report goes to the supervisor and moves the run to 'reporting'", async () => {
     const { flow, runId } = await allTasksReady();
-    const report = await flow.callAsRole(runId, "master_lead", null, "slp_report", { summary: "All green", acceptanceDocPaths: ["a/.slp/ACCEPTANCE_DOC.md"] });
+    const report = await flow.callAsRole(runId, "master_lead", null, "slp_report", { summary: "All green" });
 
     expect(report.isError).toBe(false);
     expect(flow.run(runId)).toMatchObject({ status: "reporting", finalReport: "All green" });
     const supervisorMail = flow.mailTo(runId, flow.run(runId).supervisorAgentId).at(-1)!;
     expect(supervisorMail.text).toContain("All green");
-    expect(supervisorMail.text).toContain("a/.slp/ACCEPTANCE_DOC.md");
+    expect(supervisorMail.text).toContain("slp_get_report(taskId)");
     expect(supervisorMail.text).toContain(`git diff main..${flow.run(runId).integrationBranch}`);
   });
 
@@ -159,7 +162,7 @@ describe("merge, archive and reporting (spec phases 4-6)", () => {
     const presentation = await flow.callAsRole(runId, "supervisor", null, "slp_present_to_manager", { report: "Verified in Vietnamese" });
 
     expect(presentation.isError).toBe(false);
-    expect(flow.run(runId).status).toBe("awaiting_user");
+    expect(flow.run(runId)).toMatchObject({ status: "awaiting_user", supervisorReport: "Verified in Vietnamese" });
     expect(flow.run(runId).gate).toMatchObject({ kind: "final_approval" });
   });
 });
@@ -195,6 +198,13 @@ describe("final approval merges into the base branch", () => {
     // pipeline files never reached the merge
     expect(runGitSync(flow.repoPath, ["ls-files"])).not.toContain("TASK_SPEC.md");
     expect(runGitSync(flow.repoPath, ["ls-files"])).not.toContain(".slp/");
+    // Even ignored/untracked pipeline debris must stay absent throughout a complete successful run.
+    expect(existsSync(join(flow.repoPath, ".slp/comm-log.jsonl"))).toBe(false);
+    expect(existsSync(join(flow.repoPath, ".slp/ACCEPTANCE_DOC.md"))).toBe(false);
+    for (const task of Object.values(flow.run(runId).tasks)) {
+      expect(existsSync(join(task.workspace!.cwd, ".slp"))).toBe(false);
+      expect(existsSync(join(task.workspace!.cwd, "TASK_SPEC.md"))).toBe(false);
+    }
   });
 
   it("refuses to merge before the supervisor presented the result", async () => {

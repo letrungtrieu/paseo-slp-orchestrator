@@ -1,8 +1,6 @@
 // Thin git wrappers used by the pipeline. All calls go through execCommand so the daemon's
 // process helpers handle quoting and platform differences.
 import { execCommand } from "@getpaseo/plugin/server";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
 
 export async function runGit(workingDirectory: string, gitArguments: string[]): Promise<string> {
   // Goes through execCommand rather than child_process so quoting and platform differences stay the daemon's problem.
@@ -59,29 +57,6 @@ export async function listChangedFiles(
     await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
   );
   return [...new Set([...committedPaths, ...uncommittedPaths])];
-}
-
-// Keeps pipeline files (TASK_SPEC.md, .slp/) out of `git add -A` so they never reach a merge.
-export async function excludeFromGit(workingDirectory: string, patterns: string[]): Promise<void> {
-  // Uses info/exclude (per clone, never committed) so the ignore rule does not itself show up in the diff.
-  const excludeRelativePath = (
-    await runGit(workingDirectory, ["rev-parse", "--git-path", "info/exclude"])
-  ).trim();
-  const excludeFilePath = isAbsolute(excludeRelativePath)
-    ? excludeRelativePath
-    : join(workingDirectory, excludeRelativePath);
-  await mkdir(dirname(excludeFilePath), { recursive: true });
-  let existingExcludes = "";
-  try {
-    existingExcludes = await readFile(excludeFilePath, "utf8");
-  } catch {
-    // no exclude file yet; it is created by the append below
-  }
-  // Idempotent: a second run on the same repo must not append duplicate patterns.
-  const missingPatterns = patterns.filter((pattern) => !existingExcludes.split("\n").includes(pattern));
-  if (missingPatterns.length > 0) {
-    await appendFile(excludeFilePath, `${missingPatterns.join("\n")}\n`, "utf8");
-  }
 }
 
 // Final approval: merge the integration branch into the base branch checked out in the repo.

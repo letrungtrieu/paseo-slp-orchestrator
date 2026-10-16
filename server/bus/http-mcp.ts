@@ -10,6 +10,7 @@ export interface BusCaller {
   runId: string;
   agentId: string;
   role: SlpRole;
+  projectRole?: string | null;
   taskId: string | null;
 }
 

@@ -42,7 +42,8 @@ export async function handlePermissionRequest(
     role: agentRecord.role,
     taskPhase: task?.phase ?? null,
     agentCwd: workingDirectoryOf(run, agentRecord),
-    writableScope: task?.writableScope ?? [],
+    // Additional peers get only the explicit grant made at spawn; a business role name never implies write access.
+    writableScope: agentRecord.role === "peer" ? agentRecord.writeScope : task?.writableScope ?? [],
   });
   try {
     await ctx.gateway.respondToPermission(agentId, request.id, buildResponse(request, decision));

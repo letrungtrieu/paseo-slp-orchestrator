@@ -27,6 +27,9 @@ const tick = () => vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
 async function sweptRun() {
   const flow = await createFlow({ mode: "FULL_AUTO" });
   const runId = await flow.startRun();
+  // Isolate sweep delivery from the separate bootstrap greeting turn.
+  flow.gateway.markEveryAgentIdle();
+  flow.gateway.prompts.length = 0;
   stopSweeper = startSweeper(flow.ctx);
   return { flow, runId, masterLeadId: flow.run(runId).masterLeadAgentId };
 }

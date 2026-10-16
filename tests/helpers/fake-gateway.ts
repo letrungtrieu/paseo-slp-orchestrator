@@ -3,6 +3,7 @@
 import type { AgentLiveStatus, CreateAgentSpec, TurnResult } from "../../server/runtime/agent-gateway";
 import type { RunStore } from "../../server/store/run-store";
 import type { AgentRecord } from "../../shared/state";
+import { resolveAgentSettings } from "../../server/project-prompts/agent-settings";
 import { buildAgentRecord } from "./run-factory";
 
 type FakeAgentStatus = AgentLiveStatus["status"];
@@ -68,11 +69,16 @@ export class FakeAgentGateway {
 
   // ---- AgentGateway surface ----
   async createAgent(spec: CreateAgentSpec): Promise<AgentRecord> {
+    // Mirror the real gateway's project overrides so flow tests observe the effective provider used for forks.
+    spec = { ...spec, ...resolveAgentSettings(this.store.require(spec.runId).promptConfig, spec.role, spec.projectRole, spec) };
     this.agentCounter += 1;
     const agentId = `${spec.role}-g${this.instanceNumber}-${this.agentCounter}`;
     const agentRecord = buildAgentRecord({
       agentId,
       role: spec.role,
+      projectRole: spec.projectRole ?? null,
+      writeScope: spec.writeScope ?? [],
+      leadContinuationTool: spec.leadContinuationTool ?? null,
       taskId: spec.taskId,
       token: `token-${agentId}`,
       awaitingTool: spec.awaitTool,

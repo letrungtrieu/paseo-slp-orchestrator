@@ -2,10 +2,12 @@
 // private bus identity, prompt them, read their live status and archive them.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
+import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import type { AgentRecord } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
 import { systemPromptFor } from "../prompts/system-prompts";
+import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import type { RunStore } from "../store/run-store";
 import type { PaseoHolder } from "./paseo-holder";
 
@@ -19,11 +21,21 @@ export interface AgentLiveStatus {
 export interface CreateAgentSpec {
   runId: string;
   role: SlpRole;
+  projectRole?: string;
+  writeScope?: string[];
+  leadContinuationTool?: string | null;
   taskId: string | null;
   provider: string;
+  // Parent links organize the Paseo sidebar independently from the chosen worktree placement.
+  parentAgentId?: string;
+  // A role's selected reasoning option must survive every agent creation in that role.
+  thinkingOptionId?: string;
+  permissionModeId?: string;
+  // Peer labels use the task worktree path so the same group can span several peer agents.
+  peerWorktreePath?: string;
   workspaceId: string;
   title: string;
-  initialPrompt: string;
+  initialPrompt?: string;
   awaitTool: string | null;
   // provider-native settings, e.g. the Claude session fork flags
   extraOptions?: Record<string, unknown>;
@@ -35,10 +47,11 @@ export interface TurnResult {
   error: string | null;
 }
 
-// Permission modes that keep the plugin's permission hook in the loop (see permissions.ts).
-export function permissionModeFor(provider: string): string | undefined {
-  // Only Claude ids are known to be valid here; other providers keep their own default mode instead of a guessed id Paseo would reject.
-  return provider.startsWith("claude") ? "default" : undefined;
+// Older saved runs have no selected mode, so use each supported provider's native unattended mode.
+export function permissionModeFor(providerModel: string): string | undefined {
+  const providerId = providerModel.split("/", 1)[0];
+  // Paseo owns the provider-specific IDs; passing a guessed universal ID can make agent creation fail.
+  return getUnattendedModeId(providerId);
 }
 
 export class AgentGateway {
@@ -49,6 +62,9 @@ export class AgentGateway {
   ) {}
 
   async createAgent(spec: CreateAgentSpec): Promise<AgentRecord> {
+    const run = this.store.require(spec.runId);
+    // Resolve before allocating an identity so invalid project model settings leave no orphan agent token.
+    const modelSettings = resolveAgentSettings(run.promptConfig, spec.role, spec.projectRole, spec);
     const paseo = await this.holder.get();
     // the bus starts in the background at plugin load; wait for its port before baking a URL into an agent
     const busPort = await this.busPort();
@@ -58,6 +74,9 @@ export class AgentGateway {
     const agentRecord: AgentRecord = {
       agentId,
       role: spec.role,
+      projectRole: spec.projectRole ?? null,
+      writeScope: spec.writeScope ?? [],
+      leadContinuationTool: spec.leadContinuationTool ?? null,
       taskId: spec.taskId,
       token: randomBytes(24).toString("base64url"),
       awaitingTool: spec.awaitTool,
@@ -82,12 +101,19 @@ export class AgentGateway {
         labels: {
           "slp.run": spec.runId,
           "slp.role": spec.role,
+          // Business expertise is independent of the task capability used for tool/permission checks.
+          "slp.peer-role": spec.projectRole ?? "",
           "slp.task": spec.taskId ?? "",
+          // Workspace path and group labels make task peers searchable together in Paseo.
+          ...(spec.peerWorktreePath ? { "slp.group": "peers", "slp.worktree": spec.peerWorktreePath } : {}),
         },
+        // Parentage is separate from workspace placement, so a Lead can live in its own integration worktree.
+        ...(spec.parentAgentId ? { parent: spec.parentAgentId } : {}),
         config: {
-          provider: spec.provider,
-          modeId: permissionModeFor(spec.provider),
-          systemPrompt: systemPromptFor(spec.role),
+          provider: modelSettings.provider,
+          modeId: modelSettings.permissionModeId ?? permissionModeFor(modelSettings.provider),
+          ...(modelSettings.thinkingOptionId ? { thinkingOptionId: modelSettings.thinkingOptionId } : {}),
+          systemPrompt: systemPromptFor(spec.role, this.store.require(spec.runId).promptConfig, spec.projectRole),
           mcpServers: {
             [BUS_SERVER_NAME]: {
               type: "http",

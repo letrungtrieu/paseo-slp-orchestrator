@@ -1,5 +1,5 @@
 // Providers that have a native fork but cannot be bound to a NEW Paseo agent from a plugin yet.
-// They return null so the registry degrades to the spec-file briefing and records why.
+// They return null so the registry degrades to the stored-spec briefing and records why.
 import type { SessionForker } from "./session-forker";
 
 // Codex: `thread/fork` exists in the app-server protocol, but CodexProviderOptionsSchema is strict

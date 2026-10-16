@@ -1,14 +1,12 @@
 // Pure path-scope rules. Kept free of I/O so the scope gate (spec phase 3, "physical checkpoint")
 // can be unit tested without a git repository.
 
-// Files the pipeline owns inside every task worktree; peers may never change them.
-export const PROTECTED_TASK_FILES = ["TASK_SPEC.md"] as const;
+// Reserve obsolete pipeline filenames so broad writable scopes cannot reintroduce task/report litter.
+export const PROTECTED_TASK_FILES = ["TASK_SPEC.md", ".slp/MASTER_SPEC.md", ".slp/ACCEPTANCE_DOC.md", ".slp/comm-log.jsonl"] as const;
 
 // QA may add tests in addition to whatever the Implementer is allowed to touch (rule 4).
 export const QA_WRITABLE_SCOPE = ["tests/**", "test/**", "**/*.test.*", "**/*.spec.*", "__tests__/**"];
 
-// Files produced by the pipeline's own flow; ignored by the scope gate.
-export const PIPELINE_OUTPUT_FILES = [".slp/**"];
 
 export function normalizeRelativePath(filePath: string): string {
   // git prints forward slashes; users type "./src/" or "src\\" so normalise both forms
@@ -65,9 +63,7 @@ export function checkScope(input: ScopeCheckInput): ScopeCheckOutcome {
   const protectedFileTouched: string[] = [];
   for (const changedFile of input.changedFiles) {
     const normalizedFile = normalizeRelativePath(changedFile);
-    // Pipeline output (.slp/) is expected in every worktree and is excluded from git, so it never counts as a violation.
-    if (matchesAnyScope(normalizedFile, PIPELINE_OUTPUT_FILES)) continue;
-    // protected files are reported separately because restoring them is non negotiable
+    // Reports are submitted through tools; reserved files are rejected even inside an otherwise valid scope.
     if ((PROTECTED_TASK_FILES as readonly string[]).includes(normalizedFile)) {
       protectedFileTouched.push(normalizedFile);
       continue;

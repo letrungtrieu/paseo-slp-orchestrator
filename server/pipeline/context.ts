@@ -24,13 +24,14 @@ export interface PipelineContext {
 }
 
 export function requireTask(run: Run, taskId: string): Task {
-  const task = run.tasks[taskId];
+  // Task IDs arrive through tools, so inherited object keys must never resolve as actual tasks.
+  const task = Object.hasOwn(run.tasks, taskId) ? run.tasks[taskId] : undefined;
   // The known-task list in the message helps an agent that mistyped a task id recover on its own.
   if (!task) throw new Error(`Unknown task '${taskId}'. Known tasks: ${Object.keys(run.tasks).join(", ") || "(none)"}`);
   return task;
 }
 
-export function agentIdForRole(task: Task, role: SlpRole): string | null {
+export function agentIdForRole(task: Task, role: string): string | null {
   return task.agentIds[role] ?? null;
 }
 

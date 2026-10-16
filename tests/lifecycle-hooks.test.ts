@@ -1,7 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it, vi } from "vitest";
 import { registerLifecycleHooks } from "../server/hooks/lifecycle-hooks";
-import { tailCommLog } from "../server/store/comm-log";
 import { NUDGE_LIMIT } from "../shared/roles";
 import { useFlowFixture, type Flow } from "./helpers/flow-fixture";
 import { API_TASK, eventually, startedRunWithTasks, UI_TASK } from "./helpers/flow-steps";
@@ -100,7 +99,7 @@ describe("nudging an agent that ended its turn without the owed tool", () => {
     // nothing is owed any more, so later turn ends are ignored
     expect(flow.run(runId).agents[implementerId].awaitingTool).toBeNull();
     await eventually(async () => {
-      const logEntries = await tailCommLog(flow.repoPath, runId, 300);
+      const logEntries = await flow.store.tailLog(runId, 300);
       if (!logEntries.some((entry) => entry.kind === "nudge.exhausted")) throw new Error("exhaustion not logged");
     });
   });
@@ -212,7 +211,8 @@ describe("permission events", () => {
 
   it("lets the master lead write inside the integration checkout and denies the supervisor", async () => {
     const { flow, runId, hooks } = await hookedRun();
-    await fireRequest(hooks, flow.run(runId).masterLeadAgentId, fileWriteRequest(".slp/MASTER_SPEC.md"));
+    // Integration fixes remain writable; pipeline specs now go through SQLite tools instead.
+    await fireRequest(hooks, flow.run(runId).masterLeadAgentId, fileWriteRequest("src/integration-fix.ts"));
     expect(lastResponse(flow).response).toEqual({ behavior: "allow" });
     await fireRequest(hooks, flow.run(runId).supervisorAgentId, fileWriteRequest("src/index.ts"));
     expect(lastResponse(flow).response).toMatchObject({ behavior: "deny" });
@@ -267,7 +267,7 @@ describe("permission events", () => {
     const { flow, runId, hooks, implementerId } = await hookedRun();
     await fireRequest(hooks, implementerId, fileWriteRequest("src/api/a.ts"));
     await eventually(async () => {
-      const logEntries = await tailCommLog(flow.repoPath, runId, 300);
+      const logEntries = await flow.store.tailLog(runId, 300);
       if (!logEntries.some((entry) => entry.kind === "permission.Edit" && entry.outcome === "blocked")) throw new Error("denial not logged");
     });
   });

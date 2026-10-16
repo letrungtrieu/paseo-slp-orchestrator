@@ -1,11 +1,11 @@
 // Reusable story steps of the SLP flow (spec phases 1-6). Each step performs the tool calls an
 // agent would make and waits for the pipeline's detached follow-up work to settle.
 import { vi } from "vitest";
-import { ACCEPTANCE_DOC_SECTIONS } from "../../server/prompts/task-spec";
 import { approveGate } from "../../server/pipeline/gates";
+import { reviewerAgentKey } from "../../server/pipeline/peer-assignments";
 import type { GateKind, TaskPhase } from "../../shared/state";
 import type { Flow } from "./flow-fixture";
-import { commitFiles, writeWorkingFiles } from "./git-fixture";
+import { commitFiles } from "./git-fixture";
 
 export const API_TASK = {
   id: "api-layer",
@@ -27,7 +27,12 @@ export const IMPLEMENTER_PLAN = {
   plannedFiles: ["src/api/billing.ts"],
 };
 
-export const COMPLETE_ACCEPTANCE_DOC = ACCEPTANCE_DOC_SECTIONS.map((section) => `## ${section}\nDone.`).join("\n\n");
+// Every required section travels in the tool call, so completion tests cannot pass on a file's mere existence.
+export const COMPLETE_ACCEPTANCE_REPORT = {
+  summary: "Implemented billing with reviewed tests.", changedFiles: ["src/api/feature.ts"],
+  technicalDecisions: ["Keep billing behind the existing router."],
+  qaResults: "The billing test suite passed.", securityReview: "APPROVED: no issues identified.", risks: [],
+};
 
 export const forkedLeadReply = (verdict: "approve" | "clarify" | "escalate", message = "ok") =>
   `Here is my verdict.\n\`\`\`json\n${JSON.stringify({ verdict, message })}\n\`\`\``;
@@ -42,7 +47,7 @@ export async function delegateAndDefineTasks(flow: Flow, runId: string, taskDefi
   });
   if (delegation.isError) throw new Error(delegation.text);
   const definition = await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", {
-    masterSpecPath: ".slp/MASTER_SPEC.md",
+    masterSpec: "Billing architecture: separate API and UI work; preserve the shared invoice contract.",
     tasks: taskDefinitions,
   });
   if (definition.isError) throw new Error(definition.text);
@@ -107,18 +112,18 @@ export async function waitForPhase(flow: Flow, runId: string, taskId: string, ex
 export async function approveVerification(flow: Flow, runId: string, taskId: string): Promise<void> {
   await eventually(() => {
     // Verifiers are created lazily after the scope gate, so wait for them to exist before voting.
-    for (const verifierRole of flow.task(runId, taskId).verifiers) flow.agentId(runId, verifierRole, taskId);
+    for (const verifierRole of flow.task(runId, taskId).verifiers) {
+      if (!flow.task(runId, taskId).agentIds[reviewerAgentKey(verifierRole)]) throw new Error("reviewer not ready");
+    }
   });
   for (const verifierRole of flow.task(runId, taskId).verifiers) {
-    const verdictOutcome = await flow.callAsRole(runId, verifierRole, taskId, "slp_verdict", { verdict: "APPROVED" });
+    // A business role may also implement this task, so address its separate reviewer instance by participant key.
+    const reviewerId = flow.task(runId, taskId).agentIds[reviewerAgentKey(verifierRole)];
+    const verdictOutcome = await flow.callAs(reviewerId, "slp_verdict", { verdict: "APPROVED" });
     if (verdictOutcome.isError) throw new Error(verdictOutcome.text);
     // sequential stages create the next verifier only after this approval
     if (!flow.task(runId, taskId).verifyParallel) await eventually(() => undefined);
   }
-}
-
-export function writeAcceptanceDoc(flow: Flow, runId: string, taskId: string, documentText = COMPLETE_ACCEPTANCE_DOC): void {
-  writeWorkingFiles(flow.task(runId, taskId).workspace!.cwd, { ".slp/ACCEPTANCE_DOC.md": documentText });
 }
 
 // Drives a task from handshake to ready_for_merge, approving any human gate it meets on the way.
@@ -143,8 +148,10 @@ export async function driveToReadyForMerge(
   await approveVerificationWhenWoken(flow, runId, taskId);
   await approveOpenGate();
   await waitForPhase(flow, runId, taskId, "documenting");
-  writeAcceptanceDoc(flow, runId, taskId);
-  const docReport = await flow.callAsRole(runId, "implementer", taskId, "slp_doc_done", {});
+  // Dedicated project report authors must finish creation before the completion tool can authenticate them.
+  const authorKey = flow.task(runId, taskId).documentedBy === "implementer" ? "implementer" : "doc";
+  await eventually(() => { if (!flow.task(runId, taskId).agentIds[authorKey]) throw new Error("report author not ready"); });
+  const docReport = await flow.callAs(flow.task(runId, taskId).agentIds[authorKey], "slp_doc_done", { report: COMPLETE_ACCEPTANCE_REPORT });
   if (docReport.isError) throw new Error(docReport.text);
   await waitForPhase(flow, runId, taskId, "ready_for_merge");
   await approveOpenGate();

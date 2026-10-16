@@ -22,7 +22,7 @@ function callerFor(agentId: string): BusCaller {
 
 beforeEach(async () => {
   const stateDirectory = await createTemporaryDirectory("dispatcher");
-  store = new RunStore(`${stateDirectory}/state.json`);
+  store = new RunStore(`${stateDirectory}/orchestrator.sqlite3`);
   store.insert(
     buildRun({
       supervisorAgentId: "sup-agent-1",

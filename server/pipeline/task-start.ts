@@ -1,18 +1,23 @@
 // Phase 2 of the spec: after the Master Lead defines tasks, wait for its turn to end, take the
 // fork checkpoint, then give every task a worktree, a Forked Lead and a read-only Implementer.
+import { ROLE_LABELS } from "../../shared/roles";
 import { TaskSchema, type Task } from "../../shared/state";
 import type { TaskDefinition } from "../../shared/state";
-import { createTaskWorkspace, writeTaskSpecFile } from "../git/worktree";
+import { createTaskWorkspace } from "../git/worktree";
 import type { ForkBinding } from "../fork/session-forker";
 import { forkedLeadBriefing, implementerHandshakeBrief } from "../prompts/messages";
 import { requireTask, tell, updateTask, type PipelineContext } from "./context";
 import { waitUntilIdle } from "./idle";
+import { peerRole } from "../project-prompts/defaults";
+import { resolveAgentSettings } from "../project-prompts/agent-settings";
 
 // The Master Lead may still be finishing a long survey turn when it calls slp_define_tasks, so allow plenty of time.
 const MASTER_LEAD_TURN_TIMEOUT_MS = 15 * 60_000;
 
-export function registerTasks(ctx: PipelineContext, runId: string, definitions: TaskDefinition[]): void {
+export function registerTasks(ctx: PipelineContext, runId: string, definitions: TaskDefinition[], masterSpec?: string): void {
   ctx.store.mutate(runId, (run) => {
+    // Keep the planning context and all new task definitions within one SQLite commit.
+    if (masterSpec !== undefined) run.masterSpec = masterSpec;
     for (const definition of definitions) {
       // parsing fills every runtime field with its default so a task is always fully shaped
       run.tasks[definition.id] = TaskSchema.parse({
@@ -56,14 +61,19 @@ async function startQueuedTasksNow(ctx: PipelineContext, runId: string): Promise
   }
   // The session id is read after idle because the provider only reports it once the session is persisted.
   const providerSessionId = await ctx.gateway.sessionIdOf(run.masterLeadAgentId);
-  // resolve never throws for unsupported providers; it returns a spec-file binding so the run still proceeds.
+  // LEAD.md may override the form's provider; fork the session with the adapter for the model actually running.
+  const leadSettings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, {
+    provider: run.providers.lead, thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
+    permissionModeId: run.providers.leadPermissionModeId ?? undefined,
+  });
+  // resolve never throws for unsupported providers; it returns a stored-spec binding so the run still proceeds.
   const forkBinding = await ctx.forks.resolve(
-    providerSessionId ? { provider: run.providers.lead, providerSessionId } : null,
-    run.providers.lead,
+    providerSessionId ? { provider: leadSettings.provider, providerSessionId } : null,
+    leadSettings.provider,
   );
-  // Stored on the run so every briefing can tell the Forked Lead to read the spec files when no native fork exists.
+  // Without native history, the Forked Lead rebuilds context through the SQLite read tools.
   ctx.store.mutate(runId, (mutableRun) => {
-    mutableRun.forkDegradedReason = forkBinding.mode === "spec-file" ? forkBinding.reason : null;
+    mutableRun.forkDegradedReason = forkBinding.mode === "stored-spec" ? forkBinding.reason : null;
   });
   ctx.logEvent(runId, {
     taskId: null,
@@ -105,11 +115,8 @@ async function startTask(ctx: PipelineContext, runId: string, taskId: string, fo
   const paseo = await ctx.holder.get();
   // The worktree comes first because both peers are created inside it and need its workspace id.
   const createdWorkspace = await createTaskWorkspace(paseo, run, queuedTask);
-  // The hash lets the scope gate detect and undo edits to TASK_SPEC.md later.
-  const taskSpecSha256 = await writeTaskSpecFile(createdWorkspace.cwd, run, queuedTask);
   updateTask(ctx, runId, taskId, (task) => {
     task.workspace = createdWorkspace;
-    task.taskSpecSha256 = taskSpecSha256;
     // The phase leaves 'queued' before agents exist so a concurrent sweeper pass cannot start this task twice.
     task.phase = "handshaking";
   });
@@ -120,23 +127,31 @@ async function startTask(ctx: PipelineContext, runId: string, taskId: string, fo
     role: "forked_lead",
     taskId,
     provider: run.providers.lead,
+    thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
+    permissionModeId: run.providers.leadPermissionModeId ?? undefined,
     workspaceId: run.devWorkspaceId,
-    title: `[SLP ${taskId}] Forked Lead`,
-    initialPrompt: forkedLeadBriefing(queuedTask, run.forkDegradedReason, run.masterSpecPath),
+    // Keep both responsibility and task identity visible when several worktrees run in parallel.
+    title: `[${ROLE_LABELS.forked_lead}] [${queuedTask.id} · ${queuedTask.title}]`,
+    initialPrompt: forkedLeadBriefing(queuedTask, run.forkDegradedReason),
     // The Forked Lead owes no tool: it answers through its turn text, which the handshake parses.
     awaitTool: null,
-    // extraOptions carries the native fork flags (resume + fork-session); undefined means a plain session with a spec-file briefing.
+    // extraOptions carries the native fork flags (resume + fork-session); undefined means a plain session with a stored-spec briefing.
     extraOptions: forkBinding.mode === "native" ? forkBinding.providerOptions : undefined,
   });
   // The Implementer stays read-only until the handshake approves; the permission hook enforces that by phase.
+  const implementationRole = peerRole(run.promptConfig, queuedTask.implementerRole);
   const implementer = await ctx.gateway.createAgent({
     runId,
     role: "implementer",
+    projectRole: implementationRole.role,
     taskId,
     provider: run.providers.peer,
+    thinkingOptionId: run.providers.peerThinkingOptionId ?? undefined,
+    permissionModeId: run.providers.peerPermissionModeId ?? undefined,
+    peerWorktreePath: createdWorkspace.cwd,
     workspaceId: createdWorkspace.workspaceId,
-    title: `[SLP ${taskId}] Implementer`,
-    initialPrompt: implementerHandshakeBrief(requireTask(ctx.store.require(runId), taskId), `${createdWorkspace.cwd}/TASK_SPEC.md`),
+    title: `[${implementationRole.name}] [${queuedTask.id} · ${queuedTask.title}]`,
+    initialPrompt: implementerHandshakeBrief(requireTask(ctx.store.require(runId), taskId)),
     awaitTool: "slp_submit_plan",
   });
   // The role-to-agent map is how later steps address peers, so it is filled once both agents exist.

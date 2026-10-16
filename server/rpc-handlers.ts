@@ -11,13 +11,16 @@ import {
   setRunModeRpc,
   startRunRpc,
   tailLogRpc,
+  initializeProjectPromptsRpc,
   type RunSummary,
 } from "../shared/rpc";
 import type { Run } from "../shared/state";
 import type { PipelineContext } from "./pipeline/context";
 import { abortRun, approveMain, approveRunGate, startRun } from "./pipeline/run-lifecycle";
 import { resumeTask } from "./pipeline/task-pause";
-import { tailCommLog } from "./store/comm-log";
+import { assertGitRepository } from "./git/git";
+import { loadProjectPrompts } from "./project-prompts/load";
+import { join } from "node:path";
 
 function summarizeRun(run: Run): RunSummary {
   // Counts are derived on demand instead of stored, so the list can never disagree with the task table.
@@ -39,6 +42,14 @@ function summarizeRun(run: Run): RunSummary {
 }
 
 export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineContext): void {
+  server.handle(initializeProjectPromptsRpc, async ({ repoPath }) => {
+    // Initializing on project selection lets users edit workflows before creating any agent session.
+    await assertGitRepository(repoPath);
+    const configuration = await loadProjectPrompts(repoPath);
+    // Avoid sending workflow bodies to a form that only displays discovery metadata.
+    return { directory: join(repoPath, ".slp"), peers: configuration.peers.map(({ role, name, description, model, thinking, sourcePath }) =>
+      ({ role, name, description, model, thinking, sourcePath })) };
+  });
   // Handlers receive the SDK instance, which the entry point never gets, so each one parks it in the holder for the sweeper and pipeline.
   server.handle(listRunsRpc, (_input, { paseo }) => {
     ctx.holder.capture(paseo);
@@ -57,7 +68,18 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
       title: input.title,
       baseBranch: input.baseBranch,
       mode: input.mode,
-      providers: { supervisor: input.supervisorProvider, lead: input.leadProvider, peer: input.peerProvider },
+      // Keep provider models and their thinking preferences together through the run boundary.
+      providers: {
+        supervisor: input.supervisorProvider,
+        lead: input.leadProvider,
+        peer: input.peerProvider,
+        supervisorThinkingOptionId: input.supervisorThinkingOptionId,
+        leadThinkingOptionId: input.leadThinkingOptionId,
+        peerThinkingOptionId: input.peerThinkingOptionId,
+        supervisorPermissionModeId: input.supervisorPermissionModeId,
+        leadPermissionModeId: input.leadPermissionModeId,
+        peerPermissionModeId: input.peerPermissionModeId,
+      },
     });
   });
 
@@ -94,9 +116,9 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     return { ok: true };
   });
 
-  // Reads the log file directly so history survives a daemon restart that cleared in-memory state.
+  // SQLite supplies a bounded tail without scanning the repository or loading its entire history.
   server.handle(tailLogRpc, async ({ runId, limit }) => {
     const run = ctx.store.find(runId);
-    return { entries: run ? await tailCommLog(run.repoPath, runId, limit) : [] };
+    return { entries: run ? ctx.store.tailLog(runId, limit) : [] };
   });
 }

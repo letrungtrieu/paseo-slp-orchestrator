@@ -7,10 +7,11 @@ interface ModeSelectorProps {
   styles: UiStyles;
   selectedMode: RunMode;
   onSelectMode: (nextMode: RunMode) => void;
+  disabled?: boolean;
 }
 
 // Raw enum names are shown on purpose: they match the vocabulary in specs/MVP.md and the logs.
-export function ModeSelector({ styles, selectedMode, onSelectMode }: ModeSelectorProps) {
+export function ModeSelector({ styles, selectedMode, onSelectMode, disabled = false }: ModeSelectorProps) {
   return (
     // The shared row style wraps, so three long mode names stack on a phone instead of overflowing.
     <View style={styles.row}>
@@ -21,6 +22,8 @@ export function ModeSelector({ styles, selectedMode, onSelectMode }: ModeSelecto
           styles={styles}
           label={runMode}
           selected={runMode === selectedMode}
+          // Waiting for persistence avoids a second mode change writing against the previous revision.
+          disabled={disabled}
           onPress={() => onSelectMode(runMode)}
         />
       ))}

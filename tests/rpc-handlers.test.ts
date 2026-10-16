@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it } from "vitest";
 import { registerRpcHandlers } from "../server/rpc-handlers";
 import {
-  abortRunRpc, approveGateRpc, approveMainRpc, getRunRpc, listRunsRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc,
+  abortRunRpc, approveGateRpc, approveMainRpc, getRunRpc, listRunsRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc,
 } from "../shared/rpc";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { API_TASK, approveHandshake, eventually, startedRunWithTasks } from "./helpers/flow-steps";
@@ -34,12 +34,21 @@ describe("RPC registration", () => {
   // a contract without a handler would hang the UI call
   it("registers one handler per contract in shared/rpc.ts", async () => {
     const { rpc } = await rpcRun();
-    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, tailLogRpc].map((contract) => contract.name).sort();
+    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, tailLogRpc, initializeProjectPromptsRpc].map((contract) => contract.name).sort();
     expect(rpc.registeredNames()).toEqual(expectedNames);
   });
 });
 
 describe("run RPCs", () => {
+  it("initializes role workflows before starting agents", async () => {
+    const { flow, rpc } = await rpcRun();
+    const configuration = await rpc.call<{ directory: string; peers: Array<{ role: string }> }>(initializeProjectPromptsRpc, { repoPath: flow.repoPath });
+    // Project selection prepares editing files but must not create a run or an agent.
+    expect(configuration.directory).toBe(`${flow.repoPath}/.slp`);
+    expect(configuration.peers).toHaveLength(4);
+    expect(flow.store.list()).toHaveLength(0);
+    expect(flow.gateway.createdAgents).toHaveLength(0);
+  });
   it("starts a run from the UI request and captures the SDK handle", async () => {
     const { flow, rpc } = await rpcRun();
     const started = await rpc.call<{ runId: string }>(startRunRpc, {
