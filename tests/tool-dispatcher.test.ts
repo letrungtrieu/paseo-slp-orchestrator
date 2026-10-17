@@ -2,56 +2,51 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BusCaller } from "../server/bus/http-mcp";
 import type { PipelineContext } from "../server/pipeline/context";
 import { createBusDispatcher } from "../server/pipeline/tool-handlers";
+import { PipelineStateSchema } from "../shared/pipeline";
 import { RunStore } from "../server/store/run-store";
-import { buildAgentRecord, buildRun, buildTask } from "./helpers/run-factory";
-import { useTemporaryDirectories } from "./helpers/temp-directory";
+import { buildAgentRecord, buildRun } from "./helpers/run-factory";
 
-const createTemporaryDirectory = useTemporaryDirectories();
-
-const LONG_CRITERIA = "Billing must support invoices, refunds and tests.";
-
+const LONG_MESSAGE = "The stage must preserve the existing ingestion contract and include evidence for edge cases.";
 let store: RunStore;
-let enqueueMail: ReturnType<typeof vi.fn>;
 let logEvent: ReturnType<typeof vi.fn>;
 let dispatcher: ReturnType<typeof createBusDispatcher>;
 
 function callerFor(agentId: string): BusCaller {
   const lookup = store.findAgent(agentId)!;
-  return { runId: lookup.run.id, agentId, role: lookup.agentRecord.role, taskId: lookup.agentRecord.taskId };
+  return { runId: lookup.run.id, agentId, role: lookup.agentRecord.role, projectRole: lookup.agentRecord.projectRole, taskId: null };
 }
 
-beforeEach(async () => {
-  const stateDirectory = await createTemporaryDirectory("dispatcher");
-  store = new RunStore(`${stateDirectory}/orchestrator.sqlite3`);
-  store.insert(
-    buildRun({
-      supervisorAgentId: "sup-agent-1",
-      masterLeadAgentId: "lead-agent-1",
-      status: "delegating",
-      tasks: { t1: buildTask({ id: "t1", phase: "implementing" }) },
-      agents: {
-        "sup-agent-1": buildAgentRecord({ agentId: "sup-agent-1", role: "supervisor", token: "tok-sup", awaitingTool: "slp_delegate", awaitingSince: "2026-01-01T00:00:00.000Z" }),
-        "lead-agent-1": buildAgentRecord({ agentId: "lead-agent-1", role: "master_lead", token: "tok-lead" }),
-        "impl-agent-1": buildAgentRecord({ agentId: "impl-agent-1", role: "implementer", taskId: "t1", token: "tok-impl" }),
-        "qa-agent-1": buildAgentRecord({ agentId: "qa-agent-1", role: "qa", taskId: "t1", token: "tok-qa" }),
-      },
-    }),
-  );
-  enqueueMail = vi.fn();
+beforeEach(() => {
+  store = new RunStore(":memory:");
+  const pipeline = PipelineStateSchema.parse({
+    id: "pipeline-1", name: "ingestion", version: "1.0", worktree: "/tmp/ingestion", description: "Ingestion pipeline",
+    stages: [{ id: "stage-1", name: "coding", goal: "Deliver ingestion", peers: [
+      { role: "developer", task: "Implement ingestion" }, { role: "reviewer", task: "Challenge the implementation" },
+    ], status: "running", forkedLeadAgentId: "stage-lead", peerAgentIds: ["peer-1", "peer-2"], reports: [], messages: [],
+    result: null, startedAt: "2026-01-01T00:00:00.000Z", completedAt: null }],
+    status: "running", currentStageIndex: 0, workspaceId: "workspace-1", branch: "slp/ingestion", baseCommit: "abc",
+    pausedReason: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+    finalReport: null, gate: null, mergedCommit: null, integratedAt: null,
+  });
+  store.insert(buildRun({ status: "running", pipelines: { [pipeline.id]: pipeline }, agents: {
+    "sup-agent": buildAgentRecord({ agentId: "sup-agent", role: "supervisor", token: "tok-sup" }),
+    "lead-agent": buildAgentRecord({ agentId: "lead-agent", role: "master_lead", token: "tok-lead" }),
+    "stage-lead": buildAgentRecord({ agentId: "stage-lead", role: "forked_lead", pipelineId: pipeline.id, stageId: "stage-1", taskId: null, token: "tok-stage" }),
+    "peer-1": buildAgentRecord({ agentId: "peer-1", role: "peer", projectRole: "developer", pipelineId: pipeline.id, stageId: "stage-1", stagePeerId: "0", taskId: null, token: "tok-peer" }),
+    "peer-2": buildAgentRecord({ agentId: "peer-2", role: "peer", projectRole: "reviewer", pipelineId: pipeline.id, stageId: "stage-1", stagePeerId: "1", taskId: null, token: "tok-reviewer" }),
+  } }));
   logEvent = vi.fn();
-  // only the collaborators the exercised tools touch are faked; the rest stays absent on purpose
-  const fakeContext = { store, mailbox: { enqueue: enqueueMail }, logEvent, continuations: {} } as unknown as PipelineContext;
+  // Stage messages are persisted in the same SQLite mutation as their stage state; the dispatcher
+  // does not call the delivery mailbox directly before the tool response returns.
+  const fakeContext = { store, logEvent } as unknown as PipelineContext;
   dispatcher = createBusDispatcher(fakeContext);
 });
 
-afterEach(async () => {
-  await store.flush();
-});
+afterEach(() => store.close());
 
-// authentication of bus callers
-describe("resolveCaller", () => {
-  it("maps a token to the caller's run, agent, role and task", () => {
-    expect(dispatcher.resolveCaller("tok-impl")).toEqual({ runId: "run-1", agentId: "impl-agent-1", role: "implementer", taskId: "t1" });
+describe("dynamic caller authentication", () => {
+  it("maps a token to the strict runtime role and business role", () => {
+    expect(dispatcher.resolveCaller("tok-peer")).toEqual({ runId: "run-1", agentId: "peer-1", role: "peer", projectRole: "developer", taskId: null });
   });
 
   it("returns null for an unknown token", () => {
@@ -59,115 +54,66 @@ describe("resolveCaller", () => {
   });
 });
 
-describe("dispatch rejections", () => {
-  // spec 2.1: each agent may only call its own tools, even if it guesses the name
-  it("blocks a tool outside the caller's role and does not run the handler", async () => {
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("impl-agent-1"), "slp_delegate", { acceptanceCriteria: LONG_CRITERIA });
-    expect(dispatchOutcome).toEqual({ isError: true, text: "Tool 'slp_delegate' is not available to your role." });
-    // the handler would have queued mail to the master lead
-    expect(enqueueMail).not.toHaveBeenCalled();
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ kind: "slp_delegate", outcome: "blocked", reason: "role implementer may not call slp_delegate" }));
+describe("dispatch validation", () => {
+  it("blocks a stage tool from the Master Lead and does not enqueue mail", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("lead-agent"), "slp_stage_report", { summary: "wrong owner" });
+    expect(outcome).toMatchObject({ isError: true });
+    expect(store.require("run-1").mailbox).toHaveLength(0);
+    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ kind: "slp_stage_report", outcome: "blocked" }));
   });
 
-  // unknown names must not reach any handler
   it("blocks an unknown tool name", async () => {
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_format_disk", {});
-    expect(dispatchOutcome).toMatchObject({ isError: true, text: "Unknown tool 'slp_format_disk'." });
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ outcome: "blocked", reason: "unknown tool" }));
+    const outcome = await dispatcher.dispatch(callerFor("sup-agent"), "slp_format_disk", {});
+    expect(outcome).toMatchObject({ isError: true, text: "Unknown tool 'slp_format_disk'." });
   });
 
-  it("blocks invalid arguments with the schema message", async () => {
-    // criteria shorter than 20 characters violate the tool schema
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: "short" });
-    expect(dispatchOutcome.isError).toBe(true);
-    expect(dispatchOutcome.text).toContain("Invalid arguments");
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ outcome: "blocked", reason: "invalid arguments" }));
+  it("blocks invalid stage report arguments with the schema error", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_stage_report", { summary: "" });
+    expect(outcome.isError).toBe(true);
+    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ kind: "slp_stage_report", outcome: "blocked" }));
   });
 
-  // MCP clients may omit arguments entirely
-  it("treats missing arguments as an empty object and fails validation instead of crashing", async () => {
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", undefined);
-    expect(dispatchOutcome.text).toContain("Invalid arguments");
-  });
-
-  it("maps a ToolError to a blocked outcome", async () => {
-    // a task-less caller using a task-only tool raises ToolError("only available to task peers")
-    const taskLessImplementer: BusCaller = { runId: "run-1", agentId: "impl-agent-1", role: "implementer", taskId: null };
-    const dispatchOutcome = await dispatcher.dispatch(taskLessImplementer, "slp_stage_done", { summary: "x" });
-    expect(dispatchOutcome).toEqual({ isError: true, text: "This tool is only available to task peers." });
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ outcome: "blocked", reason: "This tool is only available to task peers." }));
-  });
-
-  it("maps a non-ToolError failure to an error outcome", async () => {
-    // an unknown task id makes requireTask throw a plain Error, i.e. a pipeline fault
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("lead-agent-1"), "slp_archive_task", { taskId: "ghost" });
-    expect(dispatchOutcome.isError).toBe(true);
-    expect(dispatchOutcome.text).toContain("Unknown task 'ghost'");
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ outcome: "error" }));
-  });
-
-  it("reports a ToolError raised deep inside a handler as blocked, with the handler's text", async () => {
-    // the task is 'implementing', so archiving is refused with a ToolError
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("lead-agent-1"), "slp_archive_task", { taskId: "t1" });
-    expect(dispatchOutcome.text).toContain("not ready_for_merge");
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ outcome: "blocked" }));
+  it("rejects direct messages to a peer outside the current stage", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_send_peer_message", { toAgentId: "missing", message: LONG_MESSAGE });
+    expect(outcome.isError).toBe(true);
+    expect(store.require("run-1").mailbox).toHaveLength(0);
   });
 });
 
-describe("dispatch success and bookkeeping", () => {
-  it("runs the handler and returns its text", async () => {
-    const dispatchOutcome = await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: LONG_CRITERIA });
-    expect(dispatchOutcome.isError).toBe(false);
-    expect(dispatchOutcome.text).toContain("Delegated to the Master Lead");
-    expect(enqueueMail).toHaveBeenCalledTimes(1);
-    expect(store.require("run-1")).toMatchObject({ criteria: LONG_CRITERIA, status: "planning" });
-  });
-
-  // this is what stops the nudge loop for an agent that did its job
-  it("clears awaitingTool once the owed tool succeeds", async () => {
-    await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: LONG_CRITERIA });
-    expect(store.require("run-1").agents["sup-agent-1"].awaitingTool).toBeNull();
-  });
-
-  it("keeps awaitingTool when a different tool is called", async () => {
-    store.mutate("run-1", (run) => {
-      run.agents["qa-agent-1"].awaitingTool = "slp_verdict";
+describe("stage dispatch and bookkeeping", () => {
+  it("delivers a direct peer message through the stage mailbox", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_send_peer_message", { toAgentId: "peer-2", message: LONG_MESSAGE });
+    expect(outcome.isError).toBe(false);
+    expect(outcome.text).toContain("queued");
+    expect(store.require("run-1").mailbox.at(-1)).toMatchObject({
+      toAgentId: "peer-2", text: expect.stringContaining(LONG_MESSAGE), awaitTool: null,
     });
-    // slp_ask_sibling is allowed for qa but is not the owed tool; it fails on the unknown task, which is fine here
-    await dispatcher.dispatch(callerFor("qa-agent-1"), "slp_ask_sibling", { taskId: "ghost", question: "?" });
-    expect(store.require("run-1").agents["qa-agent-1"].awaitingTool).toBe("slp_verdict");
+    expect(store.require("run-1").pipelines["pipeline-1"].stages[0].messages).toHaveLength(1);
   });
 
-  it("keeps awaitingTool when the owed tool itself fails", async () => {
-    // the agent still owes a valid call, so nudging must continue
-    await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: "short" });
-    expect(store.require("run-1").agents["sup-agent-1"].awaitingTool).toBe("slp_delegate");
+  it("stores peer evidence and sends it to the Forked Lead", async () => {
+    store.mutate("run-1", (run) => { run.agents["peer-1"].awaitingTool = "slp_stage_report"; });
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_stage_report", { summary: "Evidence", findings: ["covered edge cases"] });
+    expect(outcome.isError).toBe(false);
+    expect(store.require("run-1").pipelines["pipeline-1"].stages[0].reports).toMatchObject([{ role: "developer", summary: "Evidence" }]);
+    expect(store.require("run-1").mailbox.at(-1)).toMatchObject({
+      toAgentId: "stage-lead", text: expect.stringContaining("Evidence"), awaitTool: "slp_approve_stage",
+    });
+    expect(store.require("run-1").agents["peer-1"].awaitingTool).toBeNull();
   });
 
-  it("logs every call exactly once with caller, tool, outcome and duration", async () => {
-    await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: LONG_CRITERIA });
-    await dispatcher.dispatch(callerFor("impl-agent-1"), "slp_delegate", {});
-    await dispatcher.dispatch(callerFor("sup-agent-1"), "nope", {});
-    await dispatcher.dispatch(callerFor("lead-agent-1"), "slp_archive_task", { taskId: "ghost" });
-    expect(logEvent).toHaveBeenCalledTimes(4);
-    expect(logEvent.mock.calls.map(([, entry]) => entry.outcome)).toEqual(["delivered", "blocked", "blocked", "error"]);
-    const [, firstEntry] = logEvent.mock.calls[0];
-    expect(firstEntry).toMatchObject({ from: "supervisor:sup-agen", to: "pipeline", kind: "slp_delegate", taskId: null });
-    expect(typeof firstEntry.durationMs).toBe("number");
-    expect(firstEntry.summary).toContain("slp_delegate");
+  it("keeps the owed report when a different valid read tool succeeds", async () => {
+    store.mutate("run-1", (run) => { run.agents["peer-1"].awaitingTool = "slp_stage_report"; });
+    await dispatcher.dispatch(callerFor("peer-1"), "slp_get_pipeline", {});
+    expect(store.require("run-1").agents["peer-1"].awaitingTool).toBe("slp_stage_report");
   });
 
-  // the audit log must stay readable and small
-  it("truncates very long arguments in the log summary", async () => {
-    await dispatcher.dispatch(callerFor("sup-agent-1"), "slp_delegate", { acceptanceCriteria: "x".repeat(1000) });
-    const [, loggedEntry] = logEvent.mock.calls[0];
-    // 240 characters of arguments plus the tool name and an ellipsis
-    expect(loggedEntry.summary.length).toBeLessThan(300);
-    expect(loggedEntry.summary.endsWith("…")).toBe(true);
-  });
-
-  it("passes the task id of a task peer into the log entry", async () => {
-    await dispatcher.dispatch(callerFor("impl-agent-1"), "slp_delegate", {});
-    expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ taskId: "t1" }));
+  it("records delivered, blocked and error outcomes once per call", async () => {
+    await dispatcher.dispatch(callerFor("peer-1"), "slp_get_pipeline", {});
+    await dispatcher.dispatch(callerFor("peer-1"), "slp_stage_report", { summary: "" });
+    await dispatcher.dispatch(callerFor("peer-1"), "slp_missing", {});
+    expect(logEvent).toHaveBeenCalledTimes(3);
+    expect(logEvent.mock.calls.map(([, entry]) => entry.outcome)).toEqual(["delivered", "blocked", "blocked"]);
+    expect(logEvent.mock.calls[0][1]).toMatchObject({ from: "peer:peer-1", to: "pipeline", kind: "slp_get_pipeline", taskId: null });
   });
 });

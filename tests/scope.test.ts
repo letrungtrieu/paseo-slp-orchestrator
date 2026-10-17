@@ -97,8 +97,8 @@ describe("checkScope", () => {
     expect(scopeOutcome).toEqual({ outOfScopeFiles: [], protectedFileTouched: [".slp/ACCEPTANCE_DOC.md", ".slp/comm-log.jsonl"] });
   });
 
-  // QA's test files are legitimate additions on top of the Implementer's scope
-  it("allows extra globs such as QA test directories", () => {
+  // Supplemental path grants let a stage peer modify test directories alongside the primary scope.
+  it("allows extra globs such as supplemental test directories", () => {
     const scopeOutcome = checkScope({
       changedFiles: ["src/a.ts", "tests/a.test.ts", "lib/x.ts"],
       writableScope: ["src/"],

@@ -1,17 +1,19 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerLifecycleHooks } from "../server/hooks/lifecycle-hooks";
+import type { AgentLiveStatus, AgentGateway } from "../server/runtime/agent-gateway";
+import type { PaseoHolder } from "../server/runtime/paseo-holder";
 import { NUDGE_LIMIT } from "../shared/roles";
-import { useFlowFixture, type Flow } from "./helpers/flow-fixture";
-import { API_TASK, eventually, startedRunWithTasks, UI_TASK } from "./helpers/flow-steps";
+import { PipelineStateSchema } from "../shared/pipeline";
+import { RunStore } from "../server/store/run-store";
+import { buildAgentRecord, buildRun } from "./helpers/run-factory";
 import { fileWriteRequest, permissionRequest } from "./helpers/permission-request";
 
-const createFlow = useFlowFixture();
+type HookHandler = (event: any, hookContext: { paseo: unknown }) => unknown;
+const openedStores: RunStore[] = [];
+let contextSequence = 0;
+afterEach(() => { for (const store of openedStores.splice(0)) store.close(); });
 
-type HookHandler = (event: unknown, hookContext: { paseo: unknown }) => unknown;
-
-// Minimal PluginServerContext: remembers handlers by event name so tests can fire them.
-// hooks are registered through server.on, so a recording stub is enough to fire them
 function fakeServer() {
   const handlers = new Map<string, HookHandler>();
   const removedEvents: string[] = [];
@@ -24,251 +26,145 @@ function fakeServer() {
   const hookContext = { paseo: { marker: "paseo-from-hook" } };
   return {
     server, removedEvents, hookContext,
-    fire: (eventName: string, event: unknown) => handlers.get(eventName)!(event, hookContext),
+    fire: async (eventName: string, event: unknown) => await handlers.get(eventName)!(event, hookContext),
   };
 }
 
-// two tasks give each test a second implementer that never had a turn
-async function hookedRun() {
-  const flow = await createFlow({ mode: "FULL_AUTO" });
-  const runId = await startedRunWithTasks(flow, [API_TASK, UI_TASK]);
-  const hooks = fakeServer();
-  const unregister = registerLifecycleHooks(hooks.server, flow.ctx);
-  const implementerId = flow.task(runId, API_TASK.id).agentIds.implementer;
-  const startTurn = (agentId: string) => hooks.fire("agent.turn_started", { agent: { id: agentId } });
-  const endTurn = (agentId: string, outcomeKind = "completed") => hooks.fire("agent.turn_ended", { agent: { id: agentId }, outcome: { kind: outcomeKind } });
-  // the owed tool was requested in the past, so a turn started now counts as the agent's reply
-  const requestedLongAgo = (agentId: string, owedTool: string, since = "2020-01-01T00:00:00.000Z") =>
-    flow.store.mutate(runId, (run) => {
-      Object.assign(run.agents[agentId], { awaitingTool: owedTool, awaitingSince: since, nudges: 0 });
-    });
-  const remindersFor = (agentId: string) => flow.mailTo(runId, agentId).filter((message) => message.text.startsWith("Reminder:"));
-  return { flow, runId, hooks, unregister, implementerId, startTurn, endTurn, requestedLongAgo, remindersFor };
+function dynamicHookContext() {
+  const sequence = contextSequence += 1;
+  const runId = `run-hooks-${sequence}`;
+  const pipeline = PipelineStateSchema.parse({
+    id: `pipeline-${sequence}`, name: "ingestion", version: "1.0", worktree: "/tmp/pipeline-worktree", description: "Ingestion",
+    stages: [{ id: `stage-${sequence}`, name: "coding", goal: "Implement ingestion", peers: [{ role: "developer", task: "Code" }],
+      status: "running", forkedLeadAgentId: `stage-lead-${sequence}`, peerAgentIds: [`peer-${sequence}`], reports: [], messages: [],
+      result: null, startedAt: "2026-01-01T00:00:00.000Z", completedAt: null }],
+    status: "running", currentStageIndex: 0, workspaceId: `workspace-${sequence}`, branch: "slp/ingestion", baseCommit: "abc",
+    pausedReason: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+    finalReport: null, gate: null, mergedCommit: null, integratedAt: null,
+  });
+  const peerId = `peer-${sequence}`;
+  const stageLeadId = `stage-lead-${sequence}`;
+  const store = new RunStore(":memory:");
+  openedStores.push(store);
+  store.insert(buildRun({ id: runId, status: "running", pipelines: { [pipeline.id]: pipeline }, agents: {
+    // Give the peer a bounded scope so out-of-scope write requests can be verified against it.
+    [peerId]: buildAgentRecord({ agentId: peerId, role: "peer", projectRole: "developer", writeScope: ["src/**"], pipelineId: pipeline.id, stageId: pipeline.stages[0].id, stagePeerId: "0", taskId: null }),
+    [stageLeadId]: buildAgentRecord({ agentId: stageLeadId, role: "forked_lead", pipelineId: pipeline.id, stageId: pipeline.stages[0].id, taskId: null }),
+  } }));
+  const queuedMessages: Array<{ toAgentId: string; text: string; awaitTool: string | null }> = [];
+  const permissionResponses: Array<{ agentId: string; requestId: string; response: unknown }> = [];
+  const liveStatuses = new Map<string, AgentLiveStatus>([
+    [peerId, { agentId: peerId, status: "idle", pendingPermissions: [], archived: false }],
+    [stageLeadId, { agentId: stageLeadId, status: "idle", pendingPermissions: [], archived: false }],
+  ]);
+  const fakeGateway = {
+    liveStatuses: async () => liveStatuses,
+    respondToPermission: async (agentId: string, requestId: string, response: unknown) => { permissionResponses.push({ agentId, requestId, response }); },
+  } as unknown as AgentGateway;
+  const capturedHandles: unknown[] = [];
+  const holder = { capture: (paseo: unknown) => capturedHandles.push(paseo) } as unknown as PaseoHolder;
+  const logs: Array<Record<string, unknown>> = [];
+  const ctx = {
+    store, gateway: fakeGateway, holder,
+    mailbox: { enqueue: (_runId: string, toAgentId: string, text: string, options: { awaitTool: string | null }) => queuedMessages.push({ toAgentId, text, awaitTool: options.awaitTool }) },
+    forks: {}, continuations: {},
+    logEvent: (_runId: string, entry: Record<string, unknown>) => logs.push(entry),
+  };
+  return { ctx, store, runId, pipelineId: pipeline.id, peerId, stageLeadId, queuedMessages, permissionResponses, capturedHandles, logs };
 }
 
-// the entry file relies on the returned disposer for shutdown
 describe("hook registration", () => {
-  it("subscribes to the three lifecycle events and unsubscribes them all", async () => {
-    const { hooks, unregister } = await hookedRun();
-    expect(() => hooks.fire("agent.turn_started", { agent: { id: "x" } })).not.toThrow();
+  it("subscribes to lifecycle events and removes them all", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    const unregister = registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    await hooks.fire("agent.turn_started", { agent: { id: "unknown" } });
     unregister();
     expect(hooks.removedEvents.sort()).toEqual(["agent.permission_requested", "agent.turn_ended", "agent.turn_started"]);
-  });
-
-  it("captures the SDK handle from every event", async () => {
-    const { flow, hooks, implementerId, startTurn, endTurn } = await hookedRun();
-    const holder = flow.ctx.holder as unknown as { captures: unknown[] };
-    const capturesBefore = holder.captures.length;
-    startTurn(implementerId);
-    endTurn(implementerId);
-    await hooks.fire("agent.permission_requested", { agent: { id: implementerId }, request: permissionRequest({ name: "Read" }) });
-    expect(holder.captures.slice(capturesBefore)).toEqual([hooks.hookContext.paseo, hooks.hookContext.paseo, hooks.hookContext.paseo]);
+    expect(fixture.capturedHandles).toHaveLength(1);
   });
 });
 
-// agents that end a turn in plain text would otherwise stall the pipeline silently
-describe("nudging an agent that ended its turn without the owed tool", () => {
-  it("enqueues a reminder naming the owed tool and counts the nudge", async () => {
-    const { flow, runId, implementerId, startTurn, endTurn, requestedLongAgo, remindersFor } = await hookedRun();
-    requestedLongAgo(implementerId, "slp_submit_plan");
-    startTurn(implementerId);
-    endTurn(implementerId);
-
-    const [reminder] = remindersFor(implementerId);
-    expect(reminder.text).toContain("without calling slp_submit_plan");
-    expect(reminder.awaitTool).toBe("slp_submit_plan");
-    expect(flow.run(runId).agents[implementerId].nudges).toBe(1);
+describe("dynamic stage nudging", () => {
+  it("enqueues a reminder naming the current stage tool", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    fixture.store.mutate(fixture.runId, (run) => Object.assign(run.agents[fixture.peerId], { awaitingTool: "slp_stage_report", awaitingSince: "2020-01-01T00:00:00.000Z", nudges: 0 }));
+    await hooks.fire("agent.turn_started", { agent: { id: fixture.peerId } });
+    await hooks.fire("agent.turn_ended", { agent: { id: fixture.peerId }, outcome: { kind: "completed" } });
+    expect(fixture.queuedMessages[0]).toMatchObject({ toAgentId: fixture.peerId, awaitTool: "slp_stage_report" });
+    expect(fixture.queuedMessages[0].text).toContain("without the expected workflow tool slp_stage_report");
+    expect(fixture.store.require(fixture.runId).agents[fixture.peerId].nudges).toBe(1);
   });
 
-  // an endlessly nudged agent would burn tokens; after the limit a human/Lead must decide
-  it(`gives up after ${NUDGE_LIMIT} reminders and pauses the task`, async () => {
-    const { flow, runId, implementerId, startTurn, endTurn, requestedLongAgo, remindersFor } = await hookedRun();
-    requestedLongAgo(implementerId, "slp_submit_plan");
-    for (let ended = 0; ended < NUDGE_LIMIT; ended += 1) {
-      startTurn(implementerId);
-      endTurn(implementerId);
+  it(`pauses the pipeline after ${NUDGE_LIMIT} reminders`, async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    fixture.store.mutate(fixture.runId, (run) => Object.assign(run.agents[fixture.peerId], { awaitingTool: "slp_stage_report", awaitingSince: "2020-01-01T00:00:00.000Z", nudges: 0 }));
+    for (let attempt = 0; attempt <= NUDGE_LIMIT; attempt += 1) {
+      await hooks.fire("agent.turn_started", { agent: { id: fixture.peerId } });
+      await hooks.fire("agent.turn_ended", { agent: { id: fixture.peerId }, outcome: { kind: "completed" } });
     }
-    expect(remindersFor(implementerId)).toHaveLength(NUDGE_LIMIT);
-    expect(flow.task(runId, API_TASK.id).phase).toBe("handshaking");
-
-    startTurn(implementerId);
-    endTurn(implementerId);
-
-    expect(remindersFor(implementerId)).toHaveLength(NUDGE_LIMIT);
-    expect(flow.task(runId, API_TASK.id)).toMatchObject({ phase: "paused", pausedReason: "Escalated: implementer did not call slp_submit_plan" });
-    // nothing is owed any more, so later turn ends are ignored
-    expect(flow.run(runId).agents[implementerId].awaitingTool).toBeNull();
-    await eventually(async () => {
-      const logEntries = await flow.store.tailLog(runId, 300);
-      if (!logEntries.some((entry) => entry.kind === "nudge.exhausted")) throw new Error("exhaustion not logged");
-    });
+    expect(fixture.store.require(fixture.runId).pipelines[fixture.pipelineId].status).toBe("paused");
+    expect(fixture.store.require(fixture.runId).agents[fixture.peerId].awaitingTool).toBeNull();
+    expect(fixture.logs.some((entry) => entry.kind === "nudge.exhausted")).toBe(true);
   });
 
-  // the turn that ended may be the one that started before the request was sent
-  it("does not nudge for a stale turn that started before the request", async () => {
-    const { flow, runId, implementerId, startTurn, endTurn, requestedLongAgo, remindersFor } = await hookedRun();
-    const inTheFuture = new Date(Date.now() + 3_600_000).toISOString();
-    requestedLongAgo(implementerId, "slp_submit_plan", inTheFuture);
-    startTurn(implementerId);
-    endTurn(implementerId);
-    expect(remindersFor(implementerId)).toEqual([]);
-    expect(flow.run(runId).agents[implementerId].nudges).toBe(0);
+  it("ignores stale, missing-start and non-completed turns", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    fixture.store.mutate(fixture.runId, (run) => Object.assign(run.agents[fixture.peerId], { awaitingTool: "slp_stage_report", awaitingSince: new Date(Date.now() + 3_600_000).toISOString(), nudges: 0 }));
+    await hooks.fire("agent.turn_started", { agent: { id: fixture.peerId } });
+    await hooks.fire("agent.turn_ended", { agent: { id: fixture.peerId }, outcome: { kind: "completed" } });
+    expect(fixture.queuedMessages).toEqual([]);
+    fixture.store.mutate(fixture.runId, (run) => { run.agents[fixture.peerId].awaitingSince = "2020-01-01T00:00:00.000Z"; });
+    await hooks.fire("agent.turn_ended", { agent: { id: fixture.peerId }, outcome: { kind: "error" } });
+    expect(fixture.queuedMessages).toEqual([]);
   });
 
-  // without a start time the turn cannot be tied to the request
-  it("does not nudge when no turn start was observed", async () => {
-    const { flow, runId, requestedLongAgo, endTurn, remindersFor } = await hookedRun();
-    const uiImplementerId = flow.task(runId, UI_TASK.id).agentIds.implementer;
-    requestedLongAgo(uiImplementerId, "slp_submit_plan");
-    endTurn(uiImplementerId);
-    expect(remindersFor(uiImplementerId)).toEqual([]);
-  });
-
-  // only a completed turn means the agent chose not to call its tool
-  it.each(["error", "canceled", "interrupted"])("does not nudge when the turn outcome is '%s'", async (outcomeKind) => {
-    const { implementerId, startTurn, endTurn, requestedLongAgo, remindersFor } = await hookedRun();
-    requestedLongAgo(implementerId, "slp_submit_plan");
-    startTurn(implementerId);
-    endTurn(implementerId, outcomeKind);
-    expect(remindersFor(implementerId)).toEqual([]);
-  });
-
-  it("does not nudge an agent that owes nothing", async () => {
-    const { flow, runId, startTurn, endTurn, remindersFor } = await hookedRun();
-    const masterLeadId = flow.run(runId).masterLeadAgentId;
-    startTurn(masterLeadId);
-    endTurn(masterLeadId);
-    expect(remindersFor(masterLeadId)).toEqual([]);
-  });
-
-  // dispatch clears awaitingTool on success, which silences the nudge
-  it("does not nudge once the owed tool was called", async () => {
-    const { flow, runId, implementerId, startTurn, endTurn, requestedLongAgo, remindersFor } = await hookedRun();
-    requestedLongAgo(implementerId, "slp_submit_plan");
-    startTurn(implementerId);
-    flow.gateway.scriptTurnReplies(flow.task(runId, API_TASK.id).agentIds.forked_lead, ["```json\n{\"verdict\":\"clarify\",\"message\":\"m\"}\n```"]);
-    await flow.callAs(implementerId, "slp_submit_plan", { restatedGoal: "g", discrepancies: [], plannedFiles: [] });
-    endTurn(implementerId);
-    expect(remindersFor(implementerId)).toEqual([]);
-  });
-
-  it("ignores agents that do not belong to any run", async () => {
-    const { startTurn, endTurn } = await hookedRun();
-    startTurn("stranger");
-    expect(() => endTurn("stranger")).not.toThrow();
-  });
-
-  // An exhausted nudge pauses the task and must reach the Master Lead, who alone can decide.
-  it("tells the master lead when nudge exhaustion pauses a task", async () => {
-    const { flow, runId, implementerId, startTurn, endTurn, requestedLongAgo } = await hookedRun();
-    requestedLongAgo(implementerId, "slp_submit_plan");
-    for (let ended = 0; ended <= NUDGE_LIMIT; ended += 1) {
-      startTurn(implementerId);
-      endTurn(implementerId);
-    }
-    const masterMail = flow.mailTo(runId, flow.run(runId).masterLeadAgentId);
-    expect(masterMail.some((message) => message.text.includes(API_TASK.id))).toBe(true);
+  it("uses the Forked Lead's approval obligation for its own nudge", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    fixture.store.mutate(fixture.runId, (run) => Object.assign(run.agents[fixture.stageLeadId], { awaitingTool: "slp_approve_stage", awaitingSince: "2020-01-01T00:00:00.000Z" }));
+    await hooks.fire("agent.turn_started", { agent: { id: fixture.stageLeadId } });
+    await hooks.fire("agent.turn_ended", { agent: { id: fixture.stageLeadId }, outcome: { kind: "completed" } });
+    expect(fixture.queuedMessages).toHaveLength(1);
+    expect(fixture.queuedMessages[0].awaitTool).toBe("slp_approve_stage");
   });
 });
 
-// agents run with a permission mode that routes every prompt through the policy
-describe("permission events", () => {
-  const fireRequest = (hooks: ReturnType<typeof fakeServer>, agentId: string, request: ReturnType<typeof permissionRequest>) =>
-    hooks.fire("agent.permission_requested", { agent: { id: agentId }, request });
-  const lastResponse = (flow: Flow) => flow.gateway.permissionResponses.at(-1)!;
-
-  it("denies a write by an implementer that is still in the read-only handshake", async () => {
-    const { flow, hooks, implementerId } = await hookedRun();
-    const request = fileWriteRequest("src/api/a.ts");
-    await fireRequest(hooks, implementerId, request);
-    expect(lastResponse(flow)).toMatchObject({ agentId: implementerId, requestId: request.id, response: { behavior: "deny" } });
-  });
-
-  it("allows an in-scope write once the task is implementing and denies one outside", async () => {
-    const { flow, runId, hooks, implementerId } = await hookedRun();
-    flow.store.mutate(runId, (run) => {
-      run.tasks[API_TASK.id].phase = "implementing";
-    });
-    await fireRequest(hooks, implementerId, fileWriteRequest("src/api/a.ts"));
-    expect(lastResponse(flow).response).toEqual({ behavior: "allow" });
-    await fireRequest(hooks, implementerId, fileWriteRequest("src/ui/a.ts"));
-    expect(lastResponse(flow).response).toMatchObject({ behavior: "deny" });
-  });
-
-  // the policy must judge paths against the agent's own cwd
-  it("resolves relative paths against the task worktree, not the repository", async () => {
-    const { flow, runId, hooks, implementerId } = await hookedRun();
-    flow.store.mutate(runId, (run) => {
-      run.tasks[API_TASK.id].phase = "implementing";
-    });
-    const worktree = flow.task(runId, API_TASK.id).workspace!.cwd;
-    await fireRequest(hooks, implementerId, fileWriteRequest(`${worktree}/src/api/abs.ts`));
-    expect(lastResponse(flow).response).toEqual({ behavior: "allow" });
-    // the same file in the main checkout is outside the worktree
-    await fireRequest(hooks, implementerId, fileWriteRequest(`${flow.repoPath}/src/api/abs.ts`));
-    expect(lastResponse(flow).response).toMatchObject({ behavior: "deny" });
-  });
-
-  it("lets the master lead write inside the integration checkout and denies the supervisor", async () => {
-    const { flow, runId, hooks } = await hookedRun();
-    // Integration fixes remain writable; pipeline specs now go through SQLite tools instead.
-    await fireRequest(hooks, flow.run(runId).masterLeadAgentId, fileWriteRequest("src/integration-fix.ts"));
-    expect(lastResponse(flow).response).toEqual({ behavior: "allow" });
-    await fireRequest(hooks, flow.run(runId).supervisorAgentId, fileWriteRequest("src/index.ts"));
-    expect(lastResponse(flow).response).toMatchObject({ behavior: "deny" });
-  });
-
-  it("selects the 'implement' action of a plan approval", async () => {
-    const { flow, hooks, implementerId } = await hookedRun();
-    const planRequest = permissionRequest({ name: "ExitPlanMode", kind: "plan" });
-    (planRequest as unknown as { actions: unknown[] }).actions = [{ id: "keep-planning", intent: "dismiss" }, { id: "go", intent: "implement" }];
-    await fireRequest(hooks, implementerId, planRequest);
-    expect(lastResponse(flow).response).toEqual({ behavior: "allow", selectedActionId: "go" });
-  });
-
-  it("answers bus tools with allow and questions with deny", async () => {
-    const { flow, hooks, implementerId } = await hookedRun();
-    await fireRequest(hooks, implementerId, permissionRequest({ name: "mcp__slp-bus__slp_submit_plan" }));
-    expect(lastResponse(flow).response).toEqual({ behavior: "allow" });
-    await fireRequest(hooks, implementerId, permissionRequest({ name: "AskUserQuestion", kind: "question" }));
-    expect(lastResponse(flow).response).toMatchObject({ behavior: "deny" });
-  });
-
-  // a second answer to a resolved request fails inside the SDK
-  it("answers each request id only once", async () => {
-    const { flow, hooks, implementerId } = await hookedRun();
+describe("permission lifecycle events", () => {
+  it("captures the SDK handle and answers a permission request once", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
     const request = permissionRequest({ name: "Read" });
-    await fireRequest(hooks, implementerId, request);
-    await fireRequest(hooks, implementerId, request);
-    expect(flow.gateway.permissionResponses.filter((response) => response.requestId === request.id)).toHaveLength(1);
+    await hooks.fire("agent.permission_requested", { agent: { id: fixture.peerId }, request });
+    await hooks.fire("agent.permission_requested", { agent: { id: fixture.peerId }, request });
+    expect(fixture.capturedHandles).toHaveLength(2);
+    expect(fixture.permissionResponses).toHaveLength(1);
+    expect(fixture.permissionResponses[0]).toMatchObject({ agentId: fixture.peerId, requestId: request.id, response: { behavior: "allow" } });
   });
 
-  it("forgets a request whose answer failed so the sweeper can retry it", async () => {
-    const { flow, hooks, implementerId } = await hookedRun();
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const request = permissionRequest({ name: "Read" });
-    flow.gateway.failNextPermissionResponse = true;
-    await fireRequest(hooks, implementerId, request);
-    expect(flow.gateway.permissionResponses).toEqual([]);
-
-    await fireRequest(hooks, implementerId, request);
-    expect(flow.gateway.permissionResponses).toHaveLength(1);
-    expect(errorSpy).toHaveBeenCalled();
+  it("denies a stage peer write outside its assigned scope", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    const request = fileWriteRequest("docs/leak.md");
+    await hooks.fire("agent.permission_requested", { agent: { id: fixture.peerId }, request });
+    expect(fixture.permissionResponses[0].response).toMatchObject({ behavior: "deny" });
+    expect(fixture.logs.some((entry) => entry.kind === "permission.Edit" && entry.outcome === "blocked")).toBe(true);
   });
 
-  // other plugins' agents are none of the pipeline's business
-  it("ignores permission requests from agents unknown to the pipeline", async () => {
-    const { flow, hooks } = await hookedRun();
-    await fireRequest(hooks, "stranger", permissionRequest({ name: "Read" }));
-    expect(flow.gateway.permissionResponses).toEqual([]);
-  });
-
-  it("logs a denial to the comm log as blocked", async () => {
-    const { flow, runId, hooks, implementerId } = await hookedRun();
-    await fireRequest(hooks, implementerId, fileWriteRequest("src/api/a.ts"));
-    await eventually(async () => {
-      const logEntries = await flow.store.tailLog(runId, 300);
-      if (!logEntries.some((entry) => entry.kind === "permission.Edit" && entry.outcome === "blocked")) throw new Error("denial not logged");
-    });
+  it("ignores permission requests from agents outside the run", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    await hooks.fire("agent.permission_requested", { agent: { id: "stranger" }, request: permissionRequest({ name: "Read" }) });
+    expect(fixture.permissionResponses).toEqual([]);
   });
 });

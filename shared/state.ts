@@ -2,122 +2,33 @@
 import { z } from "zod";
 import { RunModeSchema, SlpRoleSchema } from "./roles";
 import { StoredAcceptanceReportSchema, StoredPeerReportSchema } from "./reports";
-import { ProjectPromptConfigSchema, ProjectRoleIdSchema } from "./project-prompts";
+import { ProjectPromptConfigSchema } from "./project-prompts";
+import { PipelineStateSchema } from "./pipeline";
 
-// Order follows the happy path; paused and failed are side states that any phase can fall into.
-export const TASK_PHASES = [
-  "queued", // defined by the Master Lead, waiting for the fork checkpoint
-  "handshaking", // Implementer and Forked Lead align on the plan (read-only)
-  "implementing",
-  "verifying",
-  "fixing",
-  "documenting",
-  "ready_for_merge",
-  "merged", // Master Lead merged it and asked for archive
-  "paused", // circuit breaker, repeated scope violations or an open escalation
-  "failed",
-] as const;
-export const TaskPhaseSchema = z.enum(TASK_PHASES);
-export type TaskPhase = z.infer<typeof TaskPhaseSchema>;
-
-// Order follows the pipeline; the first four are per task, final_approval is the only run-level gate.
-export const GATE_KINDS = [
-  "after_handshake",
-  "after_implementation",
-  "after_verification",
-  "before_merge",
-  "circuit_breaker",
-  "final_approval",
-] as const;
-export const GateKindSchema = z.enum(GATE_KINDS);
-export type GateKind = z.infer<typeof GateKindSchema>;
-
-export const GateSchema = z.object({
-  kind: GateKindSchema,
-  openedAt: z.string(),
-  note: z.string(),
-});
-export type Gate = z.infer<typeof GateSchema>;
-
-// What the Master Lead supplies for each work package (spec phase 1, step 3).
-export const TaskDefinitionSchema = z.object({
-  // Lowercase slug because the id becomes part of a git branch name and a worktree directory.
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,40}$/),
-  title: z.string().min(1),
-  purpose: z.string().min(1),
-  // Defaults keep the Master Lead's call short: omitting optional lists is valid and means 'none'.
-  assumptions: z.array(z.string()).default([]),
-  writableScope: z.array(z.string()).min(1),
-  forbidden: z.array(z.string()).default([]),
-  // Both reviewers by default; a Lead must opt out explicitly, so skipping review is a deliberate decision.
-  verifiers: z.array(ProjectRoleIdSchema).default(["qa", "security"]).describe("Project role IDs selected by the Lead to review this task"),
-  // A business role can occupy different assignments on different tasks; YAML does not prescribe its capabilities.
-  implementerRole: ProjectRoleIdSchema.default("implementer").describe("Project role ID for the primary implementation assignment"),
-  reviewerPermissions: z.record(ProjectRoleIdSchema, z.enum(["read-only", "tests"])).default({})
-    .describe("Per-task reviewer access; custom roles default to read-only, QA defaults to tests"),
-  verifyParallel: z.boolean().default(true),
-  // The Implementer documents by default because it already knows the change; a separate Doc peer costs an extra agent.
-  documentedBy: ProjectRoleIdSchema.default("implementer").describe("Use implementer to reuse the primary peer, or a project role ID to spawn a dedicated report author"),
-});
-export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
-
-export const PlanSchema = z.object({
-  restatedGoal: z.string(),
-  discrepancies: z.array(z.string()),
-  plannedFiles: z.array(z.string()),
-});
-export type Plan = z.infer<typeof PlanSchema>;
-
-export const VerdictRecordSchema = z.object({
-  verdict: z.enum(["APPROVED", "REJECTED"]),
-  issues: z.array(z.string()),
-});
-export type VerdictRecord = z.infer<typeof VerdictRecordSchema>;
-
-export const TaskWorkspaceSchema = z.object({
-  workspaceId: z.string(),
-  cwd: z.string(),
-  branch: z.string(),
-});
-
-// Defaults allow old JSON imports and earlier SQLite snapshots to acquire new runtime fields safely.
-export const TaskSchema = TaskDefinitionSchema.extend({
-  phase: TaskPhaseSchema,
-  pausedReason: z.string().nullable().default(null),
-  // phase to return to when a paused task is resumed (escalation, circuit breaker, scope)
-  pausedFromPhase: TaskPhaseSchema.nullable().default(null),
-  fixLoopCount: z.number().int().default(0),
-  handshakeRounds: z.number().int().default(0),
-  scopeViolations: z.number().int().default(0),
-  workspace: TaskWorkspaceSchema.nullable().default(null),
-  // agent ids by role; forked lead is removed once the handshake is approved
-  // Plain record keyed by role name so a role can be removed (the Forked Lead) without a structural change.
-  agentIds: z.record(z.string(), z.string()).default({}),
-  plan: PlanSchema.nullable().default(null),
-  // verdicts collected for the current verification round only
-  roundVerdicts: z.record(z.string(), VerdictRecordSchema).default({}),
-  // verifiers still to be woken in a sequential (non parallel) stage
-  verifierQueue: z.array(ProjectRoleIdSchema).default([]),
-  // Task-level gate: parallel tasks can wait for the human independently of each other.
-  gate: GateSchema.nullable().default(null),
-  // Reports travel through authenticated tools rather than files in the task worktree.
-  implementationSummary: z.string().nullable().default(null),
-  acceptanceReport: StoredAcceptanceReportSchema.nullable().default(null),
-  // Additional expert reports remain available even after the peer or task workspace is archived.
-  peerReports: z.array(StoredPeerReportSchema).default([]),
-  updatedAt: z.string(),
-});
-export type Task = z.infer<typeof TaskSchema>;
+// Re-export historical names because persisted-run readers and the old task card still use them.
+// New pipeline code imports its contracts from shared/pipeline.ts instead of this compatibility layer.
+export * from "./legacy-tasks";
+import { GateSchema, TaskSchema } from "./legacy-tasks";
 
 // One entry per agent the plugin created; the bus authenticates callers through `token`.
 export const AgentRecordSchema = z.object({
   agentId: z.string(),
   role: SlpRoleSchema,
+  // New pipeline agents are identified by stage; these nullable fields keep old task rows
+  // readable while the dynamic runtime migrates callers away from fixed task roles.
+  pipelineId: z.string().nullable().default(null),
+  stageId: z.string().nullable().default(null),
+  stagePeerId: z.string().nullable().default(null),
+  archivedAt: z.string().nullable().default(null),
   projectRole: z.string().nullable().default(null),
   // Only additional peers use this explicit grant; primary agents derive access from their pipeline assignment.
   writeScope: z.array(z.string()).default([]),
   // A Lead waiting for an extra expert must not be nudged for the workflow tool it will resume afterward.
   leadContinuationTool: z.string().nullable().default(null),
+  // A direct peer conversation can defer the sender's normal obligation until the recipient
+  // replies; keeping this explicit prevents the sweeper from treating that wait as a stall.
+  waitingForAgentId: z.string().nullable().default(null),
+  deferredTool: z.string().nullable().default(null),
   taskId: z.string().nullable(),
   token: z.string(),
   // name of the bus tool the agent owes us; used to nudge agents that end a turn without it
@@ -138,11 +49,13 @@ export const MailboxMessageSchema = z.object({
   taskId: z.string().nullable(),
   // bus tool the recipient owes once this message is delivered (drives nudging)
   awaitTool: z.string().nullable().default(null),
+  // Reminders must not look like fresh work, otherwise delivery would reset the nudge counter forever.
+  isReminder: z.boolean().default(false),
   createdAt: z.string(),
 });
 export type MailboxMessage = z.infer<typeof MailboxMessageSchema>;
 
-// Consult (Master Lead -> Implementer) and sibling (worktree A -> worktree B) questions.
+// Historical consultation and cross-worktree questions retained for legacy run snapshots.
 export const QuestionSchema = z.object({
   id: z.string(),
   kind: z.enum(["consult", "sibling"]),
@@ -168,6 +81,11 @@ export const RUN_STATUSES = [
 export const RunStatusSchema = z.enum(RUN_STATUSES);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
+// Explicit engine identity prevents an empty legacy run from being mistaken for a dynamic run.
+export const RUN_ENGINE_VERSIONS = ["legacy", "dynamic-stages-v1"] as const;
+export const RunEngineVersionSchema = z.enum(RUN_ENGINE_VERSIONS);
+export type RunEngineVersion = z.infer<typeof RunEngineVersionSchema>;
+
 export const ProviderChoicesSchema = z.object({
   supervisor: z.string(),
   lead: z.string(),
@@ -183,6 +101,14 @@ export const ProviderChoicesSchema = z.object({
 });
 export type ProviderChoices = z.infer<typeof ProviderChoicesSchema>;
 
+export const PipelineWorkspaceSchema = z.object({
+  workspaceId: z.string(),
+  cwd: z.string(),
+  branch: z.string(),
+  owned: z.boolean(),
+});
+export type PipelineWorkspace = z.infer<typeof PipelineWorkspaceSchema>;
+
 export const RunSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -192,6 +118,8 @@ export const RunSchema = z.object({
   mode: RunModeSchema,
   status: RunStatusSchema,
   providers: ProviderChoicesSchema,
+  // Missing markers on old SQLite rows intentionally remain legacy until a new run opts in.
+  engineVersion: RunEngineVersionSchema.default("legacy"),
   // Null until the Supervisor delegates, so a run in 'initializing' is still a valid stored object.
   criteria: z.string().nullable().default(null),
   masterSpec: z.string().nullable().default(null),
@@ -204,6 +132,10 @@ export const RunSchema = z.object({
   devCwd: z.string(),
   // Defaults let a run be inserted before its tasks, agents or mail exist, and let older state files load.
   tasks: z.record(z.string(), TaskSchema).default({}),
+  pipelines: z.record(z.string(), PipelineStateSchema).default({}),
+  // Worktrees created before a pipeline definition is accepted still need an ownership record
+  // so abort/finalize cleanup remains deterministic after a daemon restart.
+  pipelineWorkspaces: z.record(z.string(), PipelineWorkspaceSchema).default({}),
   agents: z.record(z.string(), AgentRecordSchema).default({}),
   mailbox: z.array(MailboxMessageSchema).default([]),
   questions: z.array(QuestionSchema).default([]),

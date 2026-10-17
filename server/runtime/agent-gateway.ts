@@ -2,14 +2,14 @@
 // private bus identity, prompt them, read their live status and archive them.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
-import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
+import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
-import type { AgentRecord } from "../../shared/state";
+import type { AgentRecord, Run } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
-import { systemPromptFor } from "../prompts/system-prompts";
-import { resolveAgentSettings } from "../project-prompts/agent-settings";
+import { systemPromptFor, type StagePromptContext } from "../prompts/system-prompts";
+import { resolveAgentSettings, unattendedModeForProvider } from "../project-prompts/agent-settings";
 import type { RunStore } from "../store/run-store";
-import type { PaseoHolder } from "./paseo-holder";
+import type { PaseoApi, PaseoHolder } from "./paseo-holder";
 
 export interface AgentLiveStatus {
   agentId: string;
@@ -25,6 +25,14 @@ export interface CreateAgentSpec {
   writeScope?: string[];
   leadContinuationTool?: string | null;
   taskId: string | null;
+  // Stage identity is separate from legacy task identity because one pipeline can create
+  // several fresh peer cohorts for the same worktree.
+  pipelineId?: string | null;
+  stageId?: string | null;
+  stagePeerId?: string | null;
+  // Stage context belongs in the system prompt so every peer sees the same roster and goal,
+  // while initialPrompt remains available for a one-off kickoff message after cohort creation.
+  stageContext?: StagePromptContext;
   provider: string;
   // Parent links organize the Paseo sidebar independently from the chosen worktree placement.
   parentAgentId?: string;
@@ -47,14 +55,94 @@ export interface TurnResult {
   error: string | null;
 }
 
+// Only Claude, Codex and OpenCode support exact MCP tool preapproval in Paseo; plugin and ACP
+// providers such as Antigravity reject session.open when toolPolicy is present and rely on decidePermission.
+const PROVIDERS_WITHOUT_TOOL_POLICY = new Set([
+  "antigravity",
+  "muse",
+  "copilot",
+  "cursor",
+  "pi",
+  "omp",
+  "kimi",
+  "kiro",
+  "traecli",
+]);
+
+function isUnsupportedToolPolicyError(error: unknown): boolean {
+  const errorCode = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  if (errorCode === "tool_policy_unsupported") return true;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  // Both plugin providers ("Provider does not support permission.tool_policy") and built-in
+  // providers without exact preapproval reject toolPolicy before opening the session.
+  return /permission\.tool_policy|tool_policy_unsupported|cannot preapprove exact mcp tools/i.test(errorMessage);
+}
+
 // Older saved runs have no selected mode, so use each supported provider's native unattended mode.
 export function permissionModeFor(providerModel: string): string | undefined {
   const providerId = providerModel.split("/", 1)[0];
   // Paseo owns the provider-specific IDs; passing a guessed universal ID can make agent creation fail.
-  return getUnattendedModeId(providerId);
+  return unattendedModeForProvider(providerId);
+}
+
+function statusFromSnapshot(agentSnapshot: AgentSnapshotPayload, persistedRecord?: AgentRecord): AgentLiveStatus {
+  return {
+    agentId: agentSnapshot.id,
+    status: agentSnapshot.status,
+    pendingPermissions: agentSnapshot.pendingPermissions,
+    // Persisted archive state wins while the directory projection catches up after a restart.
+    archived: Boolean(agentSnapshot.archivedAt || persistedRecord?.archivedAt),
+  };
+}
+
+function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
+  if (run.status !== "running" || agentRecord.archivedAt || !agentRecord.pipelineId || !agentRecord.stageId) return false;
+  const pipeline = run.pipelines[agentRecord.pipelineId];
+  const currentStage = pipeline?.stages[pipeline.currentStageIndex];
+  // Only refresh the cohort that can still receive work; archived prior stages should not be revived.
+  return Boolean(
+    pipeline
+    && ["starting", "running", "paused"].includes(pipeline.status)
+    && currentStage
+    && ["starting", "running", "completing"].includes(currentStage.status)
+    && currentStage.id === agentRecord.stageId,
+  );
+}
+
+function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
+  if (/^agent\s+(?:not found|does not exist)\b/.test(message) || /^unknown agent\b/.test(message)) return true;
+  // Generic SDK/network errors must remain unknown; only an error naming this identity can confirm absence.
+  return message.includes(agentId.toLowerCase()) && /\b(?:not found|does not exist|unknown)\b/.test(message);
+}
+
+async function refreshMissingStageAgent(
+  paseo: PaseoApi,
+  store: RunStore,
+  persistedRecord: AgentRecord,
+): Promise<AgentLiveStatus | null> {
+  try {
+    const refreshed = await paseo.agents.ref(persistedRecord.agentId).refresh();
+    if (!refreshed?.agent) {
+      // A null fetch result is the SDK's explicit missing-agent response, unlike a transport failure.
+      return { agentId: persistedRecord.agentId, status: "closed", pendingPermissions: [], archived: true };
+    }
+    return statusFromSnapshot(refreshed.agent, store.findAgent(persistedRecord.agentId)?.agentRecord);
+  } catch (refreshError) {
+    if (isConfirmedMissingAgentError(refreshError, persistedRecord.agentId)) {
+      // Treat only a confirmed identity miss as archived so transient SDK failures cannot create a new cohort.
+      return { agentId: persistedRecord.agentId, status: "closed", pendingPermissions: [], archived: true };
+    }
+    // An unavailable directory leaves the agent unknown; callers must not infer that it was archived.
+    return null;
+  }
 }
 
 export class AgentGateway {
+  private readonly providersWithoutToolPolicy = new Set<string>(PROVIDERS_WITHOUT_TOOL_POLICY);
+
   constructor(
     private readonly holder: PaseoHolder,
     private readonly store: RunStore,
@@ -78,7 +166,14 @@ export class AgentGateway {
       writeScope: spec.writeScope ?? [],
       leadContinuationTool: spec.leadContinuationTool ?? null,
       taskId: spec.taskId,
+      pipelineId: spec.pipelineId ?? null,
+      stageId: spec.stageId ?? null,
+      stagePeerId: spec.stagePeerId ?? null,
+      archivedAt: null,
       token: randomBytes(24).toString("base64url"),
+      // Direct stage messages can temporarily defer an agent's normal report obligation.
+      waitingForAgentId: null,
+      deferredTool: null,
       awaitingTool: spec.awaitTool,
       // Starts the nudge clock at creation: an agent that never calls the tool it owes is detected by the sweeper from this timestamp.
       awaitingSince: spec.awaitTool ? new Date().toISOString() : null,
@@ -88,12 +183,14 @@ export class AgentGateway {
     this.store.mutate(spec.runId, (run) => {
       run.agents[agentId] = agentRecord;
     });
-    // Refreshed because the workspace handle may be stale after worktree creation, and the create call needs its current state.
-    const workspace = paseo.workspaces.ref(spec.workspaceId);
-    await workspace.refresh();
     const busToolNames = toolNamesForRole(spec.role);
     try {
-      await workspace.agents.create({
+      // Refresh belongs inside the rollback boundary: a stale workspace is just as much a failed
+      // creation as an SDK rejection, and must not leave an authenticated orphan in SQLite.
+      const workspace = paseo.workspaces.ref(spec.workspaceId);
+      await workspace.refresh();
+      const selectedProviderId = modelSettings.provider.split("/", 1)[0];
+      const baseAgentCreation = {
         agentId,
         title: spec.title,
         prompt: spec.initialPrompt,
@@ -104,31 +201,55 @@ export class AgentGateway {
           // Business expertise is independent of the task capability used for tool/permission checks.
           "slp.peer-role": spec.projectRole ?? "",
           "slp.task": spec.taskId ?? "",
+          // Dynamic stage labels let recovery find an exact cohort without depending on a task record.
+          "slp.pipeline": spec.pipelineId ?? "",
+          "slp.stage": spec.stageId ?? "",
+          "slp.peer": spec.stagePeerId ?? "",
           // Workspace path and group labels make task peers searchable together in Paseo.
           ...(spec.peerWorktreePath ? { "slp.group": "peers", "slp.worktree": spec.peerWorktreePath } : {}),
         },
         // Parentage is separate from workspace placement, so a Lead can live in its own integration worktree.
         ...(spec.parentAgentId ? { parent: spec.parentAgentId } : {}),
-        config: {
-          provider: modelSettings.provider,
-          modeId: modelSettings.permissionModeId ?? permissionModeFor(modelSettings.provider),
-          ...(modelSettings.thinkingOptionId ? { thinkingOptionId: modelSettings.thinkingOptionId } : {}),
-          systemPrompt: systemPromptFor(spec.role, this.store.require(spec.runId).promptConfig, spec.projectRole),
-          mcpServers: {
-            [BUS_SERVER_NAME]: {
-              type: "http",
-              // load tool schemas up front; deferred tools made agents call slp_ tools with empty arguments
-              alwaysLoad: true,
-              url: `http://127.0.0.1:${busPort}/mcp/${agentRecord.token}`,
-            },
+      };
+      const baseSessionConfig = {
+        provider: modelSettings.provider,
+        modeId: modelSettings.permissionModeId ?? permissionModeFor(modelSettings.provider),
+        ...(modelSettings.thinkingOptionId ? { thinkingOptionId: modelSettings.thinkingOptionId } : {}),
+        systemPrompt: systemPromptFor(
+          spec.role,
+          this.store.require(spec.runId).promptConfig,
+          spec.projectRole,
+          spec.stageContext,
+        ),
+        mcpServers: {
+          [BUS_SERVER_NAME]: {
+            type: "http" as const,
+            // load tool schemas up front; deferred tools made agents call slp_ tools with empty arguments
+            alwaysLoad: true,
+            url: `http://127.0.0.1:${busPort}/mcp/${agentRecord.token}`,
           },
-          // pre-approving the role's own bus tools avoids a permission round trip per call
-          toolPolicy: {
-            preapproved: busToolNames.map((tool) => ({ kind: "mcp" as const, server: BUS_SERVER_NAME, tool })),
-          },
-          ...(spec.extraOptions ? { options: spec.extraOptions } : {}),
         },
-      });
+        ...(spec.extraOptions ? { options: spec.extraOptions } : {}),
+      };
+      const preapprovedToolPolicy = {
+        // Pre-approving the role's own bus tools avoids a permission round trip per call when supported.
+        preapproved: busToolNames.map((tool) => ({ kind: "mcp" as const, server: BUS_SERVER_NAME, tool })),
+      };
+      if (this.providersWithoutToolPolicy.has(selectedProviderId)) {
+        await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+      } else {
+        try {
+          await workspace.agents.create({
+            ...baseAgentCreation,
+            config: { ...baseSessionConfig, toolPolicy: preapprovedToolPolicy },
+          });
+        } catch (toolPolicyError) {
+          if (!isUnsupportedToolPolicyError(toolPolicyError)) throw toolPolicyError;
+          // Custom or plugin providers without permission.tool_policy still authorize bus tools via decidePermission.
+          this.providersWithoutToolPolicy.add(selectedProviderId);
+          await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+        }
+      }
     } catch (createError) {
       // do not leave a token for an agent that never existed
       this.store.mutate(spec.runId, (run) => {
@@ -141,15 +262,11 @@ export class AgentGateway {
 
   // send() resolves once the prompt is accepted, not when the turn finishes; completion is observed via events and the sweeper.
   async prompt(agentId: string, text: string): Promise<void> {
+    const persistedRecord = this.store.findAgent(agentId)?.agentRecord;
+    // Recovery must never revive a peer whose stage already closed, even if a stale mailbox entry remains.
+    if (persistedRecord?.archivedAt) throw new Error(`Agent '${agentId}' is archived.`);
     const paseo = await this.holder.get();
     await paseo.agents.ref(agentId).send(text);
-  }
-
-  // Unlike prompt(), this blocks for the reply; only the handshake needs the text of a turn.
-  async runTurn(agentId: string, text: string, timeoutMs: number): Promise<TurnResult> {
-    const paseo = await this.holder.get();
-    const turnResult = await paseo.agents.ref(agentId).run(text, { timeoutMs });
-    return { status: turnResult.status, lastMessage: turnResult.lastMessage, error: turnResult.error };
   }
 
   // The status can be 'permission' when a prompt is pending; callers keep waiting because the sweeper answers permissions in the background.
@@ -170,20 +287,34 @@ export class AgentGateway {
   // Events are best effort, so truth comes from a directory poll; this is what the mailbox and sweeper trust to decide an agent is idle.
   async liveStatuses(runId: string): Promise<Map<string, AgentLiveStatus>> {
     const paseo = await this.holder.get();
-    const directoryPage = await paseo.agents.list({
-      filter: { labels: { "slp.run": runId } },
-      // 200 is far above any run (a handful of agents per task) and avoids paging logic in the 3 s sweep loop.
-      page: { limit: 200 },
-    });
     const statusByAgentId = new Map<string, AgentLiveStatus>();
-    for (const directoryEntry of directoryPage.entries) {
-      const agentSnapshot = directoryEntry.agent;
-      statusByAgentId.set(agentSnapshot.id, {
-        agentId: agentSnapshot.id,
-        status: agentSnapshot.status,
-        pendingPermissions: agentSnapshot.pendingPermissions as AgentPermissionRequest[],
-        archived: Boolean(agentSnapshot.archivedAt),
+    let directoryCursor: string | undefined;
+    do {
+      const directoryPage = await paseo.agents.list({
+        filter: { labels: { "slp.run": runId } },
+        // The daemon caps each page at 200, so every cursor must be consumed before recovery trusts absence.
+        page: { limit: 200, ...(directoryCursor ? { cursor: directoryCursor } : {}) },
       });
+      for (const directoryEntry of directoryPage.entries) {
+        const agentSnapshot = directoryEntry.agent;
+        statusByAgentId.set(agentSnapshot.id, statusFromSnapshot(agentSnapshot, this.store.findAgent(agentSnapshot.id)?.agentRecord));
+      }
+      const nextDirectoryCursor = directoryPage.pageInfo.nextCursor ?? undefined;
+      // A malformed/replayed cursor must not spin the three-second sweeper forever.
+      if (!nextDirectoryCursor || nextDirectoryCursor === directoryCursor) break;
+      directoryCursor = nextDirectoryCursor;
+    } while (directoryCursor);
+
+    const currentRun = this.store.require(runId);
+    const missingStageAgents = Object.values(currentRun.agents).filter(
+      (agentRecord) => isCurrentStageAgent(currentRun, agentRecord) && !statusByAgentId.has(agentRecord.agentId),
+    );
+    // Directory projections can lag immediately after creation; refresh only the bounded active cohort.
+    const refreshedStatuses = await Promise.all(
+      missingStageAgents.map((agentRecord) => refreshMissingStageAgent(paseo, this.store, agentRecord)),
+    );
+    for (const refreshedStatus of refreshedStatuses) {
+      if (refreshedStatus) statusByAgentId.set(refreshedStatus.agentId, refreshedStatus);
     }
     return statusByAgentId;
   }
@@ -201,5 +332,13 @@ export class AgentGateway {
   async archive(agentId: string): Promise<void> {
     const paseo = await this.holder.get();
     await paseo.agents.ref(agentId).archive();
+    // Mark only after Paseo confirms the archive, so a transient SDK failure remains recoverable.
+    const lookup = this.store.findAgent(agentId);
+    if (lookup) {
+      this.store.mutate(lookup.run.id, (run) => {
+        const agentRecord = run.agents[agentId];
+        if (agentRecord) agentRecord.archivedAt = new Date().toISOString();
+      });
+    }
   }
 }

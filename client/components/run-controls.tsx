@@ -12,9 +12,10 @@ interface RunControlsProps {
   styles: UiStyles;
   theme: PluginTheme;
   run: Run;
+  readOnly?: boolean;
 }
 
-export function RunControls({ styles, theme, run }: RunControlsProps) {
+export function RunControls({ styles, theme, run, readOnly = false }: RunControlsProps) {
   // Each action keeps its own pending/error state, so approving a gate never disables or mislabels the abort button.
   const { setRunMode, approveGate, approveMain, abortRun } = useRunActions();
   // Abort is destructive and irreversible, so the first press only arms it.
@@ -27,6 +28,11 @@ export function RunControls({ styles, theme, run }: RunControlsProps) {
   // The final merge into the base branch is only meaningful once the daemon is waiting for it.
   const canApproveMain = run.status === "awaiting_user";
   const isRunFinished = run.status === "completed" || run.status === "aborted";
+
+  // Legacy snapshots are historical evidence; exposing their old controls could restart retired work.
+  if (readOnly) {
+    return <Text style={styles.mutedText}>Legacy task engine · read-only</Text>;
+  }
 
   // Two-step abort: a mistap on a phone must not archive every agent and discard the run, so the second press confirms.
   const pressAbort = () => {

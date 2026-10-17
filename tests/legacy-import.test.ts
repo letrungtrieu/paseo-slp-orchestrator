@@ -15,11 +15,19 @@ async function legacyFixture() {
   mkdirSync(join(repoPath, ".slp"), { recursive: true });
   const legacyPath = join(stateDirectory, "state.json");
   const databasePath = join(stateDirectory, "orchestrator.sqlite3");
-  const run = buildRun({ repoPath, devCwd: repoPath,
+  const run = buildRun({ engineVersion: "legacy", repoPath, devCwd: repoPath,
     tasks: { api: buildTask({ id: "api", workspace: { cwd: repoPath, branch: "task/api", workspaceId: "ws-api" } }) },
     agents: { lead: buildAgentRecord({ agentId: "lead", role: "master_lead", token: "preserved-token" }) },
   });
-  writeFileSync(legacyPath, JSON.stringify({ version: 1, runs: { [run.id]: { ...run, masterSpecPath: ".slp/MASTER_SPEC.md" } } }));
+  const legacyState = JSON.parse(JSON.stringify({ version: 1, runs: { [run.id]: { ...run, masterSpecPath: ".slp/MASTER_SPEC.md" } } })) as {
+    runs: Record<string, { agents: Record<string, Record<string, unknown>> }>;
+  };
+  // Imported peer records use the four runtime roles directly along with their .slp/peers role ID.
+  legacyState.runs[run.id].agents.legacy = {
+    ...buildAgentRecord({ agentId: "legacy", role: "peer", projectRole: "qa-engineer", token: "legacy-token" }),
+    archivedAt: "2026-01-01T00:00:00.000Z",
+  };
+  writeFileSync(legacyPath, JSON.stringify(legacyState));
   const openStore = () => {
     const store = new RunStore(databasePath, legacyPath);
     openedStores.push(store);
@@ -41,6 +49,8 @@ describe("legacy file import", () => {
     expect(store.require("run-1").masterSpec).toBe("Original architecture");
     expect(store.require("run-1").tasks.api.acceptanceReport?.report).toContain("Historic acceptance");
     expect(store.findCallerByToken("preserved-token")?.run.id).toBe("run-1");
+    expect(store.findCallerByToken("legacy-token")?.agentRecord).toMatchObject({ role: "peer", projectRole: "qa-engineer" });
+    expect(store.findAgent("legacy")?.agentRecord.archivedAt).toBeTruthy();
     expect(store.tailLog("run-1", 10)).toHaveLength(1);
     expect(readFileSync(legacyPath, "utf8")).toBe(originalStateText);
   });

@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { abortRun } from "../server/pipeline/run-lifecycle";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { eventually } from "./helpers/flow-steps";
 
@@ -104,7 +103,6 @@ describe("delivery rules", () => {
     expect(flow.gateway.promptsTo(masterLeadAgentId)).toEqual(["once"]);
   });
 });
-
 // awaitingTool/awaitingSince drive nudging
 describe("owed tool bookkeeping", () => {
   it("stamps the recipient with the last owed tool, the send time and a reset nudge counter", async () => {
@@ -112,7 +110,7 @@ describe("owed tool bookkeeping", () => {
     flow.store.mutate(runId, (run) => {
       run.agents[masterLeadAgentId].nudges = 2;
     });
-    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "a", { ...ENQUEUE_NO_REPLY, awaitTool: "slp_define_tasks" });
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "a", { ...ENQUEUE_NO_REPLY, awaitTool: "slp_define_pipeline" });
     flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "b", { ...ENQUEUE_NO_REPLY, awaitTool: "slp_report" });
     flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "c", ENQUEUE_NO_REPLY);
     const before = new Date().toISOString();
@@ -136,7 +134,6 @@ describe("owed tool bookkeeping", () => {
     expect(flow.run(runId).agents[masterLeadAgentId]).toMatchObject({ awaitingTool: "slp_report", awaitingSince: "2020-01-01T00:00:00.000Z" });
   });
 });
-
 // a failed prompt must never lose instructions
 describe("failed sends", () => {
   it("puts the mail back at the front of the queue when prompt() throws", async () => {
@@ -189,17 +186,5 @@ describe("failed sends", () => {
       // appends are fire-and-forget, so file order is not guaranteed; compare as a set
       if (mailOutcomes.sort().join() !== "delivered,error,queued") throw new Error(`got ${mailOutcomes.join()}`);
     });
-  });
-});
-
-// an aborted run must not keep waking agents
-describe("abortRun", () => {
-  it("archives every agent, drops queued mail and marks the run aborted", async () => {
-    const { flow, runId, masterLeadAgentId, supervisorAgentId } = await runWithTwoAgents();
-    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "never delivered", ENQUEUE_NO_REPLY);
-    await abortRun(flow.ctx, runId);
-
-    expect(flow.run(runId)).toMatchObject({ status: "aborted", mailbox: [] });
-    expect(flow.gateway.archivedAgentIds.sort()).toEqual([masterLeadAgentId, supervisorAgentId].sort());
   });
 });

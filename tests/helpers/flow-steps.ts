@@ -1,167 +1,153 @@
-// Reusable story steps of the SLP flow (spec phases 1-6). Each step performs the tool calls an
-// agent would make and waits for the pipeline's detached follow-up work to settle.
+// Reusable story steps for the Lead-authored pipeline protocol. The helpers intentionally
+// drive the MCP tools instead of mutating pipeline state, so flow tests cover authentication,
+// role checks and the same asynchronous stage handoffs used by real agents.
 import { vi } from "vitest";
-import { approveGate } from "../../server/pipeline/gates";
-import { reviewerAgentKey } from "../../server/pipeline/peer-assignments";
-import type { GateKind, TaskPhase } from "../../shared/state";
+import type { PipelineDefinition, PipelineState, StageState } from "../../shared/pipeline";
 import type { Flow } from "./flow-fixture";
-import { commitFiles } from "./git-fixture";
+import { commitFiles, runGitSync } from "./git-fixture";
 
-export const API_TASK = {
-  id: "api-layer",
-  title: "API layer",
-  purpose: "Expose the billing endpoints",
-  assumptions: ["router lives in src/api/router.ts"],
-  writableScope: ["src/api/"],
+export const DEFAULT_PIPELINE: PipelineDefinition = {
+  name: "billing-import",
+  version: "1.0",
+  worktree: "pipeline-billing-import",
+  description: "Implement, review and verify the billing import flow.",
+  stages: [
+    {
+      name: "review-codebase",
+      goal: "Understand the existing billing boundaries before changing code.",
+      peers: [
+        { role: "reviewer", task: "Review the codebase and report its important boundaries." },
+        { role: "developer", task: "Prepare a small change plan from the review findings." },
+      ],
+    },
+    {
+      name: "coding",
+      goal: "Implement the accepted billing import behavior in the shared worktree.",
+      peers: [{ role: "developer", task: "Implement the billing import behavior and report evidence." }],
+    },
+    {
+      name: "qa",
+      goal: "Exercise the completed behavior and report any quality risks.",
+      peers: [{ role: "qa_engineer", task: "Run focused checks and report the observed behavior." }],
+    },
+  ],
 };
-export const UI_TASK = {
-  id: "ui-layer",
-  title: "UI layer",
-  purpose: "Render the billing page",
-  writableScope: ["src/ui/"],
+
+export const TWO_PEER_PIPELINE: PipelineDefinition = {
+  ...DEFAULT_PIPELINE,
+  name: "billing-review",
+  stages: [DEFAULT_PIPELINE.stages[0]],
 };
 
-export const IMPLEMENTER_PLAN = {
-  restatedGoal: "Add the billing endpoints",
-  discrepancies: ["router is in src/api/routes.ts, not router.ts"],
-  plannedFiles: ["src/api/billing.ts"],
+export const SECOND_STAGE_PIPELINE: PipelineDefinition = {
+  ...DEFAULT_PIPELINE,
+  name: "billing-sequential",
 };
 
-// Every required section travels in the tool call, so completion tests cannot pass on a file's mere existence.
-export const COMPLETE_ACCEPTANCE_REPORT = {
-  summary: "Implemented billing with reviewed tests.", changedFiles: ["src/api/feature.ts"],
-  technicalDecisions: ["Keep billing behind the existing router."],
-  qaResults: "The billing test suite passed.", securityReview: "APPROVED: no issues identified.", risks: [],
-};
-
-export const forkedLeadReply = (verdict: "approve" | "clarify" | "escalate", message = "ok") =>
-  `Here is my verdict.\n\`\`\`json\n${JSON.stringify({ verdict, message })}\n\`\`\``;
-
-// Polling with a tight interval: the pipeline's follow-up work is detached, so assertions must wait instead of reading state once.
+// Polling is needed because stage creation is deliberately detached from the defining tool call.
 export const eventually = (assertion: () => void) => vi.waitFor(assertion, { timeout: 4000, interval: 10 });
 
-// Phase 1: Supervisor delegates, Master Lead defines tasks, queued tasks reach the handshake.
-export async function delegateAndDefineTasks(flow: Flow, runId: string, taskDefinitions: object[] = [API_TASK, UI_TASK]): Promise<void> {
+export async function delegateToLead(flow: Flow, runId: string): Promise<void> {
   const delegation = await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
-    acceptanceCriteria: "Billing works end to end with tests and docs.",
+    acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
   });
   if (delegation.isError) throw new Error(delegation.text);
-  const definition = await flow.callAsRole(runId, "master_lead", null, "slp_define_tasks", {
-    masterSpec: "Billing architecture: separate API and UI work; preserve the shared invoice contract.",
-    tasks: taskDefinitions,
-  });
-  if (definition.isError) throw new Error(definition.text);
-  // Tasks leave 'queued' only after the fork checkpoint and worktree creation, which run after the tool call returned.
-  await eventually(() => {
-    for (const task of Object.values(flow.run(runId).tasks)) {
-      if (task.phase === "queued") throw new Error(`${task.id} still queued`);
-    }
-  });
 }
 
-export async function startedRunWithTasks(flow: Flow, taskDefinitions?: object[]): Promise<string> {
+export async function definePipeline(flow: Flow, runId: string, definition: PipelineDefinition = DEFAULT_PIPELINE): Promise<string> {
+  const response = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", { pipeline: definition });
+  if (response.isError) throw new Error(response.text);
+  const pipelineId = JSON.parse(response.text).pipelineId as string;
+  await eventually(() => {
+    const pipeline = flow.pipeline(runId, pipelineId);
+    if (!pipeline || pipeline.status === "queued" || pipeline.status === "starting") throw new Error("pipeline cohort is still starting");
+  });
+  return pipelineId;
+}
+
+export async function startedRunWithPipeline(flow: Flow, definition: PipelineDefinition = DEFAULT_PIPELINE): Promise<{ runId: string; pipelineId: string }> {
   const runId = await flow.startRun();
-  await delegateAndDefineTasks(flow, runId, taskDefinitions);
-  return runId;
+  await delegateToLead(flow, runId);
+  // The Lead owns the handoff path: the definition carries the concrete checkout returned by
+  // slp_create_worktree, so the engine never silently invents a different peer workspace.
+  const workspaceResponse = await flow.callAsRole(runId, "master_lead", null, "slp_create_worktree", { name: definition.name });
+  if (workspaceResponse.isError) throw new Error(workspaceResponse.text);
+  const workspace = JSON.parse(workspaceResponse.text) as { cwd: string };
+  const pipelineId = await definePipeline(flow, runId, { ...definition, worktree: workspace.cwd });
+  return { runId, pipelineId };
 }
 
-// Handshake round: the implementer submits a plan and the scripted Forked Lead answers.
-export async function submitPlanAndAwaitReview(flow: Flow, runId: string, taskId: string, verdict: "approve" | "clarify" | "escalate", message = "ok"): Promise<void> {
-  const forkedLeadId = flow.agentId(runId, "forked_lead", taskId);
-  // The turn count before submitting distinguishes this review from earlier ones of the same Forked Lead.
-  const reviewsBefore = flow.gateway.turns.filter((turn) => turn.agentId === forkedLeadId).length;
-  flow.gateway.scriptTurnReplies(forkedLeadId, [forkedLeadReply(verdict, message)]);
-  const submission = await flow.callAsRole(runId, "implementer", taskId, "slp_submit_plan", IMPLEMENTER_PLAN);
-  if (submission.isError) throw new Error(submission.text);
-  // the verdict is processed after runTurn resolves, so wait for the review turn and its effects
+export function currentStage(flow: Flow, runId: string, pipelineId: string): StageState {
+  const pipeline = flow.pipeline(runId, pipelineId);
+  if (!pipeline) throw new Error(`Unknown pipeline ${pipelineId}`);
+  const stage = pipeline.stages[pipeline.currentStageIndex];
+  if (!stage) throw new Error(`Pipeline ${pipelineId} has no current stage`);
+  return stage;
+}
+
+export function stageByName(flow: Flow, runId: string, pipelineId: string, name: string): StageState {
+  const pipeline = flow.pipeline(runId, pipelineId);
+  if (!pipeline) throw new Error(`Unknown pipeline ${pipelineId}`);
+  const stage = pipeline.stages.find((candidate) => candidate.name === name);
+  if (!stage) throw new Error(`Unknown stage ${name}`);
+  return stage;
+}
+
+export async function waitForStage(flow: Flow, runId: string, pipelineId: string, status: StageState["status"]): Promise<void> {
   await eventually(() => {
-    if (flow.gateway.turns.filter((turn) => turn.agentId === forkedLeadId).length <= reviewsBefore) throw new Error("review not run yet");
+    if (currentStage(flow, runId, pipelineId).status !== status) throw new Error(`stage is not ${status}`);
   });
 }
 
-export async function approveHandshake(flow: Flow, runId: string, taskId: string): Promise<void> {
-  await submitPlanAndAwaitReview(flow, runId, taskId, "approve");
+export async function reportPeer(flow: Flow, runId: string, pipelineId: string, peerRole: string, summary = "Evidence collected"): Promise<void> {
+  const stage = currentStage(flow, runId, pipelineId);
+  const peerId = flow.agentId(runId, peerRole, stage.id);
+  const response = await flow.callAs(peerId, "slp_stage_report", { summary, findings: [summary], status: "completed" });
+  if (response.isError) throw new Error(response.text);
+}
+
+export async function approveCurrentStage(flow: Flow, runId: string, pipelineId: string, summary = "The stage goal is met."): Promise<void> {
+  const approvedStage = currentStage(flow, runId, pipelineId);
+  const coordinatorId = flow.agentId(runId, "forked_lead", approvedStage.id);
+  const response = await flow.callAs(coordinatorId, "slp_approve_stage", { summary });
+  if (response.isError) throw new Error(response.text);
+  // Stage closure archives the old cohort and asynchronously spawns the next stage's agents;
+  // callers must wait until either the pipeline finishes/pauses or the new cohort is running.
   await eventually(() => {
-    // Either phase is acceptable here: with an after_handshake gate the task stays in handshaking until approved.
-    if (!["implementing", "handshaking"].includes(flow.task(runId, taskId).phase)) throw new Error("unexpected phase");
-    if (flow.task(runId, taskId).agentIds.forked_lead) throw new Error("forked lead still present");
-  });
-}
-
-// The scope of the writable directory of a task, used to place a real in-scope commit.
-export function commitInScopeWork(flow: Flow, runId: string, taskId: string, fileName = "feature.ts"): void {
-  const task = flow.task(runId, taskId);
-  // Commits (not just file writes) so the scope gate sees the work through the committed diff as it does in production.
-  const scopeDirectory = task.writableScope[0].replace(/\/$/, "");
-  commitFiles(task.workspace!.cwd, { [`${scopeDirectory}/${fileName}`]: `export const ${taskId.replace(/-/g, "_")} = true;\n` }, `work for ${taskId}`);
-}
-
-export async function finishImplementation(flow: Flow, runId: string, taskId: string): Promise<void> {
-  commitInScopeWork(flow, runId, taskId);
-  const stageReport = await flow.callAsRole(runId, "implementer", taskId, "slp_stage_done", { summary: "implemented" });
-  if (stageReport.isError) throw new Error(stageReport.text);
-}
-
-export async function waitForPhase(flow: Flow, runId: string, taskId: string, expectedPhase: TaskPhase): Promise<void> {
-  await eventually(() => {
-    const actualPhase = flow.task(runId, taskId).phase;
-    if (actualPhase !== expectedPhase) throw new Error(`${taskId} is ${actualPhase}, expected ${expectedPhase}`);
-  });
-}
-
-export async function approveVerification(flow: Flow, runId: string, taskId: string): Promise<void> {
-  await eventually(() => {
-    // Verifiers are created lazily after the scope gate, so wait for them to exist before voting.
-    for (const verifierRole of flow.task(runId, taskId).verifiers) {
-      if (!flow.task(runId, taskId).agentIds[reviewerAgentKey(verifierRole)]) throw new Error("reviewer not ready");
+    const pipeline = flow.pipeline(runId, pipelineId);
+    if (!pipeline) throw new Error("pipeline disappeared during stage handoff");
+    if (pipeline.status === "completed" || pipeline.status === "paused") return;
+    const activeStage = pipeline.stages[pipeline.currentStageIndex];
+    if (!activeStage || activeStage.id === approvedStage.id || activeStage.status !== "running") {
+      throw new Error("stage handoff is still pending");
     }
   });
-  for (const verifierRole of flow.task(runId, taskId).verifiers) {
-    // A business role may also implement this task, so address its separate reviewer instance by participant key.
-    const reviewerId = flow.task(runId, taskId).agentIds[reviewerAgentKey(verifierRole)];
-    const verdictOutcome = await flow.callAs(reviewerId, "slp_verdict", { verdict: "APPROVED" });
-    if (verdictOutcome.isError) throw new Error(verdictOutcome.text);
-    // sequential stages create the next verifier only after this approval
-    if (!flow.task(runId, taskId).verifyParallel) await eventually(() => undefined);
+}
+
+export async function completePipeline(flow: Flow, runId: string, pipelineId: string): Promise<void> {
+  while (flow.pipeline(runId, pipelineId)?.status !== "completed") {
+    const stage = currentStage(flow, runId, pipelineId);
+    for (const assignment of stage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);
+    await approveCurrentStage(flow, runId, pipelineId);
   }
 }
 
-// Drives a task from handshake to ready_for_merge, approving any human gate it meets on the way.
-export async function driveToReadyForMerge(
-  flow: Flow,
-  runId: string,
-  taskId: string,
-  onGateOpened: (gateKind: GateKind) => void = () => undefined,
-): Promise<void> {
-  // Gates only open in some modes, so each step tolerates both the gated and the ungated path.
-  const approveOpenGate = async () => {
-    const openGate = flow.task(runId, taskId).gate;
-    if (!openGate) return;
-    onGateOpened(openGate.kind);
-    await approveGate(flow.ctx, runId, taskId);
-  };
-  await approveHandshake(flow, runId, taskId);
-  await approveOpenGate();
-  await waitForPhase(flow, runId, taskId, "implementing");
-  await finishImplementation(flow, runId, taskId);
-  await approveOpenGate();
-  await approveVerificationWhenWoken(flow, runId, taskId);
-  await approveOpenGate();
-  await waitForPhase(flow, runId, taskId, "documenting");
-  // Dedicated project report authors must finish creation before the completion tool can authenticate them.
-  const authorKey = flow.task(runId, taskId).documentedBy === "implementer" ? "implementer" : "doc";
-  await eventually(() => { if (!flow.task(runId, taskId).agentIds[authorKey]) throw new Error("report author not ready"); });
-  const docReport = await flow.callAs(flow.task(runId, taskId).agentIds[authorKey], "slp_doc_done", { report: COMPLETE_ACCEPTANCE_REPORT });
-  if (docReport.isError) throw new Error(docReport.text);
-  await waitForPhase(flow, runId, taskId, "ready_for_merge");
-  await approveOpenGate();
+export function commitPipelineWork(flow: Flow, runId: string, pipelineId: string, fileName = "src/billing-import.ts"): void {
+  const pipeline = flow.pipeline(runId, pipelineId);
+  if (!pipeline) throw new Error(`Unknown pipeline ${pipelineId}`);
+  commitFiles(pipeline.worktree, { [fileName]: "export const billingImportReady = true;\n" }, "implement billing import");
 }
 
-async function approveVerificationWhenWoken(flow: Flow, runId: string, taskId: string): Promise<void> {
-  await approveVerification(flow, runId, taskId);
-  await eventually(() => {
-    const task = flow.task(runId, taskId);
-    // with an after_verification gate the phase stays 'verifying' while the gate is open
-    if (task.phase === "verifying" && !task.gate) throw new Error("verification round still open");
-  });
+export function pipelineBranch(flow: Flow, runId: string, pipelineId: string): string {
+  const pipeline = flow.pipeline(runId, pipelineId);
+  if (!pipeline?.branch) throw new Error(`Pipeline ${pipelineId} has no branch`);
+  return pipeline.branch;
 }
+
+export function pipelineHead(flow: Flow, runId: string, pipelineId: string): string {
+  const pipeline = flow.pipeline(runId, pipelineId);
+  if (!pipeline) throw new Error(`Unknown pipeline ${pipelineId}`);
+  return runGitSync(pipeline.worktree, ["rev-parse", "HEAD"]).trim();
+}
+
+export type PipelineStory = { runId: string; pipelineId: string; pipeline: PipelineState };

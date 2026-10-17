@@ -61,7 +61,9 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
   const rootSourcePaths = new Map<string, string>();
   for (const markdownPath of await markdownFiles(configurationDirectory)) {
     const sourcePath = relative(repoPath, markdownPath).replace(/\\/g, "/");
-    const definition = parseRoleMarkdown(await readFile(markdownPath, "utf8"), sourcePath);
+    const markdownText = await readFile(markdownPath, "utf8");
+    // Every .slp Markdown file defines its own front-matter summary and role agent prompt directly.
+    const definition = parseRoleMarkdown(markdownText, sourcePath);
     const relativePath = relative(configurationDirectory, markdownPath).replace(/\\/g, "/").toUpperCase();
     const rootRole = relativePath === "SUPERVISOR.MD" ? "supervisor" : relativePath === "LEAD.MD" ? "lead" : null;
     if (rootRole) {

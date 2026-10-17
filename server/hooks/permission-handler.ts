@@ -2,18 +2,35 @@
 // Called both from the lifecycle event (low latency) and from the sweeper (catches missed events).
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { AgentRecord, Run } from "../../shared/state";
-import { decidePermission } from "./permissions";
+import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
 
 // requestIds already answered; a second answer to a resolved request would fail in the SDK
 const answeredRequestIds = new Set<string>();
 
+function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
+  // Archived agents and legacy or finished runs must never receive new write or shell permissions.
+  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
+  if (run.status === "completed" || run.status === "aborted") return false;
+  if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
+    if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
+    const pipeline = run.pipelines[agentRecord.pipelineId];
+    const stage = pipeline?.stages[pipeline.currentStageIndex];
+    // Only the running stage may receive permissions; completing and paused stages are closed.
+    return Boolean(run.status === "running"
+      && pipeline?.status === "running"
+      && stage?.id === agentRecord.stageId
+      && stage.status === "running");
+  }
+  return true;
+}
+
 function workingDirectoryOf(run: Run, agentRecord: AgentRecord): string {
-  // Cwd differs per role because the write policy is relative to the agent's own checkout: leads work in the dev worktree, the Supervisor in the user's repo.
-  const task = agentRecord.taskId ? run.tasks[agentRecord.taskId] : null;
+  // Forked Leads stay in the integration checkout so native session forks resolve correctly.
   if (agentRecord.role === "master_lead" || agentRecord.role === "forked_lead") return run.devCwd;
   if (agentRecord.role === "supervisor") return run.repoPath;
-  return task?.workspace?.cwd ?? run.devCwd;
+  // All peers in a stage share the exact worktree handed to the pipeline.
+  return agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId]?.worktree ?? run.devCwd : run.devCwd;
 }
 
 function buildResponse(
@@ -34,17 +51,30 @@ export async function handlePermissionRequest(
   const lookup = ctx.store.findAgent(agentId);
   // The event hook and the sweeper can race on one request; remembering the id makes the second caller a no-op.
   if (!lookup || answeredRequestIds.has(request.id)) return;
-  answeredRequestIds.add(request.id);
   const { run, agentRecord } = lookup;
-  const task = agentRecord.taskId ? run.tasks[agentRecord.taskId] : null;
-  // The policy is pure and fed live task state, so a write lock lifts the moment the handshake approves.
-  const decision = decidePermission(request, {
-    role: agentRecord.role,
-    taskPhase: task?.phase ?? null,
-    agentCwd: workingDirectoryOf(run, agentRecord),
-    // Additional peers get only the explicit grant made at spawn; a business role name never implies write access.
-    writableScope: agentRecord.role === "peer" ? agentRecord.writeScope : task?.writableScope ?? [],
-  });
+  // An archived SDK session has no work left to authorize; leaving it unanswered avoids reviving it.
+  if (agentRecord.archivedAt) return;
+  try {
+    // Directory state is advisory; a transient list failure must not prevent the pure policy from answering.
+    const liveStatuses = await ctx.gateway.liveStatuses(run.id);
+    if (liveStatuses.get(agentId)?.archived) return;
+  } catch (statusError) {
+    console.warn("[slp] live agent status unavailable while answering permission", statusError);
+  }
+  const stageActive = stageIsCurrent(run, agentRecord);
+  answeredRequestIds.add(request.id);
+  const decision: PermissionDecision = stageActive
+    ? decidePermission(request, {
+      role: agentRecord.role,
+      agentCwd: workingDirectoryOf(run, agentRecord),
+      // A live pipeline peer with an empty scope receives the whole stage worktree by default.
+      writableScope: agentRecord.role === "peer" ? agentRecord.writeScope : [],
+      pipelineId: agentRecord.pipelineId,
+      stageId: agentRecord.stageId,
+      stageActive: true,
+      archived: false,
+    })
+    : { behavior: "deny", message: "This agent belongs to an archived or inactive pipeline stage." };
   try {
     await ctx.gateway.respondToPermission(agentId, request.id, buildResponse(request, decision));
   } catch (respondError) {

@@ -1,40 +1,24 @@
-// Role vocabulary shared by the daemon-side orchestrator and the app UI.
-// Keeping it in shared/ guarantees both runtimes agree on role names and limits.
+// Runtime roles shared by the daemon-side orchestrator and the app UI.
+// Business peer roles are loaded from .slp and therefore do not belong in this enum.
 import { z } from "zod";
 
-// Order is the pipeline's order of appearance; the const tuple feeds both the zod enum and the label table so they cannot drift.
+// This list deliberately contains orchestration roles only; a Lead-created pipeline can use any
+// project role without requiring a source change or turning that role into a capability enum.
 export const SLP_ROLES = [
   "supervisor",
   "master_lead",
   "forked_lead",
-  "implementer",
-  "qa",
-  "security",
-  "doc",
-  // Business role IDs live in project configuration; this capability represents a Lead-assigned additional peer.
   "peer",
 ] as const;
 export const SlpRoleSchema = z.enum(SLP_ROLES);
 export type SlpRole = z.infer<typeof SlpRoleSchema>;
 
-// Peers that inspect finished work; the pipeline wakes them during the verification stage.
-export const VERIFIER_ROLES = ["qa", "security"] as const;
-export const VerifierRoleSchema = z.enum(VERIFIER_ROLES);
-export type VerifierRole = z.infer<typeof VerifierRoleSchema>;
-
 // Name under which the plugin-hosted MCP server is registered inside every agent session.
 export const BUS_SERVER_NAME = "slp-bus";
 
-// Spec section 4, rule 3: more than three rejected rounds trips the circuit breaker.
-// Counted in rejected rounds: the breaker trips on the round after this limit, matching spec rule 3 ('more than three').
-export const FIX_LOOP_LIMIT = 3;
-
-// Handshake clarification rounds before the Forked Lead must escalate to the Master Lead.
-// Bounded so a Forked Lead and Implementer cannot loop on wording forever; the last unresolved round becomes an escalation.
-export const HANDSHAKE_ROUND_LIMIT = 4;
-
-// Scope violations tolerated per task before the pipeline pauses and calls for a human.
-export const SCOPE_VIOLATION_LIMIT = 3;
+// Fixed-task limits are defined in legacy-tasks.ts; these aliases keep old test and UI imports
+// readable while the dynamic runtime stays independent from the retired task engine.
+export { FIX_LOOP_LIMIT, HANDSHAKE_ROUND_LIMIT, SCOPE_VIOLATION_LIMIT } from "./legacy-tasks";
 
 // How often an agent is re-prompted when it ends a turn without calling its expected tool.
 // Kept small: each nudge costs a full model turn, and an agent that ignores two reminders is stuck, not forgetful.
@@ -51,9 +35,5 @@ export const ROLE_LABELS: Record<SlpRole, string> = {
   supervisor: "Supervisor",
   master_lead: "Master Lead",
   forked_lead: "Forked Lead",
-  implementer: "Implementer",
-  qa: "QA Peer",
-  security: "Security Peer",
-  doc: "Doc Peer",
   peer: "Peer",
 };

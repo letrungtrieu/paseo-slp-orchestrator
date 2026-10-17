@@ -34,7 +34,7 @@ export function writeWorkingFiles(workingDirectory: string, fileContentsByPath: 
   }
 }
 
-// What an Implementer does before calling slp_stage_done: write files and commit them.
+// What a stage peer does before calling slp_stage_report: write files and commit them.
 export function commitFiles(workingDirectory: string, fileContentsByPath: Record<string, string>, message: string): void {
   writeWorkingFiles(workingDirectory, fileContentsByPath);
   runGitSync(workingDirectory, ["add", "-A"]);

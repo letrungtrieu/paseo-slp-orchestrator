@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { AcceptanceReportSchema, StoredAcceptanceReportSchema } from "../shared/reports";
-import { COMPLETE_ACCEPTANCE_REPORT } from "./helpers/flow-steps";
+
+const COMPLETE_ACCEPTANCE_REPORT = {
+  summary: "The dynamic pipeline result is ready.",
+  changedFiles: ["src/ingestion.ts"],
+  technicalDecisions: ["Keep the existing parser boundary."],
+  verificationSummary: "Focused stage checks pass with no new trust boundary issues.",
+  risks: ["Large imports still need monitoring."],
+};
 
 describe("acceptance report validation", () => {
   // The required evidence fields replace the old document-heading check.
-  it.each(["summary", "qaResults", "securityReview"] as const)("rejects blank %s", (requiredField) => {
+  it.each(["summary", "verificationSummary"] as const)("rejects blank %s", (requiredField) => {
     expect(AcceptanceReportSchema.safeParse({ ...COMPLETE_ACCEPTANCE_REPORT, [requiredField]: "  " }).success).toBe(false);
   });
 

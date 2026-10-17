@@ -17,15 +17,15 @@ describe("project model and thinking overrides", () => {
 
   it("overrides just the model and inherits the form's thinking", () => {
     const configuration = defaultProjectPrompts();
-    const qa = configuration.peers.find((peer) => peer.role === "qa")!;
+    const qa = configuration.peers.find((peer) => peer.role === "qa-engineer")!;
     qa.model = "claude/role-model";
-    expect(resolveAgentSettings(configuration, "qa", "qa", runDefaults)).toMatchObject({ provider: "claude/role-model", thinkingOptionId: "medium" });
+    expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toMatchObject({ provider: "claude/role-model", thinkingOptionId: "medium" });
   });
 
   it("overrides just thinking and inherits the form's model", () => {
     const configuration = defaultProjectPrompts();
-    configuration.peers.find((peer) => peer.role === "qa")!.thinking = "high";
-    expect(resolveAgentSettings(configuration, "security", "qa", runDefaults)).toMatchObject({ provider: "claude/form-model", thinkingOptionId: "high" });
+    configuration.peers.find((peer) => peer.role === "qa-engineer")!.thinking = "high";
+    expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toMatchObject({ provider: "claude/form-model", thinkingOptionId: "high" });
   });
 
   // LEAD.md governs both the Master Lead's model and the session family used by its temporary forks.
@@ -38,21 +38,21 @@ describe("project model and thinking overrides", () => {
 
   it("keeps the form's provider when a file specifies a short model ID", () => {
     const configuration = defaultProjectPrompts();
-    configuration.peers.find((peer) => peer.role === "qa")!.model = "fast-model";
-    expect(resolveAgentSettings(configuration, "peer", "qa", runDefaults).provider).toBe("claude/fast-model");
+    configuration.peers.find((peer) => peer.role === "qa-engineer")!.model = "fast-model";
+    expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults).provider).toBe("claude/fast-model");
   });
 
   it("maps Full Access to the new provider's native permission ID", () => {
     const configuration = defaultProjectPrompts();
-    configuration.peers.find((peer) => peer.role === "qa")!.model = "codex/role-model";
-    expect(resolveAgentSettings(configuration, "peer", "qa", runDefaults).permissionModeId).toBe(getUnattendedModeId("codex"));
+    configuration.peers.find((peer) => peer.role === "qa-engineer")!.model = "codex/role-model";
+    expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults).permissionModeId).toBe(getUnattendedModeId("codex"));
   });
 
   // A provider change must never silently replace a deliberately restricted permission choice with Full Access.
   it("rejects an incompatible restricted permission override with its configuration path", () => {
     const configuration = defaultProjectPrompts();
-    configuration.peers.find((peer) => peer.role === "qa")!.model = "codex/role-model";
-    expect(() => resolveAgentSettings(configuration, "peer", "qa", { ...runDefaults, permissionModeId: "restricted-mode" }))
-      .toThrow(/\.slp\/peers\/QA.md: model switches/);
+    configuration.peers.find((peer) => peer.role === "qa-engineer")!.model = "codex/role-model";
+    expect(() => resolveAgentSettings(configuration, "peer", "qa-engineer", { ...runDefaults, permissionModeId: "restricted-mode" }))
+      .toThrow(/\.slp\/peers\/QA_ENGINEER.md: model switches/);
   });
 });

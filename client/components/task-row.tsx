@@ -1,7 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { Text, View } from "react-native";
-import { FIX_LOOP_LIMIT } from "../../shared/roles";
+import { FIX_LOOP_LIMIT } from "../../shared/legacy-tasks";
 import { phaseLabel } from "../../shared/card";
 import type { Task } from "../../shared/state";
 import { resolveTaskPhaseColor } from "../phase-color";
@@ -15,9 +15,10 @@ interface TaskRowProps {
   theme: PluginTheme;
   runId: string;
   task: Task;
+  readOnly?: boolean;
 }
 
-export function TaskRow({ styles, theme, runId, task }: TaskRowProps) {
+export function TaskRow({ styles, theme, runId, task, readOnly = false }: TaskRowProps) {
   // Actions are created per row so one task's pending state does not disable buttons of its siblings.
   const { approveGate, resumeTask } = useRunActions();
   // Kept per row: guidance typed for one paused task must not leak into another task's resume.
@@ -28,8 +29,9 @@ export function TaskRow({ styles, theme, runId, task }: TaskRowProps) {
   // The label comes from the shared module so the table and the Supervisor chat card never disagree on wording.
   const taskPhaseText = phaseLabel(task.phase, task.fixLoopCount, FIX_LOOP_LIMIT);
   // Only a paused task can be resumed; the daemon rejects resume for any other phase.
-  const isPausedForHuman = task.phase === "paused";
-  const rowErrorMessage = describeRpcError(approveGate.error ?? resumeTask.error);
+  // Imported task-engine runs are historical snapshots, so their old buttons must never restart production work.
+  const isPausedForHuman = !readOnly && task.phase === "paused";
+  const rowErrorMessage = readOnly ? null : describeRpcError(approveGate.error ?? resumeTask.error);
 
   return (
     <View style={[styles.card, { borderLeftWidth: 4, borderLeftColor: taskPhaseColor }]}>
@@ -44,7 +46,7 @@ export function TaskRow({ styles, theme, runId, task }: TaskRowProps) {
       {task.pausedReason ? <Text style={styles.dangerText}>Paused: {task.pausedReason}</Text> : null}
 
       {/* Task gates are approved per task (taskId is sent), unlike the run-level gate in the run controls. */}
-      {task.gate ? (
+      {task.gate && !readOnly ? (
         <View style={[styles.stack, { padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }]}>
           <Text style={styles.warningText}>
             Waiting at gate {task.gate.kind}: {task.gate.note}
@@ -86,6 +88,7 @@ export function TaskRow({ styles, theme, runId, task }: TaskRowProps) {
           />
         </View>
       ) : null}
+      {readOnly ? <Text style={styles.mutedText}>Legacy task engine · read-only</Text> : null}
       {rowErrorMessage ? <Text style={styles.dangerText}>{rowErrorMessage}</Text> : null}
     </View>
   );

@@ -6,6 +6,10 @@ import { CommLogEntrySchema, StateFileSchema } from "../../shared/state";
 import { transaction } from "./database";
 import { writeRun } from "./run-repository";
 
+function isPlainObject(candidate: unknown): candidate is Record<string, unknown> {
+  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+}
+
 function readLegacyText(filePath: string): string | null {
   try {
     return readFileSync(filePath, "utf8");
@@ -16,18 +20,25 @@ function readLegacyText(filePath: string): string | null {
   }
 }
 
+function legacyMasterSpecPath(sourceState: unknown, runId: string): string | null {
+  if (!isPlainObject(sourceState) || !isPlainObject(sourceState.runs)) return null;
+  const sourceRun = sourceState.runs[runId];
+  if (!isPlainObject(sourceRun)) return null;
+  return typeof sourceRun.masterSpecPath === "string" ? sourceRun.masterSpecPath : null;
+}
+
 export function importLegacyState(database: DatabaseSync, stateFilePath: string): void {
   const migrationName = "legacy-json-and-worktree-documents";
   if (database.prepare("SELECT name FROM migrations WHERE name = ?").get(migrationName)) return;
   const legacyText = readLegacyText(stateFilePath);
   // Validate before the transaction so corrupt history cannot be replaced with an empty database.
-  const legacyState = legacyText !== null ? StateFileSchema.parse(JSON.parse(legacyText)) : null;
-  const legacyRuns = legacyText ? JSON.parse(legacyText).runs as Record<string, { masterSpecPath?: string }> : {};
+  const sourceState: unknown = legacyText !== null ? JSON.parse(legacyText) : null;
+  const legacyState = legacyText !== null ? StateFileSchema.parse(sourceState) : null;
   transaction(database, () => {
     for (const run of Object.values(legacyState?.runs ?? {})) {
       // A retried migration never overwrites newer SQLite decisions for an already imported run.
       if (database.prepare("SELECT id FROM runs WHERE id = ?").get(run.id)) continue;
-      const legacySpecPath = legacyRuns[run.id]?.masterSpecPath;
+      const legacySpecPath = legacyMasterSpecPath(sourceState, run.id);
       if (!run.masterSpec && legacySpecPath) {
         run.masterSpec = readLegacyText(isAbsolute(legacySpecPath) ? legacySpecPath : join(run.devCwd, legacySpecPath));
       }

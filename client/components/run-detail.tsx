@@ -3,6 +3,7 @@ import { Text, View } from "react-native";
 import { describeRpcError, useRunDetail } from "../use-run";
 import type { UiStyles } from "../styles";
 import { ActionButton } from "./action-button";
+import { PipelineDetail } from "./pipeline-detail";
 import { RunControls } from "./run-controls";
 import { TaskRow } from "./task-row";
 
@@ -37,6 +38,10 @@ export function RunDetail({ styles, theme, selectedRunId, onOpenSupervisor }: Ru
   const sortedTasks = Object.values(selectedRun.tasks).sort((firstTask, secondTask) =>
     firstTask.id.localeCompare(secondTask.id),
   );
+  // Pipelines are persisted as a keyed record so the daemon can update one pipeline without replacing the run aggregate.
+  const dynamicPipelines = Object.values(selectedRun.pipelines);
+  // Engine version is authoritative: an old run can be empty after migration and must still remain read-only.
+  const isLegacyRun = selectedRun.engineVersion !== "dynamic-stages-v1";
 
   return (
     <View style={styles.card}>
@@ -53,10 +58,6 @@ export function RunDetail({ styles, theme, selectedRunId, onOpenSupervisor }: Ru
           onPress={() => onOpenSupervisor(selectedRun.supervisorAgentId)}
         />
       ) : null}
-      {/* A degraded fork rebuilds context through stored-spec tools, so the manager should know it lacks inherited session history. */}
-      {selectedRun.forkDegradedReason ? (
-        <Text style={styles.warningText}>Fork degraded: {selectedRun.forkDegradedReason}</Text>
-      ) : null}
       {selectedRun.criteria ? (
         <View style={styles.stack}>
           <Text style={styles.fieldLabel}>Acceptance criteria</Text>
@@ -64,12 +65,25 @@ export function RunDetail({ styles, theme, selectedRunId, onOpenSupervisor }: Ru
         </View>
       ) : null}
       {/* Controls receive the whole run so gate and status checks use the same snapshot as the task rows below. */}
-      <RunControls styles={styles} theme={theme} run={selectedRun} />
-      <Text style={styles.sectionTitle}>Tasks ({sortedTasks.length})</Text>
-      {sortedTasks.length === 0 ? <Text style={styles.mutedText}>No tasks defined yet.</Text> : null}
-      {sortedTasks.map((task) => (
-        <TaskRow key={task.id} styles={styles} theme={theme} runId={selectedRun.id} task={task} />
-      ))}
+      <RunControls styles={styles} theme={theme} run={selectedRun} readOnly={isLegacyRun} />
+      {!isLegacyRun && dynamicPipelines.length > 0 ? (
+        <PipelineDetail styles={styles} theme={theme} runId={selectedRun.id} pipelines={dynamicPipelines} />
+      ) : isLegacyRun ? (
+        <>
+          {/* Older runs have task records but no dynamic pipeline snapshot, so retain a read-only legacy view. */}
+          <Text style={styles.sectionTitle}>Tasks ({sortedTasks.length})</Text>
+          {sortedTasks.length > 0 ? <Text style={styles.mutedText}>Legacy task engine · read-only</Text> : null}
+          {sortedTasks.length === 0 ? <Text style={styles.mutedText}>No tasks defined yet.</Text> : null}
+          {sortedTasks.map((task) => (
+            <TaskRow key={task.id} styles={styles} theme={theme} runId={selectedRun.id} task={task} readOnly />
+          ))}
+        </>
+      ) : (
+        <>
+          <Text style={styles.sectionTitle}>Pipelines (0)</Text>
+          <Text style={styles.mutedText}>No pipeline defined yet.</Text>
+        </>
+      )}
       {selectedRun.finalReport ? (
         <View style={styles.stack}>
           <Text style={styles.fieldLabel}>Final report</Text>

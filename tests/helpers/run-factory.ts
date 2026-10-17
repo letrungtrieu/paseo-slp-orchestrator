@@ -35,6 +35,8 @@ export function buildRun(overrides: Partial<Run> = {}): Run {
     baseBranch: "main",
     integrationBranch: "slp/run-1/dev",
     mode: "FULL_AUTO",
+    // Unit fixtures represent the current runtime protocol; migration tests construct legacy rows explicitly.
+    engineVersion: "dynamic-stages-v1",
     status: "running",
     providers: { supervisor: "claude/x", lead: "claude/x", peer: "claude/x" },
     supervisorAgentId: "sup",
@@ -42,6 +44,10 @@ export function buildRun(overrides: Partial<Run> = {}): Run {
     masterLeadAgentId: "lead",
     devWorkspaceId: "ws-dev",
     devCwd: "/tmp/dev",
+    // Dynamic pipelines are authored after the Lead receives acceptance criteria; fixtures start
+    // without a hidden task graph so tests cannot accidentally exercise the retired scheduler.
+    pipelines: {},
+    pipelineWorkspaces: {},
     createdAt: now,
     updatedAt: now,
     ...overrides,

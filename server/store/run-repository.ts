@@ -1,9 +1,11 @@
 // Translate relational SQLite rows into the pipeline's run aggregate without exposing SQL to agents.
 import type { DatabaseSync } from "node:sqlite";
 import { RunSchema, type Run } from "../../shared/state";
+import { transaction } from "./database";
 
 export function readRuns(database: DatabaseSync): Run[] {
-  return database.prepare("SELECT id, payload FROM runs ORDER BY rowid").all().map((runRow) => {
+  // Read the run rows and their joined task reports inside one transaction for a consistent snapshot.
+  return transaction(database, () => database.prepare("SELECT id, payload FROM runs ORDER BY rowid").all().map((runRow) => {
     const run = RunSchema.parse(JSON.parse(String(runRow.payload)));
     // Reports are joined at load so callers still receive one consistent task object.
     const taskRows = database.prepare(`
@@ -19,7 +21,7 @@ export function readRuns(database: DatabaseSync): Run[] {
     }
     // Validate nested rows too; corrupt persisted state must fail rather than disappear silently.
     return RunSchema.parse(run);
-  });
+  }));
 }
 
 export function writeRun(database: DatabaseSync, run: Run): void {

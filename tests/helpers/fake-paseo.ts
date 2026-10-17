@@ -21,6 +21,7 @@ export class FakePaseo {
   readonly archivedWorkspaceIds: string[] = [];
   readonly timelineAppends: TimelineAppendCall[] = [];
   private workspaceCounter = 0;
+  private readonly workspaceIdByDirectory = new Map<string, string>();
 
   constructor(private readonly worktreeRootDirectory: string) {}
 
@@ -31,7 +32,9 @@ export class FakePaseo {
       workspaces: {
         open: async (repoPath: string) => {
           fakePaseo.openedRepositories.push(repoPath);
-          return fakePaseo.buildHandle("ws-supervisor", repoPath);
+          const workspaceId = fakePaseo.workspaceIdByDirectory.get(repoPath) ?? "ws-supervisor";
+          fakePaseo.workspaceIdByDirectory.set(repoPath, workspaceId);
+          return fakePaseo.buildHandle(workspaceId, repoPath);
         },
         create: async (request: WorkspaceCreateRequest) => fakePaseo.createWorktreeWorkspace(request),
         ref: (workspaceId: string) => fakePaseo.buildHandle(workspaceId, null),
@@ -67,6 +70,7 @@ export class FakePaseo {
     const directory = join(this.worktreeRootDirectory, `worktree-${this.workspaceCounter}`);
     // same call Paseo makes for action "branch-off": a new branch cut from refName
     runGitSync(request.source.cwd, ["worktree", "add", "-b", request.source.branchName, directory, request.source.refName]);
+    this.workspaceIdByDirectory.set(directory, workspaceId);
     this.createdWorkspaces.push({ request, workspaceId, directory });
     return this.buildHandle(workspaceId, directory);
   }

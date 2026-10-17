@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startSweeper } from "../server/sweeper";
-import { registerTasks } from "../server/pipeline/task-start";
-import { TaskDefinitionSchema } from "../shared/state";
 import type { FakePaseoHolder } from "./helpers/fake-paseo";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { API_TASK, eventually } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
 import { permissionRequest } from "./helpers/permission-request";
 
 const createFlow = useFlowFixture();
@@ -24,9 +22,9 @@ afterEach(() => {
 
 const tick = () => vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
 
-async function sweptRun() {
+async function sweptRun(withPipeline = false) {
   const flow = await createFlow({ mode: "FULL_AUTO" });
-  const runId = await flow.startRun();
+  const runId = withPipeline ? (await startedRunWithPipeline(flow, DEFAULT_PIPELINE)).runId : await flow.startRun();
   // Isolate sweep delivery from the separate bootstrap greeting turn.
   flow.gateway.markEveryAgentIdle();
   flow.gateway.prompts.length = 0;
@@ -104,25 +102,25 @@ describe("sweeper", () => {
     expect(flow.gateway.prompts).toEqual([]);
   });
 
-  it("restarts tasks left in 'queued' after a plugin restart", async () => {
-    const { flow, runId } = await sweptRun();
-    // emulate the crash window: tasks registered, but the detached startQueuedTasks never ran
-    registerTasks(flow.ctx, runId, [TaskDefinitionSchema.parse(API_TASK)]);
-    expect(flow.task(runId, API_TASK.id).phase).toBe("queued");
-
+  it("nudges only the current dynamic stage obligation", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const pipeline = flow.pipeline(runId)!;
+    const peerId = flow.agentId(runId, pipeline.stages[0].peers[0].role, pipeline.stages[0].id);
+    flow.store.mutate(runId, (run) => Object.assign(run.agents[peerId], { awaitingTool: "slp_stage_report", awaitingSince: "2020-01-01T00:00:00.000Z", nudges: 0 }));
     await tick();
-    await eventually(() => expect(flow.task(runId, API_TASK.id).phase).toBe("handshaking"));
-    expect(flow.gateway.createdAgentsOfRole("implementer")).toHaveLength(1);
+    expect(flow.gateway.promptsTo(peerId).at(-1)).toContain("slp_stage_report");
   });
 
   // recovery only applies to runs that already left planning
-  it("does not restart queued tasks of a run that is not in 'running' state", async () => {
-    const { flow, runId } = await sweptRun();
-    registerTasks(flow.ctx, runId, [TaskDefinitionSchema.parse(API_TASK)]);
+  it("does not restart a queued pipeline of a run that is not in running state", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const pipeline = flow.pipeline(runId)!;
     flow.store.mutate(runId, (run) => {
       run.status = "planning";
+      run.pipelines[pipeline.id].status = "queued";
+      run.pipelines[pipeline.id].stages[0].status = "pending";
     });
     await tick();
-    expect(flow.task(runId, API_TASK.id).phase).toBe("queued");
+    expect(flow.pipeline(runId)!.stages[0].status).toBe("pending");
   });
 });

@@ -148,11 +148,11 @@ describe("RunStore access", () => {
   it("findCallerByToken resolves the owning run and agent across runs", async () => {
     const { store } = await newStore();
     const leadRecord = buildAgentRecord({ agentId: "agent-lead", role: "master_lead", token: "tok-lead" });
-    const peerRecord = buildAgentRecord({ agentId: "agent-peer", role: "implementer", taskId: "t1", token: "tok-peer" });
+    const peerRecord = buildAgentRecord({ agentId: "agent-peer", role: "peer", projectRole: "developer", taskId: "t1", token: "tok-peer" });
     store.insert(buildRun({ id: "run-a", agents: { "agent-lead": leadRecord } }));
     store.insert(buildRun({ id: "run-b", agents: { "agent-peer": peerRecord } }));
 
-    expect(store.findCallerByToken("tok-peer")).toMatchObject({ run: { id: "run-b" }, agentRecord: { agentId: "agent-peer", role: "implementer" } });
+    expect(store.findCallerByToken("tok-peer")).toMatchObject({ run: { id: "run-b" }, agentRecord: { agentId: "agent-peer", role: "peer", projectRole: "developer" } });
     expect(store.findCallerByToken("tok-lead")?.run.id).toBe("run-a");
     expect(store.findCallerByToken("wrong")).toBeNull();
     expect(store.findCallerByToken("")).toBeNull();
@@ -161,8 +161,8 @@ describe("RunStore access", () => {
   // lifecycle hooks identify agents by id, not token
   it("findAgent locates an agent by id", async () => {
     const { store } = await newStore();
-    store.insert(buildRun({ agents: { a1: buildAgentRecord({ agentId: "a1", role: "qa" }) } }));
-    expect(store.findAgent("a1")?.agentRecord.role).toBe("qa");
+    store.insert(buildRun({ agents: { a1: buildAgentRecord({ agentId: "a1", role: "peer", projectRole: "qa-engineer" }) } }));
+    expect(store.findAgent("a1")?.agentRecord).toMatchObject({ role: "peer", projectRole: "qa-engineer" });
     expect(store.findAgent("a2")).toBeNull();
   });
 });

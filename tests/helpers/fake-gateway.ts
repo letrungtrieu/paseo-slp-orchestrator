@@ -79,9 +79,15 @@ export class FakeAgentGateway {
       projectRole: spec.projectRole ?? null,
       writeScope: spec.writeScope ?? [],
       leadContinuationTool: spec.leadContinuationTool ?? null,
+      pipelineId: spec.pipelineId ?? null,
+      stageId: spec.stageId ?? null,
+      stagePeerId: spec.stagePeerId ?? null,
+      archivedAt: null,
       taskId: spec.taskId,
       token: `token-${agentId}`,
       awaitingTool: spec.awaitTool,
+      waitingForAgentId: null,
+      deferredTool: null,
       awaitingSince: spec.awaitTool ? new Date().toISOString() : null,
     });
     // registered before "starting" the agent, as in the real gateway, so its first tool call authenticates
@@ -144,5 +150,12 @@ export class FakeAgentGateway {
 
   async archive(agentId: string): Promise<void> {
     this.archivedAgentIds.push(agentId);
+    // Persist the same archive boundary as the real gateway so recovery never treats a closed
+    // stage cohort as live after a test advances to its next stage.
+    const lookup = this.store.findAgent(agentId);
+    if (lookup) this.store.mutate(lookup.run.id, (run) => {
+      const archivedAgent = run.agents[agentId];
+      if (archivedAgent) archivedAgent.archivedAt = new Date().toISOString();
+    });
   }
 }

@@ -11,6 +11,12 @@ export interface AgentModelSettings {
   permissionModeId?: string;
 }
 
+// Built-in plugin providers such as Antigravity declare unattended modes in their live catalog
+// rather than @getpaseo/protocol's static manifest, so include their native full-access mode here.
+export function unattendedModeForProvider(providerId: string): string | undefined {
+  return getUnattendedModeId(providerId) ?? (providerId === "antigravity" ? "full-access" : undefined);
+}
+
 export function resolveAgentSettings(
   configuration: ProjectPromptConfig | null | undefined, role: SlpRole,
   projectRoleId: string | undefined, defaults: AgentModelSettings,
@@ -18,20 +24,22 @@ export function resolveAgentSettings(
   const projectPrompts = configuration ?? defaultProjectPrompts();
   const definition = role === "supervisor" ? projectPrompts.supervisor
     : role === "master_lead" || role === "forked_lead" ? projectPrompts.lead
-    : peerRole(projectPrompts, projectRoleId ?? role);
+    : projectRoleId ? peerRole(projectPrompts, projectRoleId) : projectPrompts.peers[0];
+  if (!definition) throw new Error("No project peer workflow is configured under .slp/peers");
   const defaultProviderId = defaults.provider.split("/", 1)[0];
   // Full provider/model IDs can switch providers; a short model ID keeps the provider selected in the form.
   const provider = definition.model
     ? definition.model.includes("/") ? definition.model : `${defaultProviderId}/${definition.model}`
     : defaults.provider;
   const selectedProviderId = provider.split("/", 1)[0];
-  let permissionModeId = defaults.permissionModeId;
+  // Missing legacy settings mean Full Access, matching the SLP global default.
+  let permissionModeId = defaults.permissionModeId ?? unattendedModeForProvider(defaultProviderId);
   if (selectedProviderId !== defaultProviderId) {
     // Native permission IDs differ by provider. Preserve Full Access intent without passing another provider's ID.
-    if (permissionModeId && permissionModeId !== getUnattendedModeId(defaultProviderId)) {
+    if (permissionModeId && permissionModeId !== unattendedModeForProvider(defaultProviderId)) {
       throw new Error(`${definition.sourcePath}: model switches to '${selectedProviderId}', but permission mode '${permissionModeId}' belongs to '${defaultProviderId}'. Select compatible provider permissions in SLP.`);
     }
-    permissionModeId = getUnattendedModeId(selectedProviderId);
+    permissionModeId = unattendedModeForProvider(selectedProviderId);
   }
   return { provider, permissionModeId,
     // Resolve independently: setting just thinking must not replace the chosen model, and vice versa.

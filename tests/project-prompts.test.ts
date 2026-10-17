@@ -12,21 +12,22 @@ describe("project prompt initialization", () => {
   it("seeds the requested layout for an empty project", async () => {
     const repoPath = await createDirectory("project-prompts");
     const configuration = await loadProjectPrompts(repoPath);
-    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual(["doc", "implementer", "qa", "security"]);
+    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual(["developer", "qa-engineer", "reviewer", "security-reviewer"]);
     expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toContain("# Workflow");
-    expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: Supervisor");
+    expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
     // Business-role metadata must not prescribe a permanent pipeline kind.
-    expect(await readFile(join(repoPath, ".slp/peers/QA.md"), "utf8")).not.toContain("kind:");
+    expect(await readFile(join(repoPath, ".slp/peers/QA_ENGINEER.md"), "utf8")).not.toContain("kind:");
   });
 
   it("preserves a customized workflow across repeated initialization", async () => {
     const repoPath = await createDirectory("project-prompts");
     await loadProjectPrompts(repoPath);
-    const qaPath = join(repoPath, ".slp/peers/QA.md");
-    const customizedQa = "---\nrole: QA\ndescription: Test invoice rounding.\n---\nCheck fractional currency boundaries.";
+    const qaPath = join(repoPath, ".slp/peers/QA_ENGINEER.md");
+    // Role IDs normalize literally without a hidden alias table, so 'QA Engineer' maps to 'qa-engineer'.
+    const customizedQa = "---\nrole: QA Engineer\ndescription: Test invoice rounding.\n---\nCheck fractional currency boundaries.";
     await writeFile(qaPath, customizedQa);
     const configuration = await loadProjectPrompts(repoPath);
-    expect(configuration.peers.find((peer) => peer.role === "qa")?.workflow).toBe("Check fractional currency boundaries.");
+    expect(configuration.peers.find((peer) => peer.role === "qa-engineer")?.workflow).toBe("Check fractional currency boundaries.");
     expect(await readFile(qaPath, "utf8")).toBe(customizedQa);
   });
 
@@ -64,8 +65,8 @@ describe("Markdown role discovery", () => {
   it("rejects duplicate roles and identifies both files", async () => {
     const repoPath = await createDirectory("project-prompts");
     await loadProjectPrompts(repoPath);
-    await writeFile(join(repoPath, ".slp/peers/OTHER.md"), "---\nrole: qa\ndescription: Duplicate\n---\nReview.");
-    await expect(loadProjectPrompts(repoPath)).rejects.toThrow(/duplicate role 'qa'.*\.slp\/peers/);
+    await writeFile(join(repoPath, ".slp/peers/OTHER.md"), "---\nrole: reviewer\ndescription: Duplicate\n---\nReview.");
+    await expect(loadProjectPrompts(repoPath)).rejects.toThrow(/duplicate role 'reviewer'.*\.slp\/peers/);
   });
 
   it.each([
@@ -83,7 +84,7 @@ describe("project system prompt composition", () => {
   it("injects peer metadata into the Lead and only the selected workflow into a peer", async () => {
     const repoPath = await createDirectory("project-prompts");
     const configuration = await loadProjectPrompts(repoPath);
-    const qa = configuration.peers.find((peer) => peer.role === "qa")!;
+    const qa = configuration.peers.find((peer) => peer.role === "qa-engineer")!;
     qa.frontMatter += "\nfeatures: [invoice-regression]";
     qa.workflow = "PRIVATE_QA_WORKFLOW: test invoice fractions.";
     configuration.lead.workflow = "CUSTOM_LEAD_WORKFLOW: prioritize acceptance risk.";
@@ -92,8 +93,7 @@ describe("project system prompt composition", () => {
     expect(leadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
     expect(leadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
     // A selected business role is independent of whether this assignment grants tests or read-only review.
-    expect(systemPromptFor("security", configuration, "qa")).toContain("PRIVATE_QA_WORKFLOW");
-    expect(systemPromptFor("qa", configuration, "qa")).toContain("PRIVATE_QA_WORKFLOW");
-    expect(systemPromptFor("implementer", configuration, "implementer")).not.toContain("PRIVATE_QA_WORKFLOW");
+    expect(systemPromptFor("peer", configuration, "qa-engineer")).toContain("PRIVATE_QA_WORKFLOW");
+    expect(systemPromptFor("peer", configuration, "developer")).not.toContain("PRIVATE_QA_WORKFLOW");
   });
 });

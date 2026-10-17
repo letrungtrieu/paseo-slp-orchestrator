@@ -52,7 +52,7 @@ export async function listChangedFiles(
     `${integrationBranch}...HEAD`,
   ]);
   const committedPaths = committedOutput.split("\0").filter((entry) => entry.length > 0);
-  // Uncommitted and untracked files count too: the gate must see writes the Implementer never committed (shell edits, generated files).
+  // Uncommitted and untracked files count too: the gate must see writes a stage peer never committed (shell edits, generated files).
   const uncommittedPaths = parsePorcelainPaths(
     await runGit(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
   );

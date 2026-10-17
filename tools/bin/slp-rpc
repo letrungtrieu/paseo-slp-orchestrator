@@ -15,7 +15,7 @@ if (commandLineArguments.length === 0 || commandLineArguments.includes("--help")
   console.log(`Usage: slp-rpc <method> [json-input]
 
 Methods: slp.run.list | slp.run.get | slp.run.start | slp.run.set_mode | slp.gate.approve
-         slp.task.resume | slp.run.approve_main | slp.run.abort | slp.log.tail
+         slp.pipeline.approve_gate | slp.run.approve_main | slp.run.abort | slp.log.tail
          slp.project.prompts.init
 Env:     PASEO_URL (default ws://127.0.0.1:6767/ws)
 

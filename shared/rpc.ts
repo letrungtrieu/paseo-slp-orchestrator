@@ -50,8 +50,8 @@ export const startRunRpc = defineRpc({
     repoPath: z.string().min(1),
     title: z.string().optional(),
     baseBranch: z.string().optional(),
-    // Match new installations' autonomous mode even when a CLI caller omits the form settings.
-    mode: RunModeSchema.default("FULL_AUTO"),
+    // The handler inherits host-wide settings when a non-UI caller omits its run mode.
+    mode: RunModeSchema.optional(),
     supervisorProvider: z.string().optional(),
     leadProvider: z.string().optional(),
     peerProvider: z.string().optional(),
@@ -82,6 +82,13 @@ export const approveGateRpc = defineRpc({
   name: "slp.gate.approve",
   // note is optional and currently unused by the UI; it is kept so approvals can later carry a reason in the audit log.
   input: z.object({ runId: z.string(), taskId: z.string().optional(), note: z.string().optional() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
+});
+
+// Dynamic pipelines own their gates by pipeline id; this contract keeps the old task gate RPC separate for legacy snapshots.
+export const approvePipelineGateRpc = defineRpc({
+  name: "slp.pipeline.approve_gate",
+  input: z.object({ runId: z.string(), pipelineId: z.string() }),
   output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 

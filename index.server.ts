@@ -33,7 +33,7 @@ function readSavedBusPort(portFilePath: string): number | null {
 // in the background and is awaited only by the code that needs it.
 export default function contribute(server: PluginServerContext) {
   // Paseo stores this outside project worktrees and publishes settings changes to connected clients.
-  server.registerSettings(slpSettings);
+  const globalSettings = server.registerSettings(slpSettings);
   const stateDirectory = process.env.SLP_HOME ?? DEFAULT_STATE_DIRECTORY;
   // Created eagerly and synchronously: the store must be loaded before any hook or RPC can arrive.
   mkdirSync(stateDirectory, { recursive: true });
@@ -71,7 +71,7 @@ export default function contribute(server: PluginServerContext) {
     .catch((busError) => console.error("[slp] bus failed to start", busError));
 
   // Hooks and handlers are registered before the bus is ready; anything that needs the bus waits on busPortReady instead.
-  registerRpcHandlers(server, pipeline);
+  registerRpcHandlers(server, pipeline, globalSettings);
   const removeHooks = registerLifecycleHooks(server, pipeline);
   const stopSweeper = startSweeper(pipeline);
 

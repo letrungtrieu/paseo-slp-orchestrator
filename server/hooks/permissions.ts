@@ -1,17 +1,19 @@
-// Soft write-lock (spec section 4, rule 4): every permission request of an SLP agent is answered
-// by this pure policy. The scope gate (git diff) is the second line of defence for anything
-// that slips through, e.g. writes made by a shell command.
+// Soft write-lock: every permission request is answered by this pure policy.
+// The agent's current pipeline/stage identity is the authorization boundary for writes.
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
-import type { TaskPhase } from "../../shared/state";
-import { PROTECTED_TASK_FILES, QA_WRITABLE_SCOPE, matchesAnyScope } from "../git/scope";
+import { PROTECTED_TASK_FILES, matchesAnyScope } from "../git/scope";
 
 export interface PermissionContext {
   role: SlpRole;
-  taskPhase: TaskPhase | null;
   agentCwd: string;
   writableScope: readonly string[];
+  pipelineId: string | null;
+  stageId: string | null;
+  // False means this agent belongs to an archived or no-longer-current stage.
+  stageActive: boolean;
+  archived: boolean;
 }
 
 export type PermissionDecision =
@@ -22,7 +24,7 @@ export type PermissionDecision =
 const FILE_WRITE_TOOLS = /^(edit|write|multiedit|notebookedit|apply_patch|str_replace|create|delete)/i;
 const SHELL_TOOLS = /^(bash|shell|exec|run_command|local_shell)/i;
 // Shell snippets that mutate state; only used for roles that must stay read-only.
-// Deliberately heuristic: it only gates read-only roles, and the scope gate on the git diff catches whatever a regex misses.
+// Deliberately heuristic: it gates read-only roles while the path boundary catches common shell omissions.
 const MUTATING_SHELL = /(^|[;&|]\s*)(rm|mv|cp|touch|mkdir|tee|chmod|sed\s+-i|npm\s+(i|install)|git\s+(add|commit|checkout|reset|merge|rebase|stash|clean))\b|[^<>=]>{1,2}\s*[^&\s]/;
 // Agents must not bypass the bus by driving the daemon directly.
 // Zero-CLI-Send: all inter-agent traffic must go through the bus so it is audited and ordered, never via the daemon directly.
@@ -62,29 +64,22 @@ export function extractShellCommand(request: AgentPermissionRequest): string | n
 }
 
 function roleMayWritePath(context: PermissionContext, relativePath: string): boolean {
-  // Even a Lead uses tools for pipeline documents; these filenames belong to the retired storage layout.
+  // Runtime artifacts remain protected even when a peer has a whole-worktree grant.
   if ((PROTECTED_TASK_FILES as readonly string[]).includes(relativePath)) return false;
+  if (context.archived || !context.stageActive) return false;
   switch (context.role) {
     case "master_lead":
-      // the Master Lead owns its whole checkout (integration branch)
+      // The Lead owns the integration checkout and is the only agent allowed to merge.
       return true;
-    case "implementer": {
-      // Only the two coding phases open the task's writable scope; in the handshake the Implementer is read-only on purpose.
-      const writablePhase = context.taskPhase === "implementing" || context.taskPhase === "fixing";
-      if (writablePhase) return matchesAnyScope(relativePath, context.writableScope);
-      // Documentation is now a report submission, so it grants no extra filesystem write access.
+    case "supervisor":
+    case "forked_lead":
+      // Supervisor and Forked Lead coordinate and review; production edits stay with peers or Lead.
       return false;
+    case "peer": {
+      if (!context.pipelineId || !context.stageId) return false;
+      // An empty scope is the explicit whole-worktree default for a live pipeline peer.
+      return context.writableScope.length === 0 || matchesAnyScope(relativePath, context.writableScope);
     }
-    case "peer":
-      // Extra domain peers follow the same coding gate, with an empty scope for read-only assignments.
-      return (context.taskPhase === "implementing" || context.taskPhase === "fixing") && matchesAnyScope(relativePath, context.writableScope);
-    // QA may add tests only inside the test scope and only while verifying, so it cannot patch the code it is judging.
-    case "qa":
-      return context.taskPhase === "verifying" && matchesAnyScope(relativePath, QA_WRITABLE_SCOPE);
-    case "doc":
-      return false;
-    default:
-      return false;
   }
 }
 
@@ -97,7 +92,7 @@ function decideFileWrite(request: AgentPermissionRequest, context: PermissionCon
     if (escapesWorktree || !roleMayWritePath(context, relativePath)) {
       return {
         behavior: "deny",
-        message: `Writing '${writePath}' is not allowed for ${context.role} in phase ${context.taskPhase ?? "n/a"}. Stay inside your writable scope or use slp_escalate.`,
+        message: `Writing '${writePath}' is not allowed for ${context.role} in stage ${context.stageId ?? "n/a"}. Stay inside your writable scope or use slp_escalate.`,
       };
     }
   }
@@ -115,9 +110,11 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
   if (/\bgit\s+push\b/.test(shellCommand)) {
     return { behavior: "deny", message: "Pushing is not part of the pipeline." };
   }
-  const mayMutate = context.role === "master_lead" || context.role === "qa" || (
-    (context.role === "implementer" || (context.role === "peer" && context.writableScope.length > 0)) && (context.taskPhase === "implementing" || context.taskPhase === "fixing")
-  );
+  const peerMayMutate = context.role === "peer"
+    && context.stageActive
+    && Boolean(context.pipelineId && context.stageId);
+  const mayMutate = !context.archived && context.stageActive
+    && (context.role === "master_lead" || peerMayMutate);
   if (!mayMutate && MUTATING_SHELL.test(shellCommand)) {
     return { behavior: "deny", message: `Command looks mutating but ${context.role} is read-only right now.` };
   }

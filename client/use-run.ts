@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   abortRunRpc,
   approveGateRpc,
+  approvePipelineGateRpc,
   approveMainRpc,
   getRunRpc,
   listRunsRpc,
@@ -59,6 +60,7 @@ export function useRunActions() {
   const startRun = useRpc(startRunRpc);
   const setRunMode = useRpc(setRunModeRpc);
   const approveGate = useRpc(approveGateRpc);
+  const approvePipelineGate = useRpc(approvePipelineGateRpc);
   const resumeTask = useRpc(resumeTaskRpc);
   const approveMain = useRpc(approveMainRpc);
   const abortRun = useRpc(abortRunRpc);
@@ -69,6 +71,7 @@ export function useRunActions() {
     startRun: useMutation({ mutationFn: startRun, onSuccess: refreshRuns }),
     setRunMode: useMutation({ mutationFn: setRunMode, onSuccess: refreshRuns }),
     approveGate: useMutation({ mutationFn: approveGate, onSuccess: refreshRuns }),
+    approvePipelineGate: useMutation({ mutationFn: approvePipelineGate, onSuccess: refreshRuns }),
     resumeTask: useMutation({ mutationFn: resumeTask, onSuccess: refreshRuns }),
     approveMain: useMutation({ mutationFn: approveMain, onSuccess: refreshRuns }),
     abortRun: useMutation({ mutationFn: abortRun, onSuccess: refreshRuns }),

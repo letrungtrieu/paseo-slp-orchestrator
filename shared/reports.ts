@@ -6,8 +6,7 @@ export const AcceptanceReportSchema = z.object({
   changedFiles: z.array(z.string().trim().min(1)),
   // A task may introduce no new design decision; an explicit empty list is still a complete report.
   technicalDecisions: z.array(z.string().trim().min(1)),
-  qaResults: z.string().trim().min(1),
-  securityReview: z.string().trim().min(1),
+  verificationSummary: z.string().trim().min(1),
   risks: z.array(z.string().trim().min(1)).default([]),
 });
 export type AcceptanceReport = z.infer<typeof AcceptanceReportSchema>;

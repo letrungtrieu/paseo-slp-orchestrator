@@ -4,8 +4,8 @@ import { toolNamesForRole } from "../server/bus/tool-schemas";
 import { SLP_ROLES } from "../shared/roles";
 
 const SUPERVISOR_CALLER: BusCaller = { runId: "run-1", agentId: "agent-sup", role: "supervisor", taskId: null };
-const IMPLEMENTER_CALLER: BusCaller = { runId: "run-1", agentId: "agent-impl", role: "implementer", taskId: "t1" };
-const CALLERS_BY_TOKEN: Record<string, BusCaller> = { "tok-sup": SUPERVISOR_CALLER, "tok-impl": IMPLEMENTER_CALLER };
+const PEER_CALLER: BusCaller = { runId: "run-1", agentId: "agent-peer", role: "peer", projectRole: "developer", taskId: null };
+const CALLERS_BY_TOKEN: Record<string, BusCaller> = { "tok-sup": SUPERVISOR_CALLER, "tok-peer": PEER_CALLER };
 
 let runningBus: RunningBus;
 let dispatchSpy: ReturnType<typeof vi.fn>;
@@ -132,8 +132,9 @@ describe("tools/list", () => {
   // every role sees exactly its catalogue, never another role's tools
   it.each(SLP_ROLES)("returns exactly the tools of role %s", async (role) => {
     const callerForRole: BusCaller = { runId: "run-1", agentId: `agent-${role}`, role, taskId: null };
-    CALLERS_BY_TOKEN[`tok-${role}`] = callerForRole;
-    const listResponse = await post(`tok-${role}`, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    // Use a role-list-specific token so the shared 'tok-peer' fixture retains its projectRole for tools/call tests.
+    CALLERS_BY_TOKEN[`tok-list-${role}`] = callerForRole;
+    const listResponse = await post(`tok-list-${role}`, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const exposedToolNames = (await listResponse.json()).result.tools.map((tool: { name: string }) => tool.name);
     expect(exposedToolNames).toEqual(toolNamesForRole(role));
   });
@@ -141,13 +142,13 @@ describe("tools/list", () => {
   it("shows the Supervisor shared read tools and its own workflow tools", async () => {
     const listResponse = await post("tok-sup", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const exposedToolNames = (await listResponse.json()).result.tools.map((tool: { name: string }) => tool.name);
-    // Read access does not grant the Supervisor the Lead's task-creation or merge-report tools.
-    expect(exposedToolNames).toEqual(["slp_list_peer_roles", "slp_get_run", "slp_list_tasks", "slp_get_task", "slp_get_report", "slp_delegate", "slp_request_rework", "slp_present_to_manager"]);
+    // Read access does not grant the Supervisor the Lead's pipeline creation tools.
+    expect(exposedToolNames).toEqual(toolNamesForRole("supervisor"));
   });
 
   // agents build their calls from these schemas
   it("describes each tool with a JSON schema object and no $schema key", async () => {
-    const listResponse = await post("tok-impl", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const listResponse = await post("tok-peer", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const exposedTools = (await listResponse.json()).result.tools as Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
     expect(exposedTools.length).toBeGreaterThan(0);
     for (const exposedTool of exposedTools) {
@@ -155,28 +156,28 @@ describe("tools/list", () => {
       expect(exposedTool.inputSchema.type).toBe("object");
       expect(exposedTool.inputSchema).not.toHaveProperty("$schema");
     }
-    const submitPlanTool = exposedTools.find((tool) => tool.name === "slp_submit_plan");
-    expect(submitPlanTool?.inputSchema.required).toEqual(expect.arrayContaining(["restatedGoal", "discrepancies", "plannedFiles"]));
+    const stageReportTool = exposedTools.find((tool) => tool.name === "slp_stage_report");
+    expect(stageReportTool?.inputSchema.required).toEqual(["summary"]);
   });
 
   it("keeps defaulted fields optional in the advertised schema", async () => {
-    const qaCaller: BusCaller = { runId: "run-1", agentId: "agent-qa", role: "qa", taskId: "t1" };
-    CALLERS_BY_TOKEN["tok-qa"] = qaCaller;
-    const listResponse = await post("tok-qa", { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    const verdictTool = (await listResponse.json()).result.tools.find((tool: { name: string }) => tool.name === "slp_verdict");
-    // `issues` defaults to [] so an APPROVED verdict may omit it
-    expect(verdictTool.inputSchema.required).toEqual(["verdict"]);
+    const peerCaller: BusCaller = { runId: "run-1", agentId: "agent-peer-schema", role: "peer", projectRole: "qa-engineer", taskId: null };
+    CALLERS_BY_TOKEN["tok-peer-schema"] = peerCaller;
+    const listResponse = await post("tok-peer-schema", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const stageReportTool = (await listResponse.json()).result.tools.find((tool: { name: string }) => tool.name === "slp_stage_report");
+    // `findings` and `status` default so a concise report only requires its summary.
+    expect(stageReportTool.inputSchema.required).toEqual(["summary"]);
   });
 });
 
 describe("tools/call", () => {
   // dispatch receives the identity derived from the token
   it("routes to dispatch with the authenticated caller, tool name and arguments", async () => {
-    const callResponse = await post("tok-impl", {
+    const callResponse = await post("tok-peer", {
       jsonrpc: "2.0", id: 5, method: "tools/call",
-      params: { name: "slp_stage_done", arguments: { summary: "done" } },
+      params: { name: "slp_stage_report", arguments: { summary: "done" } },
     });
-    expect(dispatchSpy).toHaveBeenCalledWith(IMPLEMENTER_CALLER, "slp_stage_done", { summary: "done" });
+    expect(dispatchSpy).toHaveBeenCalledWith(PEER_CALLER, "slp_stage_report", { summary: "done" });
     expect(await callResponse.json()).toEqual({
       jsonrpc: "2.0", id: 5,
       result: { content: [{ type: "text", text: "dispatched ok" }], isError: false },
@@ -186,7 +187,7 @@ describe("tools/call", () => {
   // a blocked call must look like a failed tool call so the agent self-corrects
   it("passes isError through so the agent sees a failed tool call", async () => {
     dispatchSpy.mockResolvedValueOnce({ text: "blocked: scope", isError: true });
-    const callResponse = await post("tok-impl", {
+    const callResponse = await post("tok-peer", {
       jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "slp_stage_done", arguments: {} },
     });
     expect((await callResponse.json()).result).toMatchObject({ isError: true, content: [{ text: "blocked: scope" }] });
@@ -202,7 +203,7 @@ describe("tools/call", () => {
   it("identifies the caller by token, not by anything in the body", async () => {
     await post("tok-sup", {
       jsonrpc: "2.0", id: 8, method: "tools/call",
-      params: { name: "slp_delegate", arguments: { agentId: "agent-impl", role: "implementer" } },
+      params: { name: "slp_delegate", arguments: { agentId: "agent-peer", role: "developer" } },
     });
     expect(dispatchSpy.mock.calls[0][0]).toBe(SUPERVISOR_CALLER);
   });

@@ -1,9 +1,10 @@
-// Background loop that keeps the pipeline moving even when lifecycle events are missed:
-// answers pending permissions, delivers queued mail to idle agents and restarts stuck tasks.
+// Background loop that keeps dynamic stages moving even when lifecycle events are missed:
+// answers permissions, delivers queued mail and resumes persisted pipeline stages.
 import type { Run } from "../shared/state";
 import { handlePermissionRequest } from "./hooks/permission-handler";
+import { sweepStageNudges } from "./hooks/lifecycle-hooks";
 import type { PipelineContext } from "./pipeline/context";
-import { isStartingTasks, queuedTasks, startQueuedTasks } from "./pipeline/task-start";
+import { recoverPipelines } from "./pipeline/stage-engine";
 
 // 3 s keeps permission prompts and mail feeling immediate without hammering the daemon's agent directory.
 const SWEEP_INTERVAL_MS = 3_000;
@@ -18,22 +19,30 @@ const ACTIVE_RUN_STATUSES: ReadonlySet<Run["status"]> = new Set([
 ]);
 
 async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
+  // Legacy runs retain their historical agent configuration; prompting them after reload would
+  // send dynamic tools to agents that were never created with the new protocol.
+  if (run.engineVersion !== "dynamic-stages-v1") return;
   // The sweeper polls live status because events are best effort: a missed turn_ended or permission_requested would otherwise stall the run forever.
   const liveStatuses = await ctx.gateway.liveStatuses(run.id);
+  // Refresh after the SDK poll: abort/approval can commit while liveStatuses is awaiting Paseo.
+  const currentRun = ctx.store.require(run.id);
+  if (currentRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(currentRun.status)) return;
   for (const liveStatus of liveStatuses.values()) {
     // Answering here duplicates the event hook on purpose; handlePermissionRequest de-duplicates by request id.
     for (const pendingRequest of liveStatus.pendingPermissions) {
       await handlePermissionRequest(ctx, liveStatus.agentId, pendingRequest);
     }
   }
+  // Permission responses can await Paseo long enough for the run to be aborted, so re-check
+  // before nudging or handing queued prompts to a stage cohort.
+  const activeRun = ctx.store.require(run.id);
+  if (activeRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(activeRun.status)) return;
+  const hasDynamicPipeline = Object.keys(activeRun.pipelines).length > 0;
+  if (hasDynamicPipeline) sweepStageNudges(ctx, activeRun.id, liveStatuses);
   // Mail flushes only to agents the poll shows idle, which is why replies from tools can return immediately and still be delivered safely.
-  await ctx.mailbox.flush(run.id, liveStatuses);
-  // after a plugin restart tasks can sit in "queued" with nobody forking them
-  const stuckQueuedTasks = queuedTasks(run.tasks);
-  // Only 'running': during delegating/planning the Master Lead's own call to slp_define_tasks starts tasks, and recovery must not race it.
-  if (stuckQueuedTasks.length > 0 && !isStartingTasks(run.id) && run.status === "running") {
-    void startQueuedTasks(ctx, run.id).catch((startError) => console.error("[slp] recovery start failed", startError));
-  }
+  await ctx.mailbox.flush(activeRun.id, liveStatuses);
+  // A dynamic run with no pipeline yet still needs mailbox delivery for its initial delegation.
+  if (hasDynamicPipeline) await recoverPipelines(ctx, activeRun.id);
 }
 
 export function startSweeper(ctx: PipelineContext): () => void {
@@ -46,6 +55,7 @@ export function startSweeper(ctx: PipelineContext): () => void {
     try {
       for (const run of ctx.store.list()) {
         if (!ACTIVE_RUN_STATUSES.has(run.status)) continue;
+        if (run.engineVersion !== "dynamic-stages-v1") continue;
         // One broken run must not stop the sweep of the others, so its failure is logged and swallowed.
         await sweepRun(ctx, run).catch((sweepError) => console.error(`[slp] sweep of run ${run.id} failed`, sweepError));
       }

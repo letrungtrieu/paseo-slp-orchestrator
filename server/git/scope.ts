@@ -4,10 +4,6 @@
 // Reserve obsolete pipeline filenames so broad writable scopes cannot reintroduce task/report litter.
 export const PROTECTED_TASK_FILES = ["TASK_SPEC.md", ".slp/MASTER_SPEC.md", ".slp/ACCEPTANCE_DOC.md", ".slp/comm-log.jsonl"] as const;
 
-// QA may add tests in addition to whatever the Implementer is allowed to touch (rule 4).
-export const QA_WRITABLE_SCOPE = ["tests/**", "test/**", "**/*.test.*", "**/*.spec.*", "__tests__/**"];
-
-
 export function normalizeRelativePath(filePath: string): string {
   // git prints forward slashes; users type "./src/" or "src\\" so normalise both forms
   return filePath.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
@@ -48,7 +44,7 @@ export function matchesAnyScope(filePath: string, scopeGlobs: readonly string[])
 export interface ScopeCheckInput {
   changedFiles: readonly string[];
   writableScope: readonly string[];
-  // extra globs allowed in this check, e.g. QA test directories
+  // Extra globs allowed in this check when a stage peer receives supplemental path grants.
   additionalAllowedScope?: readonly string[];
 }
 
