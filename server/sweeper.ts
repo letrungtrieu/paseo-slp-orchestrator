@@ -5,6 +5,7 @@ import { handlePermissionRequest } from "./hooks/permission-handler";
 import { sweepStageNudges } from "./hooks/lifecycle-hooks";
 import { recoverMasterLead } from "./pipeline/agent-revival";
 import type { PipelineContext } from "./pipeline/context";
+import { handleSupervisorArchived } from "./pipeline/run-lifecycle";
 import { recoverPipelines } from "./pipeline/stage-engine";
 
 // 3 s keeps permission prompts and mail feeling immediate without hammering the daemon's agent directory.
@@ -28,6 +29,12 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   // Refresh after the SDK poll: abort/approval can commit while liveStatuses is awaiting Paseo.
   const currentRun = ctx.store.require(run.id);
   if (currentRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(currentRun.status)) return;
+  const supervisorRecord = currentRun.agents[currentRun.supervisorAgentId];
+  // If the Supervisor was archived while an event was missed, retire every dependent Lead and Peer instead of reviving them.
+  if (supervisorRecord && (supervisorRecord.archivedAt || liveStatuses.get(supervisorRecord.agentId)?.archived)) {
+    await handleSupervisorArchived(ctx, currentRun.id, supervisorRecord.archivedAt ?? undefined);
+    return;
+  }
   for (const liveStatus of liveStatuses.values()) {
     // Answering here duplicates the event hook on purpose; handlePermissionRequest de-duplicates by request id.
     for (const pendingRequest of liveStatus.pendingPermissions) {

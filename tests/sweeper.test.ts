@@ -176,4 +176,24 @@ describe("sweeper", () => {
     expect(flow.gateway.promptsTo(replacementPeerId).at(-1)).toContain("slp_stage_report");
     expect(flow.run(runId).agents[replacementPeerId].awaitingTool).toBe("slp_stage_report");
   });
+
+  // When the Supervisor is archived, the sweeper must retire all dependent Peers, Forked Leads and Master Lead instead of respawning them.
+  it("archives all dependent leads and peers and aborts the run when the Supervisor is archived", async () => {
+    const { flow, runId, masterLeadId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+    const peerIds = [...firstStage.peerAgentIds];
+    const supervisorId = flow.run(runId).supervisorAgentId;
+    await flow.gateway.archive(supervisorId);
+
+    await tick();
+    const stoppedRun = flow.run(runId);
+    expect(stoppedRun.status).toBe("aborted");
+    expect(flow.gateway.archivedAgentIds).toContain(masterLeadId);
+    expect(flow.gateway.archivedAgentIds).toContain(coordinatorId);
+    for (const peerId of peerIds) {
+      expect(flow.gateway.archivedAgentIds).toContain(peerId);
+    }
+  });
 });

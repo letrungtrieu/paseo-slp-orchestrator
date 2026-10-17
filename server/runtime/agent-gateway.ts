@@ -121,6 +121,16 @@ function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
   );
 }
 
+// Verify Supervisor directory misses so archiving the Supervisor in Paseo always cascades to dependent Leads and Peers.
+function isActiveSupervisor(run: Run, agentRecord: AgentRecord): boolean {
+  return (
+    !agentRecord.archivedAt
+    && agentRecord.role === "supervisor"
+    && agentRecord.agentId === run.supervisorAgentId
+    && !["completed", "aborted"].includes(run.status)
+  );
+}
+
 export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
   const errorMessage = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
   if (/^agent\s+(?:not found|does not exist)\b/.test(errorMessage) || /^unknown agent\b/.test(errorMessage)) return true;
@@ -330,11 +340,12 @@ export class AgentGateway {
         && (
           isCurrentStageAgent(currentRun, agentRecord)
           || isActiveMasterLead(currentRun, agentRecord)
+          || isActiveSupervisor(currentRun, agentRecord)
           || recipientsWithQueuedMail.has(agentRecord.agentId)
         )
         && !statusByAgentId.has(agentRecord.agentId),
     );
-    // Directory projections can lag immediately after creation; refresh only the bounded active cohort and Master Lead.
+    // Directory projections can lag immediately after creation; refresh only the bounded active cohort, Master Lead and Supervisor.
     const refreshedStatuses = await Promise.all(
       missingActiveAgents.map((agentRecord) => refreshMissingActiveAgent(paseo, this.store, agentRecord)),
     );
@@ -356,13 +367,20 @@ export class AgentGateway {
   // The record stays in the store: archiving only stops the agent, history and audit lines still refer to it.
   async archive(agentId: string): Promise<void> {
     const paseo = await this.holder.get();
-    await paseo.agents.ref(agentId).archive();
+    try {
+      await paseo.agents.ref(agentId).archive();
+    } catch (archiveError) {
+      // If Paseo already archived this child via parent cascade, record its archive timestamp instead of failing.
+      if (!isConfirmedMissingAgentError(archiveError, agentId)) {
+        throw archiveError;
+      }
+    }
     // Mark only after Paseo confirms the archive, so a transient SDK failure remains recoverable.
     const lookup = this.store.findAgent(agentId);
     if (lookup) {
       this.store.mutate(lookup.run.id, (run) => {
         const agentRecord = run.agents[agentId];
-        if (agentRecord) agentRecord.archivedAt = new Date().toISOString();
+        if (agentRecord) agentRecord.archivedAt ??= new Date().toISOString();
       });
     }
   }

@@ -52,20 +52,31 @@ function dynamicHookContext() {
   });
   const peerId = `peer-${sequence}`;
   const stageLeadId = `stage-lead-${sequence}`;
+  const masterLeadId = `master-lead-${sequence}`;
+  const supervisorId = `supervisor-${sequence}`;
   const store = new RunStore(":memory:");
   openedStores.push(store);
-  store.insert(buildRun({ id: runId, status: "running", pipelines: { [pipeline.id]: pipeline }, agents: {
+  store.insert(buildRun({ id: runId, status: "running", supervisorAgentId: supervisorId, masterLeadAgentId: masterLeadId, pipelines: { [pipeline.id]: pipeline }, agents: {
+    [supervisorId]: buildAgentRecord({ agentId: supervisorId, role: "supervisor", taskId: null }),
+    [masterLeadId]: buildAgentRecord({ agentId: masterLeadId, role: "master_lead", taskId: null }),
     // Give the peer a bounded scope so out-of-scope write requests can be verified against it.
     [peerId]: buildAgentRecord({ agentId: peerId, role: "peer", projectRole: "developer", writeScope: ["src/**"], pipelineId: pipeline.id, stageId: pipeline.stages[0].id, stagePeerId: "0", taskId: null }),
     [stageLeadId]: buildAgentRecord({ agentId: stageLeadId, role: "forked_lead", pipelineId: pipeline.id, stageId: pipeline.stages[0].id, taskId: null }),
   } }));
   const queuedMessages: Array<{ toAgentId: string; text: string; awaitTool: string | null }> = [];
   const permissionResponses: Array<{ agentId: string; requestId: string; response: unknown }> = [];
+  const archivedAgentIds: string[] = [];
   const liveStatuses = new Map<string, AgentLiveStatus>([
     [peerId, { agentId: peerId, status: "idle", pendingPermissions: [], archived: false }],
     [stageLeadId, { agentId: stageLeadId, status: "idle", pendingPermissions: [], archived: false }],
   ]);
   const fakeGateway = {
+    archive: async (agentId: string) => {
+      archivedAgentIds.push(agentId);
+      store.mutate(runId, (mutableRun) => {
+        if (mutableRun.agents[agentId]) mutableRun.agents[agentId].archivedAt = "2026-01-01T00:01:00.000Z";
+      });
+    },
     busEndpointForToken: async (agentToken: string) => `http://127.0.0.1:43123/mcp/${agentToken}`,
     liveStatuses: async () => liveStatuses,
     respondToPermission: async (agentId: string, requestId: string, response: unknown) => { permissionResponses.push({ agentId, requestId, response }); },
@@ -79,7 +90,7 @@ function dynamicHookContext() {
     forks: {}, continuations: {},
     logEvent: (_runId: string, entry: Record<string, unknown>) => logs.push(entry),
   };
-  return { ctx, store, runId, pipelineId: pipeline.id, peerId, stageLeadId, queuedMessages, permissionResponses, capturedHandles, logs };
+  return { ctx, store, runId, pipelineId: pipeline.id, supervisorId, masterLeadId, peerId, stageLeadId, archivedAgentIds, queuedMessages, permissionResponses, capturedHandles, logs };
 }
 
 describe("hook registration", () => {
@@ -89,9 +100,28 @@ describe("hook registration", () => {
     const unregister = registerLifecycleHooks(hooks.server, fixture.ctx as never);
     await hooks.fire("agent.turn_started", { agent: { id: "unknown" } });
     unregister();
-    expect(hooks.removedEvents.sort()).toEqual(["agent.permission_requested", "agent.turn_ended", "agent.turn_started"]);
+    expect(hooks.removedEvents.sort()).toEqual(["agent.archived", "agent.permission_requested", "agent.turn_ended", "agent.turn_started"]);
     expect(hooks.removedBeforeHooks).toEqual(["agent.session_open"]);
     expect(fixture.capturedHandles).toHaveLength(1);
+  });
+
+  // Archiving the Supervisor in Paseo must immediately archive all dependent Peers, Forked Leads and Master Lead.
+  it("cascades Supervisor agent.archived to archive all dependent peers and leads in bottom-up order", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    await hooks.fire("agent.archived", {
+      agent: { id: fixture.supervisorId },
+      archivedAt: "2026-01-01T00:05:00.000Z",
+    });
+    expect(fixture.archivedAgentIds).toEqual([fixture.peerId, fixture.stageLeadId, fixture.masterLeadId]);
+    const abortedRun = fixture.store.require(fixture.runId);
+    expect(abortedRun.status).toBe("aborted");
+    expect(abortedRun.agents[fixture.supervisorId].archivedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(abortedRun.agents[fixture.peerId].archivedAt).toBeTruthy();
+    expect(abortedRun.agents[fixture.stageLeadId].archivedAt).toBeTruthy();
+    expect(abortedRun.agents[fixture.masterLeadId].archivedAt).toBeTruthy();
+    expect(fixture.logs.some((entry) => entry.kind === "supervisor.archived")).toBe(true);
   });
 
   // Antigravity stdio MCP bridge processes inherit the agent's launch env to authenticate to slp-bus.

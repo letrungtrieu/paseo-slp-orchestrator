@@ -213,7 +213,27 @@ export function presentToManager(ctx: PipelineContext, runId: string, assessment
   return "Result presented. Give the Supreme Manager your short Vietnamese report in chat, then end your turn.";
 }
 
+// Prevent concurrent agent.archived events and sweeper ticks from running duplicate cascade archives for the same run.
+const archivingSupervisorRuns = new Set<string>();
+
+function orderedDependentAgentIds(run: Run): string[] {
+  // Archive stage peers before Forked Leads and Master Lead so child sessions close cleanly before their parent coordinators.
+  const roleArchiveOrder: Record<string, number> = {
+    peer: 0,
+    forked_lead: 1,
+    master_lead: 2,
+  };
+  return Object.values(run.agents)
+    .filter((agentRecord) => agentRecord.role !== "supervisor" && !agentRecord.archivedAt)
+    .sort((leftAgent, rightAgent) => (roleArchiveOrder[leftAgent.role] ?? 3) - (roleArchiveOrder[rightAgent.role] ?? 3))
+    .map((agentRecord) => agentRecord.agentId);
+}
+
 async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Promise<void> {
+  // Unit fixtures that stub only the gateway may not initialize a live Paseo SDK handle.
+  if (typeof ctx.holder?.get !== "function" || (typeof ctx.holder.isReady === "function" && !ctx.holder.isReady())) {
+    return;
+  }
   const paseo = await ctx.holder.get();
   const workspaceIds = new Set<string>([run.devWorkspaceId]);
   for (const workspace of Object.values(run.pipelineWorkspaces)) {
@@ -227,12 +247,65 @@ async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Promise<v
 
 async function retireRunResources(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
-  for (const agentRecord of Object.values(run.agents)) {
-    // The Supervisor remains available for the Supreme Manager; every Lead and stage peer is retired.
-    if (agentRecord.role === "supervisor") continue;
-    await archiveAgentLogged(ctx, runId, null, agentRecord.agentId);
+  // The Supervisor remains available for the Supreme Manager; every Lead and stage peer is retired in bottom-up order.
+  for (const dependentAgentId of orderedDependentAgentIds(run)) {
+    await archiveAgentLogged(ctx, runId, null, dependentAgentId);
   }
   await archiveOwnedWorkspaces(ctx, run);
+}
+
+// When the Supervisor is archived, cascade-archive all dependent Master Lead, Forked Lead and Peer sessions and stop the run.
+export async function handleSupervisorArchived(
+  ctx: PipelineContext,
+  runId: string,
+  archivedAt?: string,
+): Promise<void> {
+  if (archivingSupervisorRuns.has(runId)) return;
+  archivingSupervisorRuns.add(runId);
+  try {
+    const initialRun = ctx.store.require(runId);
+    const effectiveArchivedAt = archivedAt ?? new Date().toISOString();
+    const dependentAgentIds = orderedDependentAgentIds(initialRun);
+    const wasActiveRun = !["completed", "aborted"].includes(initialRun.status);
+    // Persist the stopped run status before awaiting SDK archive calls so in-flight stage creation and sweeper recovery stop immediately.
+    ctx.store.mutate(runId, (mutableRun) => {
+      const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
+      if (supervisorRecord) {
+        supervisorRecord.archivedAt ??= effectiveArchivedAt;
+      }
+      if (!["completed", "aborted"].includes(mutableRun.status)) {
+        mutableRun.status = "aborted";
+      }
+      mutableRun.gate = null;
+      mutableRun.mailbox = [];
+      for (const agent of Object.values(mutableRun.agents)) {
+        agent.awaitingTool = null;
+        agent.awaitingSince = null;
+        agent.waitingForAgentId = null;
+        agent.deferredTool = null;
+      }
+    });
+    for (const dependentAgentId of dependentAgentIds) {
+      await archiveAgentLogged(ctx, runId, null, dependentAgentId);
+    }
+    // Catch any stage agent whose in-flight creation completed while earlier dependent agents were being archived.
+    for (const lateDependentAgentId of orderedDependentAgentIds(ctx.store.require(runId))) {
+      await archiveAgentLogged(ctx, runId, null, lateDependentAgentId);
+    }
+    if (wasActiveRun || dependentAgentIds.length > 0) {
+      await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
+      ctx.logEvent(runId, {
+        taskId: null,
+        from: initialRun.supervisorAgentId || "supervisor",
+        to: "pipeline",
+        kind: "supervisor.archived",
+        summary: `Supervisor archived; archived ${dependentAgentIds.length} dependent lead/peer agent(s)`,
+        outcome: "info",
+      });
+    }
+  } finally {
+    archivingSupervisorRuns.delete(runId);
+  }
 }
 
 export async function approveMain(ctx: PipelineContext, runId: string): Promise<string> {
@@ -268,7 +341,10 @@ export async function approveRunGate(ctx: PipelineContext, runId: string, taskId
 
 export async function abortRun(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
-  const knownAgentIds = Object.keys(run.agents);
+  const dependentAgentIds = orderedDependentAgentIds(run);
+  const supervisorAgentIds = Object.values(run.agents)
+    .filter((agentRecord) => agentRecord.role === "supervisor" && !agentRecord.archivedAt)
+    .map((agentRecord) => agentRecord.agentId);
   // Mark the run closed before any SDK call so an in-flight stage creator sees the abort and stops.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "aborted";
@@ -280,9 +356,10 @@ export async function abortRun(ctx: PipelineContext, runId: string): Promise<voi
       agent.deferredTool = null;
     }
   });
-  // Archive every identity already known; stage recovery owns the narrow race where an SDK create
-  // completes after this snapshot and will clean that late identity using the aborted status.
-  for (const agentId of knownAgentIds) await archiveAgentLogged(ctx, runId, null, agentId);
+  // Archive dependent peers and leads before the Supervisor so every child session closes cleanly.
+  for (const agentId of [...dependentAgentIds, ...supervisorAgentIds]) {
+    await archiveAgentLogged(ctx, runId, null, agentId);
+  }
   await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
   ctx.logEvent(runId, { taskId: null, from: "manager", to: "pipeline", kind: "run.aborted", summary: "aborted by the Supreme Manager", outcome: "info" });
 }

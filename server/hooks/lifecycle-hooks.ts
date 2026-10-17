@@ -6,6 +6,7 @@ import type { AgentRecord, Run } from "../../shared/state";
 import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
 import { isMasterLeadObligationActive } from "../pipeline/agent-revival";
 import type { PipelineContext } from "../pipeline/context";
+import { handleSupervisorArchived } from "../pipeline/run-lifecycle";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { nudgeReminder } from "../prompts/messages";
 import type { AgentLiveStatus } from "../runtime/agent-gateway";
@@ -218,6 +219,15 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
     server.on("agent.permission_requested", async (event, hookContext) => {
       ctx.holder.capture(hookContext.paseo);
       await handlePermissionRequest(ctx, event.agent.id, event.request);
+    }),
+    // Archiving the Supervisor retires all dependent Master Lead, Forked Lead and Peer sessions for that run.
+    server.on("agent.archived", async (event, hookContext) => {
+      ctx.holder.capture(hookContext.paseo);
+      const lookup = ctx.store.findAgent(event.agent.id);
+      if (!lookup) return;
+      if (lookup.agentRecord.role === "supervisor" || lookup.run.supervisorAgentId === event.agent.id) {
+        await handleSupervisorArchived(ctx, lookup.run.id, event.archivedAt);
+      }
     }),
   ];
   if (typeof server.before === "function") {
