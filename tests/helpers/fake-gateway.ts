@@ -128,13 +128,13 @@ export class FakeAgentGateway {
 
   async liveStatuses(runId: string): Promise<Map<string, AgentLiveStatus>> {
     const liveStatuses = new Map<string, AgentLiveStatus>();
-    for (const agentId of Object.keys(this.store.require(runId).agents)) {
+    for (const [agentId, agentRecord] of Object.entries(this.store.require(runId).agents)) {
       liveStatuses.set(agentId, {
         agentId,
         // Unknown agents default to idle so mail flows unless a test deliberately marks one running.
         status: this.statusByAgentId.get(agentId) ?? "idle",
         pendingPermissions: (this.pendingPermissionsByAgentId.get(agentId) ?? []) as AgentLiveStatus["pendingPermissions"],
-        archived: this.archivedAgentIds.includes(agentId),
+        archived: Boolean(agentRecord.archivedAt) || this.archivedAgentIds.includes(agentId),
       });
     }
     return liveStatuses;

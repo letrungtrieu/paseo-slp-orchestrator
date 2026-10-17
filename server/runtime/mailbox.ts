@@ -2,7 +2,7 @@
 // interrupt its turn (Paseo cancels the active turn on a new prompt), so delivery waits.
 import { randomUUID } from "node:crypto";
 import type { MailboxMessage, Run } from "../../shared/state";
-import type { AgentGateway, AgentLiveStatus } from "./agent-gateway";
+import { isConfirmedMissingAgentError, type AgentGateway, type AgentLiveStatus } from "./agent-gateway";
 import type { RunStore } from "../store/run-store";
 
 export interface EnqueueOptions {
@@ -91,11 +91,11 @@ export class Mailbox {
         if (recipientRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(recipientRun.status)) break;
         const recipientStatus = liveStatuses.get(recipientId);
         if (!stageCanReceiveMail(recipientRun, recipientId)) continue;
-        // 'closed' agents are persisted and resume on the next prompt; running ones must wait
+        // 'closed' and 'error' agents are not executing a turn and resume when prompted; only 'running' ones must wait.
         const canReceive =
           recipientStatus &&
           !recipientStatus.archived &&
-          (recipientStatus.status === "idle" || recipientStatus.status === "closed") &&
+          (recipientStatus.status === "idle" || recipientStatus.status === "closed" || recipientStatus.status === "error") &&
           // A pending permission blocks delivery: a new prompt would cancel the turn that is waiting for the answer.
           recipientStatus.pendingPermissions.length === 0;
         if (!canReceive) continue;
@@ -164,6 +164,15 @@ export class Mailbox {
       });
       return true;
     } catch (sendError) {
+      if (isConfirmedMissingAgentError(sendError, recipientId)) {
+        // When Paseo confirms the recipient session no longer exists, mark it archived so the sweeper respawns a replacement.
+        this.store.mutate(runId, (run) => {
+          const deadRecipientRecord = run.agents[recipientId];
+          if (deadRecipientRecord && !deadRecipientRecord.archivedAt) {
+            deadRecipientRecord.archivedAt = new Date().toISOString();
+          }
+        });
+      }
       // The original rows remain queued, including messages added while the send was in flight.
       // Keeping one durable copy avoids duplicate rows when prompt acceptance races a failure.
       this.logMail(runId, {

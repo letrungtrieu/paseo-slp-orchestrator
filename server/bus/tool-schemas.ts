@@ -93,6 +93,17 @@ export const BUS_TOOL_DEFINITIONS = {
     description: "Report the integrated pipeline result to the Supervisor.",
     input: z.object({ summary: z.string().trim().min(1) }),
   },
+  // Enables the Supervisor or Master Lead to manually respawn dead, archived or stalled sessions on demand.
+  slp_revive_agent: {
+    roles: ["supervisor", "master_lead"],
+    description: "Revive dead, archived, errored or stalled Master Lead, Forked Lead or stage Peer agents and resume their pending obligation.",
+    input: z.object({
+      target: z.enum(["auto", "master_lead", "stage_cohort", "agent"]).default("auto"),
+      agentId: z.string().trim().min(1).optional(),
+      pipelineId: pipelineIdField.optional(),
+      reason: z.string().trim().min(1).optional(),
+    }),
+  },
   // This read-only summary remains useful to all agents without exposing database paths or tokens.
   slp_get_run: {
     roles: SLP_ROLES,

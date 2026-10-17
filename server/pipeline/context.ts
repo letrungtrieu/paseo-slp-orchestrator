@@ -15,6 +15,7 @@ export interface PipelineContext {
   mailbox: Mailbox;
   forks: ForkRegistry;
   holder: PaseoHolder;
+  stateDirectory?: string;
   logEvent(runId: string, entry: PipelineLogEntry): void;
 }
 

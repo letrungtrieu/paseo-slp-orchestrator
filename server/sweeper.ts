@@ -3,6 +3,7 @@
 import type { Run } from "../shared/state";
 import { handlePermissionRequest } from "./hooks/permission-handler";
 import { sweepStageNudges } from "./hooks/lifecycle-hooks";
+import { recoverMasterLead } from "./pipeline/agent-revival";
 import type { PipelineContext } from "./pipeline/context";
 import { recoverPipelines } from "./pipeline/stage-engine";
 
@@ -38,11 +39,27 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   const activeRun = ctx.store.require(run.id);
   if (activeRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(activeRun.status)) return;
   const hasDynamicPipeline = Object.keys(activeRun.pipelines).length > 0;
-  if (hasDynamicPipeline) sweepStageNudges(ctx, activeRun.id, liveStatuses);
-  // Mail flushes only to agents the poll shows idle, which is why replies from tools can return immediately and still be delivered safely.
+  // Both active stage participants and a planning/running Master Lead can owe workflow tools.
+  if (hasDynamicPipeline || ["planning", "running"].includes(activeRun.status)) {
+    sweepStageNudges(ctx, activeRun.id, liveStatuses);
+  }
+  // Respawn a vanished or archived Master Lead before flushing so its transferred or inferred mail delivers immediately.
+  await recoverMasterLead(ctx, activeRun.id, liveStatuses);
+  // Mail flushes only to agents the poll shows idle/closed/error, which is why replies from tools can return immediately and still be delivered safely.
   await ctx.mailbox.flush(activeRun.id, liveStatuses);
+  // A delivery failure confirming a missing recipient marks it archived; re-run Master Lead recovery if that happened.
+  if (ctx.store.require(activeRun.id).agents[ctx.store.require(activeRun.id).masterLeadAgentId]?.archivedAt) {
+    await recoverMasterLead(ctx, activeRun.id, liveStatuses);
+    await ctx.mailbox.flush(activeRun.id, liveStatuses);
+  }
   // A dynamic run with no pipeline yet still needs mailbox delivery for its initial delegation.
-  if (hasDynamicPipeline) await recoverPipelines(ctx, activeRun.id);
+  if (hasDynamicPipeline) {
+    const queuedBeforeRecovery = ctx.store.require(activeRun.id).mailbox.length;
+    await recoverPipelines(ctx, activeRun.id);
+    if (ctx.store.require(activeRun.id).mailbox.length > queuedBeforeRecovery) {
+      await ctx.mailbox.flush(activeRun.id, await ctx.gateway.liveStatuses(activeRun.id));
+    }
+  }
 }
 
 export function startSweeper(ctx: PipelineContext): () => void {

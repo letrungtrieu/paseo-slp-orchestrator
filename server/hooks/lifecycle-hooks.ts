@@ -3,6 +3,8 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { NUDGE_LIMIT } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
+import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
+import { MASTER_LEAD_OWED_TOOLS } from "../pipeline/agent-revival";
 import type { PipelineContext } from "../pipeline/context";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { nudgeReminder } from "../prompts/messages";
@@ -26,6 +28,19 @@ function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
   return Boolean(pipeline?.status === "running"
     && currentStage?.id === agentRecord.stageId
     && currentStage.status === "running");
+}
+
+// The Master Lead also owes workflow tools during planning, pause recovery, finalization and final reporting.
+function agentOwnsMasterLeadObligation(run: Run, agentRecord: AgentRecord): boolean {
+  return Boolean(
+    run.engineVersion === "dynamic-stages-v1"
+    && ["planning", "running"].includes(run.status)
+    && !agentRecord.archivedAt
+    && agentRecord.role === "master_lead"
+    && agentRecord.agentId === run.masterLeadAgentId
+    && agentRecord.awaitingTool
+    && MASTER_LEAD_OWED_TOOLS.has(agentRecord.awaitingTool),
+  );
 }
 
 function stageObligationFor(agentRecord: AgentRecord): string | null {
@@ -77,12 +92,20 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
   return queued;
 }
 
-function nudgeIfToolMissing(ctx: PipelineContext, agentId: string, outcomeKind: string, recoveredFromPoll = false): boolean {
-  // Unknown, archived and legacy task agents are ignored; dynamic stages own their obligations.
+function nudgeIfToolMissing(
+  ctx: PipelineContext,
+  agentId: string,
+  outcomeKind: string,
+  recoveredFromPoll = false,
+  liveStatusKind?: AgentLiveStatus["status"],
+): boolean {
+  // Unknown, archived and legacy task agents are ignored; dynamic stages and Master Lead own their obligations.
   const lookup = ctx.store.findAgent(agentId);
   if (!lookup || outcomeKind !== "completed") return false;
   const { run, agentRecord } = lookup;
-  if (!agentOwnsCurrentStage(run, agentRecord)) return false;
+  const ownsStageObligation = agentOwnsCurrentStage(run, agentRecord);
+  const ownsMasterLeadObligation = agentOwnsMasterLeadObligation(run, agentRecord);
+  if (!ownsStageObligation && !ownsMasterLeadObligation) return false;
   // A queued assignment is still waiting for its first delivery; nudging the recipient now
   // would create an owed-tool clock before the model has seen the stage roster.
   if (run.mailbox.some((message) => message.toAgentId === agentId)) return false;
@@ -95,17 +118,24 @@ function nudgeIfToolMissing(ctx: PipelineContext, agentId: string, outcomeKind: 
   if (expectedStageTool && agentRecord.awaitingTool !== expectedStageTool) return false;
   // a turn that began before the request was sent is not the agent's reply to it
   if (!owesTool || (!recoveredFromPoll && !turnStartedAt) || (!recoveredFromPoll && turnStartedAt! < (agentRecord.awaitingSince ?? ""))) return false;
-  // After NUDGE_LIMIT reminders the owner Forked Lead decides whether the stage can continue.
+  // After NUDGE_LIMIT reminders, a stage participant pauses for Lead review while a crashed or Master Lead session is retired for revival.
   if (agentRecord.nudges >= NUDGE_LIMIT) {
     const reason = `${agentRecord.projectRole ?? agentRecord.role} did not call ${agentRecord.awaitingTool}`;
     ctx.logEvent(run.id, { taskId: null, from: agentId, to: "pipeline", kind: "nudge.exhausted", summary: reason, outcome: "error" });
-    // The helper routes the pause to the owning Forked Lead and records the durable pipeline state.
-    pausePipelineForAgent(ctx, agentId, reason);
+    const shouldRespawnBrokenSession = ownsMasterLeadObligation || liveStatusKind === "error";
+    if (!shouldRespawnBrokenSession) {
+      // The helper routes the pause to the owning Master Lead and records the durable pipeline state.
+      pausePipelineForAgent(ctx, agentId, reason);
+    }
     ctx.store.mutate(run.id, (mutableRun) => {
       const mutableRecord = mutableRun.agents[agentId];
       if (mutableRecord) {
-        mutableRecord.awaitingTool = null;
-        mutableRecord.awaitingSince = null;
+        if (shouldRespawnBrokenSession) {
+          mutableRecord.archivedAt ??= new Date().toISOString();
+        } else {
+          mutableRecord.awaitingTool = null;
+          mutableRecord.awaitingSince = null;
+        }
       }
     });
     return true;
@@ -129,13 +159,15 @@ function nudgeIfToolMissing(ctx: PipelineContext, agentId: string, outcomeKind: 
 
 export function sweepStageNudges(ctx: PipelineContext, runId: string, liveStatuses: Map<string, AgentLiveStatus>): void {
   const run = ctx.store.require(runId);
-  // The directory poll is the recovery path for a dropped turn-ended event after reload.
+  // The directory poll is the recovery path for a dropped turn-ended event or a turn that crashed into 'error' state.
   for (const [agentId, liveStatus] of liveStatuses) {
-    if (liveStatus.archived || (liveStatus.status !== "idle" && liveStatus.status !== "closed")) continue;
+    if (liveStatus.archived || (liveStatus.status !== "idle" && liveStatus.status !== "closed" && liveStatus.status !== "error")) continue;
     const lookup = ctx.store.findAgent(agentId);
     if (!lookup || lookup.run.id !== runId) continue;
-    if (!agentOwnsCurrentStage(run, lookup.agentRecord)) continue;
-    if (lookup.agentRecord.waitingForAgentId && lookup.agentRecord.awaitingSince) {
+    const ownsStageObligation = agentOwnsCurrentStage(run, lookup.agentRecord);
+    const ownsMasterLeadObligation = agentOwnsMasterLeadObligation(run, lookup.agentRecord);
+    if (!ownsStageObligation && !ownsMasterLeadObligation) continue;
+    if (ownsStageObligation && lookup.agentRecord.waitingForAgentId && lookup.agentRecord.awaitingSince) {
       // A direct reply timeout restores the stage obligation instead of pausing the whole pipeline.
       if (restoreExpiredDirectReply(ctx, run, agentId)) continue;
     }
@@ -148,8 +180,12 @@ export function sweepStageNudges(ctx: PipelineContext, runId: string, liveStatus
     const obligationAgeMs = Date.now() - Date.parse(obligationStartedAt);
     if (Number.isFinite(obligationAgeMs) && obligationAgeMs < NUDGE_GRACE_PERIOD_MS) continue;
     if (lastSweeperNudgeByAgent.get(agentId) === obligationStartedAt) continue;
-    if (nudgeIfToolMissing(ctx, agentId, "completed", true)) {
+    if (nudgeIfToolMissing(ctx, agentId, "completed", true, liveStatus.status)) {
       lastSweeperNudgeByAgent.set(agentId, obligationStartedAt);
+      const updatedRecord = ctx.store.require(runId).agents[agentId];
+      if (updatedRecord?.archivedAt) {
+        liveStatuses.set(agentId, { ...liveStatus, archived: true });
+      }
     }
   }
 }
@@ -171,5 +207,36 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
       await handlePermissionRequest(ctx, event.agent.id, event.request);
     }),
   ];
+  if (typeof server.before === "function") {
+    // Plugin/CLI providers such as Antigravity ignore per-session HTTP mcpServers and spawn a stdio bridge
+    // from ~/.gemini/config/mcp_config.json instead; inject the agent's private bus token into its process env.
+    removers.push(
+      server.before("agent.session_open", async ({ request: sessionOpenRequest }, hookContext) => {
+        ctx.holder.capture(hookContext.paseo);
+        const callerLookup = ctx.store.findAgent(sessionOpenRequest.agentId);
+        if (!callerLookup) return undefined;
+        if (ctx.stateDirectory && sessionOpenRequest.provider.startsWith("antigravity")) {
+          try {
+            ensureAntigravityMcpBridge(ctx.stateDirectory);
+          } catch (bridgeSetupError) {
+            console.error("[slp] failed to sync Antigravity MCP bridge", bridgeSetupError);
+          }
+        }
+        const agentBusUrl = typeof ctx.gateway.busEndpointForToken === "function"
+          ? await ctx.gateway.busEndpointForToken(callerLookup.agentRecord.token)
+          : null;
+        return {
+          ...sessionOpenRequest,
+          env: {
+            ...sessionOpenRequest.env,
+            SLP_AGENT_ID: sessionOpenRequest.agentId,
+            SLP_AGENT_TOKEN: callerLookup.agentRecord.token,
+            ...(agentBusUrl ? { SLP_BUS_URL: agentBusUrl } : {}),
+            ...(ctx.stateDirectory ? { SLP_HOME: ctx.stateDirectory } : {}),
+          },
+        };
+      }),
+    );
+  }
   return () => removers.forEach((remove) => remove());
 }

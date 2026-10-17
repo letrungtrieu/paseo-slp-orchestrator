@@ -39,3 +39,20 @@ export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stag
   // The coordinator judges the goal; peer report counts and majority votes do not replace that judgment.
   return `You are the Forked Lead controlling this stage from its start until closure. Direct peers through slp_send_peer_message or slp_stage_rework, inspect their evidence and the worktree, and keep them focused on goal. You decide when the result is acceptable with slp_approve_stage({summary}). If blocked beyond your authority, use slp_escalate. Do not approve merely because peers stopped talking.\n${stageBriefing(run, pipeline, stage)}`;
 }
+
+// When a Forked Lead session dies mid-stage after peers already reported, include their saved reports so the replacement can act immediately.
+export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
+  const baseBriefing = coordinatorStageBriefing(run, pipeline, stage);
+  if (stage.reports.length === 0) return baseBriefing;
+  return `${baseBriefing}\n\nSubmitted stage peer reports before coordinator revival:\n${JSON.stringify(stage.reports, null, 2)}\nCompare this evidence with goal '${stage.goal}'. Direct more work with slp_stage_rework or approve with slp_approve_stage when you accept the result.`;
+}
+
+// Inform a surviving Forked Lead when dead peer slots are replaced so direct messages and rework target the new identities.
+export function peerRosterUpdateNotice(stage: StageState, revivedPeerIndices: ReadonlySet<number>): string {
+  const revivedPeerSummaries = [...revivedPeerIndices].map((peerIndex) => {
+    const peerAssignment = stage.peers[peerIndex];
+    const replacementPeerAgentId = stage.peerAgentIds[peerIndex];
+    return `${peerAssignment.role} (${replacementPeerAgentId})`;
+  });
+  return `Stage '${stage.name}' revived dead peer session(s): ${revivedPeerSummaries.join(", ")}. Continue coordinating this stage with the updated peer roster.`;
+}

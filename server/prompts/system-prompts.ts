@@ -106,10 +106,10 @@ function runtimePriority(role: SlpRole): string {
     return "The current stage assignment is authoritative. Coordinate only this stage with slp_send_peer_message, slp_stage_report review, slp_approve_stage, slp_stage_rework and slp_escalate. Never use obsolete Lead instructions to define another pipeline or modify integration files.";
   }
   if (role === "master_lead") {
-    return "The dynamic pipeline tools are authoritative. Use slp_create_worktree, slp_define_pipeline and slp_finalize_pipeline; do not use obsolete slp_define_tasks, fixed Implement/Verify/Document handoffs or runtime files.";
+    return "The dynamic pipeline tools are authoritative. Use slp_create_worktree, slp_define_pipeline, slp_resume_pipeline, slp_revive_agent and slp_finalize_pipeline; do not use obsolete slp_define_tasks, fixed Implement/Verify/Document handoffs or runtime files.";
   }
   if (role === "peer") {
     return "The current stage brief and peer contract are authoritative. Use slp_send_peer_message and slp_stage_report; do not approve stages, create pipelines or follow obsolete task-phase handoffs from a reused workflow.";
   }
-  return "The current Supervisor contract is authoritative. Delegate through slp_delegate, review pipeline evidence, then use slp_request_rework or slp_present_to_manager.";
+  return "The current Supervisor contract is authoritative. Delegate through slp_delegate, review pipeline evidence, revive dead or stalled agents with slp_revive_agent when needed, then use slp_request_rework or slp_present_to_manager.";
 }

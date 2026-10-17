@@ -123,4 +123,57 @@ describe("sweeper", () => {
     await tick();
     expect(flow.pipeline(runId)!.stages[0].status).toBe("pending");
   });
+
+  // Agents whose turn crashed in Paseo report 'error' status and must still receive queued mail and recovery nudges.
+  it("delivers queued mail to an agent in error status so its session can recover", async () => {
+    const { flow, runId, masterLeadId } = await sweptRun();
+    flow.gateway.setStatus(masterLeadId, "error");
+    flow.ctx.mailbox.enqueue(runId, masterLeadId, "recover from crash", {
+      taskId: null,
+      awaitTool: "slp_define_pipeline",
+      from: "supervisor",
+      summary: "recover",
+    });
+
+    await tick();
+    expect(flow.gateway.promptsTo(masterLeadId)).toEqual(["recover from crash"]);
+    expect(flow.run(runId).agents[masterLeadId].awaitingTool).toBe("slp_define_pipeline");
+  });
+
+  // When the Master Lead session dies during planning, the sweeper must spawn a replacement and re-queue slp_define_pipeline.
+  it("automatically revives a dead Master Lead during planning and restores its slp_define_pipeline obligation", async () => {
+    const { flow, runId, masterLeadId } = await sweptRun();
+    flow.store.mutate(runId, (run) => {
+      run.status = "planning";
+      run.criteria = "Implement resilient orchestration with automatic Master Lead revival.";
+      run.agents[masterLeadId].awaitingTool = "slp_define_pipeline";
+    });
+    await flow.gateway.archive(masterLeadId);
+
+    await tick();
+    const revivedMasterLeadId = flow.run(runId).masterLeadAgentId;
+    expect(revivedMasterLeadId).not.toBe(masterLeadId);
+    expect(flow.run(runId).agents[revivedMasterLeadId].awaitingTool).toBe("slp_define_pipeline");
+    expect(flow.gateway.promptsTo(revivedMasterLeadId).at(-1)).toContain("slp_define_pipeline");
+  });
+
+  // Mid-stage peer revival must only replace and brief the dead peer without resetting healthy peers that already reported.
+  it("revives only a dead stage peer without re-briefing healthy peers in the same stage", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const deadPeerId = firstStage.peerAgentIds[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+    await flow.gateway.archive(deadPeerId);
+    flow.gateway.prompts.length = 0;
+
+    await tick();
+    const refreshedStage = flow.pipeline(runId)!.stages[0];
+    const replacementPeerId = refreshedStage.peerAgentIds[0];
+    expect(replacementPeerId).toBeTruthy();
+    expect(replacementPeerId).not.toBe(deadPeerId);
+    expect(refreshedStage.forkedLeadAgentId).toBe(coordinatorId);
+    expect(flow.gateway.promptsTo(replacementPeerId).at(-1)).toContain("slp_stage_report");
+    expect(flow.run(runId).agents[replacementPeerId].awaitingTool).toBe("slp_stage_report");
+  });
 });

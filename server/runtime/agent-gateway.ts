@@ -111,14 +111,25 @@ function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
   );
 }
 
-function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
-  if (/^agent\s+(?:not found|does not exist)\b/.test(message) || /^unknown agent\b/.test(message)) return true;
-  // Generic SDK/network errors must remain unknown; only an error naming this identity can confirm absence.
-  return message.includes(agentId.toLowerCase()) && /\b(?:not found|does not exist|unknown)\b/.test(message);
+// The Master Lead owns planning, pause recovery, integration and reporting across the run, so directory misses must be verified too.
+function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
+  return (
+    !agentRecord.archivedAt
+    && agentRecord.role === "master_lead"
+    && agentRecord.agentId === run.masterLeadAgentId
+    && ["delegating", "planning", "running", "reporting"].includes(run.status)
+  );
 }
 
-async function refreshMissingStageAgent(
+export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
+  const errorMessage = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
+  if (/^agent\s+(?:not found|does not exist)\b/.test(errorMessage) || /^unknown agent\b/.test(errorMessage)) return true;
+  if (errorMessage.includes("is archived") && errorMessage.includes(agentId.toLowerCase())) return true;
+  // Generic SDK/network errors must remain unknown; only an error naming this identity can confirm absence.
+  return errorMessage.includes(agentId.toLowerCase()) && /\b(?:not found|does not exist|unknown|archived)\b/.test(errorMessage);
+}
+
+async function refreshMissingActiveAgent(
   paseo: PaseoApi,
   store: RunStore,
   persistedRecord: AgentRecord,
@@ -148,6 +159,12 @@ export class AgentGateway {
     private readonly store: RunStore,
     private readonly busPort: () => Promise<number>,
   ) {}
+
+  // Expose the per-token loopback endpoint so session-open hooks can inject it into stdio CLI environments.
+  async busEndpointForToken(agentToken: string): Promise<string> {
+    const activeBusPort = await this.busPort();
+    return `http://127.0.0.1:${activeBusPort}/mcp/${agentToken}`;
+  }
 
   async createAgent(spec: CreateAgentSpec): Promise<AgentRecord> {
     const run = this.store.require(spec.runId);
@@ -306,12 +323,14 @@ export class AgentGateway {
     } while (directoryCursor);
 
     const currentRun = this.store.require(runId);
-    const missingStageAgents = Object.values(currentRun.agents).filter(
-      (agentRecord) => isCurrentStageAgent(currentRun, agentRecord) && !statusByAgentId.has(agentRecord.agentId),
+    const missingActiveAgents = Object.values(currentRun.agents).filter(
+      (agentRecord) =>
+        (isCurrentStageAgent(currentRun, agentRecord) || isActiveMasterLead(currentRun, agentRecord))
+        && !statusByAgentId.has(agentRecord.agentId),
     );
-    // Directory projections can lag immediately after creation; refresh only the bounded active cohort.
+    // Directory projections can lag immediately after creation; refresh only the bounded active cohort and Master Lead.
     const refreshedStatuses = await Promise.all(
-      missingStageAgents.map((agentRecord) => refreshMissingStageAgent(paseo, this.store, agentRecord)),
+      missingActiveAgents.map((agentRecord) => refreshMissingActiveAgent(paseo, this.store, agentRecord)),
     );
     for (const refreshedStatus of refreshedStatuses) {
       if (refreshedStatus) statusByAgentId.set(refreshedStatus.agentId, refreshedStatus);

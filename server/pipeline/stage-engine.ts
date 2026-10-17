@@ -5,12 +5,26 @@ import type { MailboxMessage } from "../../shared/state";
 import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import { peerRole } from "../project-prompts/defaults";
 import type { PipelineContext } from "./context";
-import { coordinatorStageBriefing, peerStageBriefing, stagePromptContext } from "./stage-briefings";
+import {
+  coordinatorRevivalBriefing,
+  coordinatorStageBriefing,
+  peerRosterUpdateNotice,
+  peerStageBriefing,
+  stagePromptContext,
+} from "./stage-briefings";
 import { pausePipeline, requirePipeline } from "./stage-context";
 import { stageMail } from "./stage-mail";
 
 // Recovery ticks and an approval tool may arrive together; only one may create or retire a cohort.
 const advancingPipelines = new Set<string>();
+
+interface StageActivationChanges {
+  wasStageAlreadyStarted: boolean;
+  coordinatorCreated: boolean;
+  createdPeerIndices: ReadonlySet<number>;
+  previousCoordinatorId: string | null;
+  previousPeerAgentIds: readonly string[];
+}
 
 function currentAssignment(ctx: PipelineContext, runId: string, pipelineId: string) {
   const run = ctx.store.require(runId);
@@ -99,12 +113,18 @@ async function forkOptions(ctx: PipelineContext, runId: string) {
 async function startStage(ctx: PipelineContext, runId: string, pipelineId: string): Promise<void> {
   const { run, pipeline, stage } = currentAssignment(ctx, runId, pipelineId);
   if (!pipeline.workspaceId) throw new Error("Pipeline has no registered worktree workspace.");
+  // Capture pre-reconciliation roster state so mid-stage revival only briefs newly spawned replacements.
+  const wasStageAlreadyStarted = Boolean(stage.startedAt);
+  const previousCoordinatorId = stage.forkedLeadAgentId;
+  const previousPeerAgentIds = [...stage.peerAgentIds];
   ctx.store.mutate(runId, (mutableRun) => {
     const currentPipeline = mutableRun.pipelines[pipelineId];
     currentPipeline.status = "starting";
     currentPipeline.stages[currentPipeline.currentStageIndex].status = "starting";
   });
   await reconcileStageAgents(ctx, runId, pipeline, stage);
+  let coordinatorCreated = false;
+  const createdPeerIndices = new Set<number>();
   if (!currentAssignment(ctx, runId, pipelineId).stage.forkedLeadAgentId) {
     const extraOptions = await forkOptions(ctx, runId);
     const current = currentAssignment(ctx, runId, pipelineId);
@@ -123,6 +143,7 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
       const mutablePipeline = mutableRun.pipelines[pipelineId];
       mutablePipeline.stages[mutablePipeline.currentStageIndex].forkedLeadAgentId = coordinator.agentId;
     });
+    coordinatorCreated = true;
   }
   for (const [peerIndex, assignment] of stage.peers.entries()) {
     const current = currentAssignment(ctx, runId, pipelineId);
@@ -143,8 +164,15 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
       const mutablePipeline = mutableRun.pipelines[pipelineId];
       mutablePipeline.stages[mutablePipeline.currentStageIndex].peerAgentIds[peerIndex] = createdPeer.agentId;
     });
+    createdPeerIndices.add(peerIndex);
   }
-  activateStage(ctx, runId, pipelineId);
+  activateStage(ctx, runId, pipelineId, {
+    wasStageAlreadyStarted,
+    coordinatorCreated,
+    createdPeerIndices,
+    previousCoordinatorId,
+    previousPeerAgentIds,
+  });
 }
 
 async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipeline: PipelineState, stage: StageState): Promise<void> {
@@ -154,6 +182,13 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
   ctx.store.mutate(runId, (run) => {
     const currentPipeline = requirePipeline(run, pipeline.id);
     const currentStage = currentPipeline.stages[currentPipeline.currentStageIndex];
+    // Clear any roster slot whose persisted agent record was already archived before this reconciliation pass.
+    if (currentStage.forkedLeadAgentId && (!run.agents[currentStage.forkedLeadAgentId] || run.agents[currentStage.forkedLeadAgentId].archivedAt)) {
+      currentStage.forkedLeadAgentId = null;
+    }
+    currentStage.peerAgentIds = currentStage.peerAgentIds.map((peerAgentId) =>
+      peerAgentId && run.agents[peerAgentId] && !run.agents[peerAgentId].archivedAt ? peerAgentId : "",
+    );
     // A crash between SDK creation and roster persistence may leave a valid identity outside the roster.
     const participants = Object.values(run.agents).filter((agent) => agent.pipelineId === pipeline.id && agent.stageId === stage.id && !agent.archivedAt);
     for (const agent of participants) {
@@ -174,7 +209,7 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
   });
 }
 
-function activateStage(ctx: PipelineContext, runId: string, pipelineId: string): void {
+function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, activationChanges: StageActivationChanges): void {
   const { run, pipeline, stage } = currentAssignment(ctx, runId, pipelineId);
   // Activation follows asynchronous SDK requests; an intervening abort or pause must never reopen the cohort.
   if (pipeline.status !== "starting" || stage.status !== "starting") throw new Error("Stage startup is no longer active.");
@@ -186,11 +221,50 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string):
   const promptMessage = (toAgentId: string, text: string, awaitTool: string | null): MailboxMessage => ({
     id: randomUUID(), toAgentId, text, taskId: null, awaitTool, isReminder: false, createdAt,
   });
-  const messages = [promptMessage(stage.forkedLeadAgentId, coordinatorStageBriefing(run, pipeline, stage), null),
-    ...stage.peerAgentIds.map((agentId, peerIndex) => promptMessage(agentId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report"))];
+  // Map dead identities to their newly spawned replacements so pending waits and stale mail can be reconciled.
+  const replacementByDeadAgentId = new Map<string, string>();
+  if (activationChanges.previousCoordinatorId && activationChanges.previousCoordinatorId !== stage.forkedLeadAgentId) {
+    replacementByDeadAgentId.set(activationChanges.previousCoordinatorId, stage.forkedLeadAgentId);
+  }
+  for (const peerIndex of activationChanges.createdPeerIndices) {
+    const previousPeerAgentId = activationChanges.previousPeerAgentIds[peerIndex];
+    if (previousPeerAgentId && previousPeerAgentId !== stage.peerAgentIds[peerIndex]) {
+      replacementByDeadAgentId.set(previousPeerAgentId, stage.peerAgentIds[peerIndex]);
+    }
+  }
+  const messages: MailboxMessage[] = [];
+  if (!activationChanges.wasStageAlreadyStarted) {
+    messages.push(
+      promptMessage(stage.forkedLeadAgentId, coordinatorStageBriefing(run, pipeline, stage), null),
+      ...stage.peerAgentIds.map((agentId, peerIndex) =>
+        promptMessage(agentId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report"),
+      ),
+    );
+  } else {
+    // Mid-stage revival only briefs newly respawned agents so healthy peers are not forced to restart their work.
+    if (activationChanges.coordinatorCreated) {
+      const coordinatorOwedTool = stage.reports.length > 0 ? "slp_approve_stage" : null;
+      messages.push(promptMessage(stage.forkedLeadAgentId, coordinatorRevivalBriefing(run, pipeline, stage), coordinatorOwedTool));
+    } else if (activationChanges.createdPeerIndices.size > 0) {
+      messages.push(promptMessage(stage.forkedLeadAgentId, peerRosterUpdateNotice(stage, activationChanges.createdPeerIndices), null));
+    }
+    for (const peerIndex of activationChanges.createdPeerIndices) {
+      const replacementPeerId = stage.peerAgentIds[peerIndex];
+      messages.push(promptMessage(replacementPeerId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report"));
+    }
+  }
   ctx.store.mutate(runId, (mutableRun) => {
     const currentPipeline = mutableRun.pipelines[pipelineId];
     const currentStage = currentPipeline.stages[currentPipeline.currentStageIndex];
+    if (replacementByDeadAgentId.size > 0) {
+      // Drop unread mail addressed to dead stage sessions because their replacements receive a full stage briefing.
+      mutableRun.mailbox = mutableRun.mailbox.filter((queuedMessage) => !replacementByDeadAgentId.has(queuedMessage.toAgentId));
+      for (const participantRecord of Object.values(mutableRun.agents)) {
+        if (participantRecord.waitingForAgentId && replacementByDeadAgentId.has(participantRecord.waitingForAgentId)) {
+          participantRecord.waitingForAgentId = replacementByDeadAgentId.get(participantRecord.waitingForAgentId) ?? null;
+        }
+      }
+    }
     // All roster entries and initial assignments become visible together before any agent can send a message.
     currentPipeline.status = "running";
     currentPipeline.updatedAt = createdAt;
@@ -198,7 +272,12 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string):
     currentStage.startedAt ??= createdAt;
     mutableRun.mailbox.push(...messages);
   });
-  ctx.logEvent(runId, { taskId: null, from: "pipeline", to: stage.forkedLeadAgentId, kind: "stage.started", summary: `${pipeline.name}/${stage.name}: ${stage.peers.length} peers`, outcome: "queued" });
+  if (!activationChanges.wasStageAlreadyStarted) {
+    ctx.logEvent(runId, { taskId: null, from: "pipeline", to: stage.forkedLeadAgentId, kind: "stage.started", summary: `${pipeline.name}/${stage.name}: ${stage.peers.length} peers`, outcome: "queued" });
+  } else if (activationChanges.coordinatorCreated || activationChanges.createdPeerIndices.size > 0) {
+    const revivedCount = (activationChanges.coordinatorCreated ? 1 : 0) + activationChanges.createdPeerIndices.size;
+    ctx.logEvent(runId, { taskId: null, from: "pipeline", to: stage.forkedLeadAgentId, kind: "agent.revived", summary: `${pipeline.name}/${stage.name}: revived ${revivedCount} stage participant(s)`, outcome: "queued" });
+  }
 }
 
 async function finishStage(ctx: PipelineContext, runId: string, pipelineId: string): Promise<void> {

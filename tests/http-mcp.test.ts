@@ -1,7 +1,14 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ensureAntigravityMcpBridge } from "../server/bus/antigravity-mcp-bridge";
 import { startBus, type BusCaller, type BusTransportDeps, type RunningBus } from "../server/bus/http-mcp";
 import { toolNamesForRole } from "../server/bus/tool-schemas";
-import { SLP_ROLES } from "../shared/roles";
+import { RunStore } from "../server/store/run-store";
+import { BUS_SERVER_NAME, SLP_ROLES } from "../shared/roles";
+import { buildAgentRecord, buildRun } from "./helpers/run-factory";
 
 const SUPERVISOR_CALLER: BusCaller = { runId: "run-1", agentId: "agent-sup", role: "supervisor", taskId: null };
 const PEER_CALLER: BusCaller = { runId: "run-1", agentId: "agent-peer", role: "peer", projectRole: "developer", taskId: null };
@@ -252,3 +259,89 @@ describe("startBus", () => {
     }
   });
 });
+
+describe("Antigravity stdio MCP bridge", () => {
+  it("registers slp-bus with eager tools in mcp_config.json without dropping existing servers", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "slp-agy-bridge-"));
+    try {
+      const mcpConfigPath = join(tempDir, "mcp_config.json");
+      writeFileSync(
+        mcpConfigPath,
+        JSON.stringify({ mcpServers: { codegraph: { command: "codegraph", args: ["serve", "--mcp"] } } }),
+        "utf8",
+      );
+      const bridgeScriptPath = ensureAntigravityMcpBridge(tempDir, {
+        mcpConfigPath,
+        nodeExecutablePath: "/usr/local/bin/node",
+      });
+      const updatedConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
+      expect(updatedConfig.mcpServers.codegraph).toEqual({ command: "codegraph", args: ["serve", "--mcp"] });
+      expect(updatedConfig.mcpServers[BUS_SERVER_NAME]).toMatchObject({
+        command: "/usr/local/bin/node",
+        args: [bridgeScriptPath],
+      });
+      expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_delegate).toEqual({ eager: true });
+      expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_stage_report).toEqual({ eager: true });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes an empty toolset outside SLP runs and forwards authenticated calls inside SLP runs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "slp-agy-rpc-"));
+    const sqliteStore = new RunStore(join(tempDir, "orchestrator.sqlite3"));
+    try {
+      sqliteStore.load();
+      sqliteStore.insert(
+        buildRun({
+          id: "run-1",
+          agents: {
+            "agent-sup": buildAgentRecord({ agentId: "agent-sup", role: "supervisor", token: "tok-sup" }),
+          },
+        }),
+      );
+      writeFileSync(join(tempDir, "bus-port"), String(runningBus.port), "utf8");
+      const bridgeScriptPath = ensureAntigravityMcpBridge(tempDir, {
+        mcpConfigPath: join(tempDir, "mcp_config.json"),
+      });
+      const bridgeModule = await import(pathToFileURL(bridgeScriptPath).href);
+
+      // Non-SLP Antigravity sessions must see 0 tools so normal terminal usage stays clean.
+      const nonSlpToolsReply = await bridgeModule.handleStdioRpcMessage(
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        { SLP_HOME: tempDir },
+      );
+      expect(nonSlpToolsReply).toEqual({ jsonrpc: "2.0", id: 1, result: { tools: [] } });
+
+      // Sessions with PASEO_AGENT_ID resolve their token from SQLite + bus-port and forward to http-mcp.
+      const slpToolsReply = await bridgeModule.handleStdioRpcMessage(
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+        { SLP_HOME: tempDir, PASEO_AGENT_ID: "agent-sup" },
+      );
+      const advertisedNames = slpToolsReply.result.tools.map((toolEntry: { name: string }) => toolEntry.name);
+      expect(advertisedNames).toEqual(toolNamesForRole("supervisor"));
+
+      const delegateCallReply = await bridgeModule.handleStdioRpcMessage(
+        {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "slp_delegate", arguments: { acceptanceCriteria: "Ship feature" } },
+        },
+        { SLP_HOME: tempDir, PASEO_AGENT_ID: "agent-sup" },
+      );
+      expect(dispatchSpy).toHaveBeenCalledWith(SUPERVISOR_CALLER, "slp_delegate", {
+        acceptanceCriteria: "Ship feature",
+      });
+      expect(delegateCallReply).toEqual({
+        jsonrpc: "2.0",
+        id: 3,
+        result: { content: [{ type: "text", text: "dispatched ok" }], isError: false },
+      });
+    } finally {
+      sqliteStore.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+

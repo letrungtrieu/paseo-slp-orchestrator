@@ -4,6 +4,7 @@ import type { BusCaller, BusToolOutcome, BusTransportDeps } from "../bus/http-mc
 import { BUS_TOOL_DEFINITIONS, isBusToolName, type BusToolName } from "../bus/tool-schemas";
 import { SLP_ROLES, type SlpRole } from "../../shared/roles";
 import type { PipelineContext } from "./context";
+import { reviveAgentsOnDemand } from "./agent-revival";
 import { definePipeline } from "./define-pipeline";
 import { finalizePipeline } from "./finalize-pipeline";
 import { createPipelineWorktree } from "./pipeline-workspaces";
@@ -33,6 +34,7 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_request_rework: (ctx, caller, input) => requestRework(ctx, caller.runId, input.feedback),
   slp_present_to_manager: (ctx, caller, input) => presentToManager(ctx, caller.runId, input.report),
   slp_report: (ctx, caller, input) => report(ctx, caller.runId, input.summary),
+  slp_revive_agent: (ctx, caller, input) => reviveAgentsOnDemand(ctx, caller, input),
   slp_get_run: (ctx, caller) => readRun(ctx, caller),
 };
 

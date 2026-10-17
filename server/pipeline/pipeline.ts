@@ -12,6 +12,7 @@ export interface PipelineDependencies {
   gateway: AgentGateway;
   forks: ForkRegistry;
   holder: PaseoHolder;
+  stateDirectory?: string;
 }
 
 export function createPipeline(dependencies: PipelineDependencies): PipelineContext {

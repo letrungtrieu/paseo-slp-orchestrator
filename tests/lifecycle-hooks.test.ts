@@ -16,17 +16,25 @@ afterEach(() => { for (const store of openedStores.splice(0)) store.close(); });
 
 function fakeServer() {
   const handlers = new Map<string, HookHandler>();
+  const beforeHandlers = new Map<string, HookHandler>();
   const removedEvents: string[] = [];
+  const removedBeforeHooks: string[] = [];
   const server = {
     on: (eventName: string, handler: HookHandler) => {
       handlers.set(eventName, handler);
       return () => removedEvents.push(eventName);
     },
+    before: (hookName: string, handler: HookHandler) => {
+      beforeHandlers.set(hookName, handler);
+      return () => removedBeforeHooks.push(hookName);
+    },
   } as unknown as PluginServerContext;
   const hookContext = { paseo: { marker: "paseo-from-hook" } };
   return {
-    server, removedEvents, hookContext,
+    server, removedEvents, removedBeforeHooks, hookContext,
     fire: async (eventName: string, event: unknown) => await handlers.get(eventName)!(event, hookContext),
+    fireBefore: async (hookName: string, request: unknown) =>
+      await beforeHandlers.get(hookName)!({ request }, hookContext),
   };
 }
 
@@ -58,6 +66,7 @@ function dynamicHookContext() {
     [stageLeadId, { agentId: stageLeadId, status: "idle", pendingPermissions: [], archived: false }],
   ]);
   const fakeGateway = {
+    busEndpointForToken: async (agentToken: string) => `http://127.0.0.1:43123/mcp/${agentToken}`,
     liveStatuses: async () => liveStatuses,
     respondToPermission: async (agentId: string, requestId: string, response: unknown) => { permissionResponses.push({ agentId, requestId, response }); },
   } as unknown as AgentGateway;
@@ -81,7 +90,41 @@ describe("hook registration", () => {
     await hooks.fire("agent.turn_started", { agent: { id: "unknown" } });
     unregister();
     expect(hooks.removedEvents.sort()).toEqual(["agent.permission_requested", "agent.turn_ended", "agent.turn_started"]);
+    expect(hooks.removedBeforeHooks).toEqual(["agent.session_open"]);
     expect(fixture.capturedHandles).toHaveLength(1);
+  });
+
+  // Antigravity stdio MCP bridge processes inherit the agent's launch env to authenticate to slp-bus.
+  it("injects the SLP agent token and bus URL into agent.session_open for run agents only", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    const peerRecord = fixture.store.require(fixture.runId).agents[fixture.peerId];
+    const transformedSessionRequest = await hooks.fireBefore("agent.session_open", {
+      agentId: fixture.peerId,
+      workspaceId: "ws-1",
+      provider: "antigravity",
+      cwd: "/tmp/pipeline-worktree",
+      reason: "create",
+      purpose: "interactive",
+      env: { PASEO_AGENT_ID: fixture.peerId },
+    }) as { env: Record<string, string> };
+    expect(transformedSessionRequest.env).toMatchObject({
+      PASEO_AGENT_ID: fixture.peerId,
+      SLP_AGENT_ID: fixture.peerId,
+      SLP_AGENT_TOKEN: peerRecord.token,
+      SLP_BUS_URL: `http://127.0.0.1:43123/mcp/${peerRecord.token}`,
+    });
+    const nonSlpResult = await hooks.fireBefore("agent.session_open", {
+      agentId: "external-agent",
+      workspaceId: "ws-1",
+      provider: "antigravity",
+      cwd: "/tmp/other",
+      reason: "create",
+      purpose: "interactive",
+      env: { PASEO_AGENT_ID: "external-agent" },
+    });
+    expect(nonSlpResult).toBeUndefined();
   });
 });
 

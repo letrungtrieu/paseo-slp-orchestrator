@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { ensureAntigravityMcpBridge } from "./server/bus/antigravity-mcp-bridge";
 import { startBus, type RunningBus } from "./server/bus/http-mcp";
 import { claudeForker } from "./server/fork/claude-forker";
 import { ForkRegistry } from "./server/fork/session-forker";
@@ -37,6 +38,12 @@ export default function contribute(server: PluginServerContext) {
   const stateDirectory = process.env.SLP_HOME ?? DEFAULT_STATE_DIRECTORY;
   // Created eagerly and synchronously: the store must be loaded before any hook or RPC can arrive.
   mkdirSync(stateDirectory, { recursive: true });
+  try {
+    // Provision the stdio MCP bridge before any Antigravity session opens so agy discovers slp-bus on startup.
+    ensureAntigravityMcpBridge(stateDirectory);
+  } catch (bridgeInitError) {
+    console.error("[slp] failed to provision Antigravity MCP bridge", bridgeInitError);
+  }
   // Import the previous JSON layout once; all subsequent writes stay outside project worktrees.
   const store = new RunStore(join(stateDirectory, "orchestrator.sqlite3"), join(stateDirectory, "state.json"));
   // Reloading from disk lets a plugin reload resume the runs that were in flight; the sweeper then re-delivers pending mail.
@@ -55,7 +62,7 @@ export default function contribute(server: PluginServerContext) {
     resolveBusPort = resolvePort;
   });
   const gateway = new AgentGateway(holder, store, () => busPortReady);
-  const pipeline = createPipeline({ store, gateway, forks, holder });
+  const pipeline = createPipeline({ store, gateway, forks, holder, stateDirectory });
 
   // Not awaited: the entry must return its cleanup function synchronously, so the socket opens in the background.
   startBus(createBusDispatcher(pipeline), readSavedBusPort(portFilePath))
