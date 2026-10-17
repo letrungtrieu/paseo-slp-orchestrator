@@ -46,6 +46,9 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
   const coordinatorId = stage.forkedLeadAgentId;
   if (!coordinatorId) throw new ToolError("Stage coordinator is unavailable.");
   const report = { ...submission, agentId: caller.agentId, role: agent.projectRole, submittedAt: new Date().toISOString() };
+  const findingsSection = report.findings.length > 0
+    ? `\nFindings:\n${report.findings.map((finding) => `- ${finding}`).join("\n")}`
+    : "";
   ctx.store.mutate(run.id, () => {
     // Follow-up reports append evidence instead of erasing the discussion that led to the latest conclusion.
     stage.reports.push(report);
@@ -58,7 +61,7 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
     }
     // A report and its wake-up are one durable transition, preventing lost evidence notifications after reload.
     run.mailbox.push(stageMail(coordinatorId,
-      `Stage '${stage.name}' peer report:\n${JSON.stringify(report)}\nCompare this evidence with goal '${stage.goal}'. Direct more work or approve when you accept the result.`, "slp_approve_stage"));
+      `Stage '${stage.name}' peer report from **${report.role}** (\`${report.agentId}\`) [${report.status}]:\nSummary: ${report.summary}${findingsSection}\n\nCompare this evidence with goal '${stage.goal}'. Direct more work or approve when you accept the result.`, "slp_approve_stage"));
   });
   ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: coordinatorId, kind: "stage.report", summary: `${agent.projectRole}: ${submission.status}`, outcome: "queued" });
   return "Stage report saved for the Forked Lead. End your turn; further assignments arrive as messages.";
