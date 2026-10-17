@@ -1,7 +1,7 @@
 // Every fresh cohort receives the same goal, roster and durable handover before any peer starts work.
 import type { PipelineState, StageState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
-import type { StagePromptContext } from "../prompts/system-prompts";
+import { isDeveloperProjectRole, type StagePromptContext } from "../prompts/system-prompts";
 
 export function stagePromptContext(pipeline: PipelineState, stage: StageState, task: string): StagePromptContext {
   // The goal and assignment are system context even before the final roster is activated through the mailbox.
@@ -75,7 +75,10 @@ export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: Stag
   const coordinationGuidance = stage.peers.length === 1
     ? `You are the sole peer in this stage.${crossStageHint} Complete your task in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). Your session stays alive until the entire pipeline completes so downstream stage peers can also message you. The Forked Lead decides when this stage is complete.`
     : `All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, then submit evidence with \`slp_stage_report\`. Your session stays alive until the entire pipeline completes so downstream stage peers can also message you. The Forked Lead decides when this stage is complete.`;
-  const metricsRule = "**Mandatory Technical Reporting Rule**: Present all messages and `slp_stage_report` evidence with concrete metrics: for each function/feature, state (1) the exact logic, (2) expected inputs, and (3) expected output values/metrics (or the exact observable runtime outcome if non-numeric).";
+  const developerMethodologySuffix = isDeveloperProjectRole(assignment.role)
+    ? " As a developer peer, you MUST also present your methodological argument and rejected alternatives step-by-step with metrics (e.g., \"I used technique A to solve problem B; with input data C, it produced output D in time/complexity E. I did not use technique F because G...\")."
+    : "";
+  const metricsRule = `**Mandatory Technical Reporting Rule**: Present all messages and \`slp_stage_report\` evidence with concrete metrics: for each function/feature, state (1) the exact logic, (2) expected inputs, and (3) expected output values/metrics (or the exact observable runtime outcome if non-numeric).${developerMethodologySuffix}`;
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,

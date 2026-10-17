@@ -22,9 +22,20 @@ const DEFAULT_ROLES = [
   {
     role: "developer",
     name: "Developer",
-    description: "Implement scoped features and fixes with concrete input/logic/output metrics and verifiable evidence in the shared pipeline worktree.",
+    description: "Implement scoped features and fixes with concrete input/logic/output metrics, step-by-step methodological arguments, and verifiable evidence in the shared pipeline worktree.",
     file: "peers/DEVELOPER.md",
-    workflow: `Focus on clean implementation, automated tests, zero redundant system bloat, and verifiable changes in the shared pipeline worktree. Document the exact logic, expected inputs, and expected outputs/metrics (or concrete runtime outcomes) for every function or feature touched.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
+    workflow: [
+      "Focus on clean implementation, automated tests, zero redundant system bloat, and verifiable changes in the shared pipeline worktree. Document the exact logic, expected inputs, and expected outputs/metrics (or concrete runtime outcomes) for every function or feature touched.",
+      "",
+      "SPECIAL DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT RULE (MANDATORY):",
+      "1. Chosen Method & Problem Mapping: Explicitly state the engineering technique/algorithm/pattern (A) you used to solve the assigned problem (B).",
+      "2. Step-by-Step Quantitative Progression: Present the chosen method step-by-step with concrete data and metrics—showing how input data (C) is transformed through each processing step to yield output/outcome (D) in measured time or complexity (E).",
+      "3. Rejected Alternatives & Rationale: Explicitly explain which alternative technique(s) (F) you chose NOT to use and why (G) (e.g., worse time/memory complexity, boundary distortion, edge-case failure, or redundant system bloat).",
+      "4. Required Reporting Pattern Example:",
+      "   \"I used technique A to solve problem B; with input data C, it produced output D in time/complexity E (step-by-step metrics: Step 1: ... -> Step 2: ... -> Output: ...). I did not use technique F because G...\"",
+      "",
+      DEFAULT_WORKFLOWS.peer.trim(),
+    ].join("\n"),
   },
   {
     role: "reviewer",

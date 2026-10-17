@@ -98,9 +98,13 @@ describe("project system prompt composition", () => {
     const forkedLeadPrompt = systemPromptFor("forked_lead", configuration);
     expect(qaPrompt).toContain("PRIVATE_QA_WORKFLOW");
     expect(developerPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
-    // Enforce mandatory metrics communication, Lead anti-bloat audit, QA screenshot evidence, and cross-stage peer rules.
+    // Enforce mandatory metrics communication, Lead anti-bloat audit, Developer methodology argument, QA screenshot evidence, and cross-stage peer rules.
     expect(developerPrompt).toContain("STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE");
     expect(developerPrompt).toContain("CROSS-STAGE PEER LIFECYCLE");
+    expect(developerPrompt).toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
+    expect(developerPrompt).toContain("I used technique A to solve problem B");
+    expect(developerPrompt).toContain("I did not use technique F because G");
+    expect(qaPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
     expect(forkedLeadPrompt).toContain("system garbage/bloat");
     expect(leadPrompt).toContain("system garbage/bloat");
     expect(qaPrompt).toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");

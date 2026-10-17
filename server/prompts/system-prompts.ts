@@ -42,6 +42,17 @@ const ROLE_CONTRACTS: Record<SlpRole, string> = {
   peer: "You are a project peer assigned to one stage. Apply the selected .slp workflow, present all technical discussions and reports with concrete metrics (exact logic, expected inputs, and expected outputs or runtime outcomes), communicate directly with current-stage and prior-stage peers via slp_send_peer_message, and report evidence to the Forked Lead.",
 };
 
+// Mandatory methodological argument, step-by-step metrics, and rejected-alternatives contract for developer peers.
+const DEVELOPER_PEER_CONTRACT = `
+MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT:
+- In addition to concrete input/logic/output metrics, you MUST present a clear technical argument explaining the methods/algorithms you used to solve the assigned problem, trace each method step-by-step with metrics, and state why alternative methods were rejected:
+  1. Chosen Method & Problem Mapping: State which technique/algorithm/mechanism (A) you used to solve which specific problem (B).
+  2. Step-by-Step Quantitative Progression: Walk through the method step-by-step with concrete numbers—showing how input data (C) progresses through each processing step to produce output/outcome (D) in measured time/complexity (E).
+  3. Rejected Alternatives & Rationale: Explicitly state which alternative technique(s) (F) you did NOT use and why (G) (e.g., worse complexity, edge-case failure, inaccurate geometry/state, or unnecessary system bloat).
+  - Required Argument Pattern Example:
+    "I used technique A to solve problem B; with input data C, it produced output D in time/complexity E (step-by-step metrics: Step 1: ... -> Step 2: ... -> Output: ...). I did not use technique F because G..."
+`.trim();
+
 // Mandatory verification rules applied whenever a stage peer is assigned a QA business role.
 const QA_PEER_CONTRACT = `
 MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:
@@ -51,10 +62,27 @@ MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:
 - Whenever UI or visual behavior is affected (or when visual proof applies to the feature or bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., real-window or headless screenshot tool, browser capture, Xvfb/import/scrot/Playwright, or native app screenshot command) and cite the captured screenshot evidence in slp_stage_report to prove completion or document a bug.
 `.trim();
 
-function isQaProjectRole(roleId: string | undefined): boolean {
+export function isQaProjectRole(roleId: string | undefined): boolean {
   if (!roleId) return false;
   const normalizedRole = roleId.trim().toLowerCase().replace(/[\s_]+/g, "-");
   return normalizedRole === "qa" || normalizedRole.startsWith("qa-") || normalizedRole.endsWith("-qa") || normalizedRole.includes("-qa-");
+}
+
+export function isDeveloperProjectRole(roleId: string | undefined): boolean {
+  if (!roleId) return false;
+  const normalizedRole = roleId.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (isQaProjectRole(normalizedRole)) return false;
+  return (
+    normalizedRole === "developer" ||
+    normalizedRole === "dev" ||
+    normalizedRole === "implementer" ||
+    normalizedRole === "software-engineer" ||
+    normalizedRole.startsWith("developer-") ||
+    normalizedRole.endsWith("-developer") ||
+    normalizedRole.includes("-developer-") ||
+    normalizedRole.startsWith("dev-") ||
+    normalizedRole.endsWith("-dev")
+  );
 }
 
 function projectDefinition(
@@ -93,6 +121,10 @@ export function systemPromptFor(
     `PROJECT ROLE: ${definition.name} (${definition.role})\n${definition.description}\nSOURCE: ${definition.sourcePath}`,
     `PROJECT WORKFLOW:\n${workflow}`,
   ];
+  // Enforce the mandatory developer methodology, step-by-step metrics, and trade-off argument contract even on pre-existing .slp/peers/DEVELOPER.md files.
+  if (role === "peer" && isDeveloperProjectRole(definition.role)) {
+    promptSections.push(DEVELOPER_PEER_CONTRACT);
+  }
   // Enforce the mandatory QA edge-case, testability, UI-impact, and screenshot contract even if .slp/peers/QA_ENGINEER.md was seeded before this rule existed.
   if (role === "peer" && isQaProjectRole(definition.role)) {
     promptSections.push(QA_PEER_CONTRACT);

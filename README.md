@@ -222,18 +222,24 @@ Khi Peer A gọi `slp_send_peer_message({ toAgentId: PeerB, message, waitForRepl
    - **Trường hợp 2**: Peer B (nếu cùng Stage) gọi luôn `slp_stage_report` để nộp báo cáo hoàn tất phần việc của mình — hệ thống lập tức giải phóng trạng thái chờ của Peer A và gửi tóm tắt báo cáo của Peer B cho Peer A để Peer A không bị treo chờ vô ích.
    - **Trường hợp 3**: Quá **120 giây** (`DIRECT_REPLY_TIMEOUT_MS`) mà Peer B vẫn chưa phản hồi, hệ thống tự động gỡ trạng thái chờ và đánh thức Peer A tiếp tục công việc.
 
-### 4.2. Ba quy tắc kỹ thuật bắt buộc trong `systemPrompt` của Lead và Peer:
+### 4.2. Bốn quy tắc kỹ thuật bắt buộc trong `systemPrompt` của Lead và Peer:
 1. **Giao tiếp kỹ thuật bằng số liệu (Mandatory Data/Metrics Communication)**:
    - Mọi thông điệp và báo cáo kỹ thuật (`slp_send_peer_message`, `slp_stage_report`, `slp_approve_stage`, `slp_stage_rework`, `slp_finalize_pipeline`, `slp_report`) **bắt buộc** phải trình bày rõ cho từng chức năng/hàm:
      1. **Logic xử lý cụ thể (Exact Logic/Mechanism)**: Thuật toán, công thức hoặc luồng biến đổi trạng thái kèm đường dẫn file/dòng lệnh.
      2. **Đầu vào kỳ vọng (Expected Inputs)**: Kiểu dữ liệu, miền giá trị, kích thước/đơn vị, điều kiện biên hoặc tiền điều kiện.
      3. **Đầu ra kỳ vọng / Số liệu đo đạc (Expected Outputs / Metrics)**: Giá trị trả về, số lượng phần tử, sai số, độ phức tạp, hoặc nếu hàm không trả về con số thì **bắt buộc nêu rõ kết quả thực tế đạt được / chuyển đổi trạng thái quan sát được** khi chạy logic đó.
-2. **Lead kiểm duyệt chống dư thừa & rác hệ thống (Strict Lead Anti-Bloat & Data Hygiene Review)**:
+2. **Quy tắc trình bày luận điểm phương pháp & so sánh đánh đổi bắt buộc cho Developer (`DEVELOPER_PEER_CONTRACT`)**:
+   - Ngoài số liệu `Input → Logic → Output`, mọi Peer đóng vai trò Developer (`developer`, `dev`, `implementer`, `software-engineer`...) **bắt buộc** phải trình bày rõ luận điểm về phương pháp đã sử dụng qua từng bước số liệu và lý do loại bỏ các phương án thay thế:
+     1. **Phương pháp đã chọn & Bài toán giải quyết**: Nêu rõ đã sử dụng kỹ thuật/thuật toán `A` nào để xử lý vấn đề `B` nào.
+     2. **Diễn tiến số liệu qua từng bước (Step-by-Step Quantitative Progression)**: Trình bày rõ dữ liệu đầu vào `C` biến đổi qua từng bước xử lý như thế nào để ra kết quả `D` trong thời gian thực thi hoặc độ phức tạp `E`.
+     3. **Lý do không chọn phương án khác (Rejected Alternatives & Trade-Off Rationale)**: Nêu rõ tại sao **không** sử dụng kỹ thuật `F` vì lý do kỹ thuật/số liệu `G` (ví dụ: độ phức tạp cao hơn, làm sai lệch biên hình học, thất bại ở edge case, hoặc sinh dữ liệu thừa).
+     - *Mẫu trình bày bắt buộc*: `"Tôi đã sử dụng kỹ thuật A để xử lý vấn đề B, kết quả là với dữ liệu C được kết quả D trong thời gian E (qua từng bước số liệu: Bước 1: ... -> Bước 2: ... -> Kết quả: ...). Tôi không sử dụng kỹ thuật F để xử lý tại vì G..."`
+3. **Lead kiểm duyệt chống dư thừa & rác hệ thống (Strict Lead Anti-Bloat & Data Hygiene Review)**:
    - `Forked Lead` (trước khi gọi `slp_approve_stage`) và `Master Lead` (trước khi gọi `slp_finalize_pipeline` / `slp_report`) bắt buộc đối chiếu từng số liệu của Peer với `goal`:
      - Kiểm tra dữ liệu/logic sinh ra có bị **thiếu** trường hợp nào hoặc **thừa** phần tử nào không.
      - Kiểm tra có **gây rác hệ thống** (file tạm, artefact chụp màn hình vứt bừa bãi trong git status, state/cấu trúc dữ liệu trung gian dư thừa, dead code, log rác) hay không.
      - Kiểm tra từng cấu trúc dữ liệu/hàm sinh ra **có thực sự cần thiết** để giải quyết bài toán hay không; nếu thừa phải gọi `slp_stage_rework` yêu cầu dọn sạch.
-3. **Quy tắc kiểm thử & bằng chứng chụp màn hình bắt buộc cho QA (`QA_PEER_CONTRACT`)**:
+4. **Quy tắc kiểm thử & bằng chứng chụp màn hình bắt buộc cho QA (`QA_PEER_CONTRACT`)**:
    - Mọi Peer đóng vai trò QA (`qa-engineer`) bắt buộc thực hiện và báo cáo đủ 5 mục:
      1. **Phân tích các trường hợp biên (Edge-Case Analysis)** dựa trên logic, đầu vào và đầu ra kỳ vọng (giá trị rỗng, cực trị, hình học suy biến/lõm, lỗi đầu vào, race condition...).
      2. **Phân loại Kiểm thử Tự động vs. Kiểm thử Thủ công (Automation vs. Manual Test Matrix)** và trực tiếp chạy các bài test tự động kèm số liệu pass/fail.
