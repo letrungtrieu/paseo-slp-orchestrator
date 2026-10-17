@@ -178,6 +178,36 @@ describe("dynamic stage nudging", () => {
     expect(fixture.queuedMessages).toHaveLength(1);
     expect(fixture.queuedMessages[0].awaitTool).toBe("slp_approve_stage");
   });
+
+  it("nudges the Master Lead for slp_define_pipeline only during planning without peer-only instructions", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    const masterLeadId = "lead-agent";
+    fixture.store.mutate(fixture.runId, (run) => {
+      // Once the run is already 'running' with an active pipeline, a stale slp_define_pipeline stamp must not trigger nudges.
+      run.masterLeadAgentId = masterLeadId;
+      run.agents[masterLeadId] = buildAgentRecord({
+        agentId: masterLeadId,
+        role: "master_lead",
+        awaitingTool: "slp_define_pipeline",
+        awaitingSince: "2020-01-01T00:00:00.000Z",
+      });
+    });
+    await hooks.fire("agent.turn_started", { agent: { id: masterLeadId } });
+    await hooks.fire("agent.turn_ended", { agent: { id: masterLeadId }, outcome: { kind: "completed" } });
+    expect(fixture.queuedMessages).toHaveLength(0);
+
+    fixture.store.mutate(fixture.runId, (run) => {
+      run.status = "planning";
+    });
+    await hooks.fire("agent.turn_started", { agent: { id: masterLeadId } });
+    await hooks.fire("agent.turn_ended", { agent: { id: masterLeadId }, outcome: { kind: "completed" } });
+    expect(fixture.queuedMessages).toHaveLength(1);
+    expect(fixture.queuedMessages[0].awaitTool).toBe("slp_define_pipeline");
+    expect(fixture.queuedMessages[0].text).toContain("[SLP Orchestrator]");
+    expect(fixture.queuedMessages[0].text).not.toContain("waitForReply");
+  });
 });
 
 describe("permission lifecycle events", () => {

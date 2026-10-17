@@ -7,7 +7,6 @@ import { peerRole } from "../project-prompts/defaults";
 import type { PipelineContext } from "./context";
 import {
   coordinatorRevivalBriefing,
-  coordinatorStageBriefing,
   peerRosterUpdateNotice,
   peerStageBriefing,
   stagePromptContext,
@@ -234,18 +233,17 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
   }
   const messages: MailboxMessage[] = [];
   if (!activationChanges.wasStageAlreadyStarted) {
+    // Keep the Forked Lead idle until peers submit stage reports or send a direct question, saving an empty startup turn.
     messages.push(
-      promptMessage(stage.forkedLeadAgentId, coordinatorStageBriefing(run, pipeline, stage), null),
       ...stage.peerAgentIds.map((agentId, peerIndex) =>
         promptMessage(agentId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report"),
       ),
     );
   } else {
     // Mid-stage revival only briefs newly respawned agents so healthy peers are not forced to restart their work.
-    if (activationChanges.coordinatorCreated) {
-      const coordinatorOwedTool = stage.reports.length > 0 ? "slp_approve_stage" : null;
-      messages.push(promptMessage(stage.forkedLeadAgentId, coordinatorRevivalBriefing(run, pipeline, stage), coordinatorOwedTool));
-    } else if (activationChanges.createdPeerIndices.size > 0) {
+    if (activationChanges.coordinatorCreated && stage.reports.length > 0) {
+      messages.push(promptMessage(stage.forkedLeadAgentId, coordinatorRevivalBriefing(run, pipeline, stage), "slp_approve_stage"));
+    } else if (!activationChanges.coordinatorCreated && activationChanges.createdPeerIndices.size > 0) {
       messages.push(promptMessage(stage.forkedLeadAgentId, peerRosterUpdateNotice(stage, activationChanges.createdPeerIndices), null));
     }
     for (const peerIndex of activationChanges.createdPeerIndices) {

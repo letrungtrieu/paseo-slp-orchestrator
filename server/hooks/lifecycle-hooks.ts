@@ -4,7 +4,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { NUDGE_LIMIT } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
-import { MASTER_LEAD_OWED_TOOLS } from "../pipeline/agent-revival";
+import { isMasterLeadObligationActive } from "../pipeline/agent-revival";
 import type { PipelineContext } from "../pipeline/context";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { nudgeReminder } from "../prompts/messages";
@@ -38,8 +38,19 @@ function agentOwnsMasterLeadObligation(run: Run, agentRecord: AgentRecord): bool
     && !agentRecord.archivedAt
     && agentRecord.role === "master_lead"
     && agentRecord.agentId === run.masterLeadAgentId
-    && agentRecord.awaitingTool
-    && MASTER_LEAD_OWED_TOOLS.has(agentRecord.awaitingTool),
+    && isMasterLeadObligationActive(run, agentRecord.awaitingTool),
+  );
+}
+
+// During final reporting, the Supervisor owes either slp_present_to_manager or slp_request_rework.
+function agentOwnsSupervisorObligation(run: Run, agentRecord: AgentRecord): boolean {
+  return Boolean(
+    run.engineVersion === "dynamic-stages-v1"
+    && run.status === "reporting"
+    && !agentRecord.archivedAt
+    && agentRecord.role === "supervisor"
+    && agentRecord.agentId === run.supervisorAgentId
+    && agentRecord.awaitingTool === "slp_present_to_manager",
   );
 }
 
@@ -99,13 +110,14 @@ function nudgeIfToolMissing(
   recoveredFromPoll = false,
   liveStatusKind?: AgentLiveStatus["status"],
 ): boolean {
-  // Unknown, archived and legacy task agents are ignored; dynamic stages and Master Lead own their obligations.
+  // Unknown, archived and legacy task agents are ignored; dynamic stages, Master Lead and Supervisor own their obligations.
   const lookup = ctx.store.findAgent(agentId);
   if (!lookup || outcomeKind !== "completed") return false;
   const { run, agentRecord } = lookup;
   const ownsStageObligation = agentOwnsCurrentStage(run, agentRecord);
   const ownsMasterLeadObligation = agentOwnsMasterLeadObligation(run, agentRecord);
-  if (!ownsStageObligation && !ownsMasterLeadObligation) return false;
+  const ownsSupervisorObligation = agentOwnsSupervisorObligation(run, agentRecord);
+  if (!ownsStageObligation && !ownsMasterLeadObligation && !ownsSupervisorObligation) return false;
   // A queued assignment is still waiting for its first delivery; nudging the recipient now
   // would create an owed-tool clock before the model has seen the stage roster.
   if (run.mailbox.some((message) => message.toAgentId === agentId)) return false;
@@ -122,8 +134,8 @@ function nudgeIfToolMissing(
   if (agentRecord.nudges >= NUDGE_LIMIT) {
     const reason = `${agentRecord.projectRole ?? agentRecord.role} did not call ${agentRecord.awaitingTool}`;
     ctx.logEvent(run.id, { taskId: null, from: agentId, to: "pipeline", kind: "nudge.exhausted", summary: reason, outcome: "error" });
-    const shouldRespawnBrokenSession = ownsMasterLeadObligation || liveStatusKind === "error";
-    if (!shouldRespawnBrokenSession) {
+    const shouldRespawnBrokenSession = ownsMasterLeadObligation || (!ownsSupervisorObligation && liveStatusKind === "error");
+    if (ownsStageObligation && !shouldRespawnBrokenSession) {
       // The helper routes the pause to the owning Master Lead and records the durable pipeline state.
       pausePipelineForAgent(ctx, agentId, reason);
     }
@@ -166,7 +178,8 @@ export function sweepStageNudges(ctx: PipelineContext, runId: string, liveStatus
     if (!lookup || lookup.run.id !== runId) continue;
     const ownsStageObligation = agentOwnsCurrentStage(run, lookup.agentRecord);
     const ownsMasterLeadObligation = agentOwnsMasterLeadObligation(run, lookup.agentRecord);
-    if (!ownsStageObligation && !ownsMasterLeadObligation) continue;
+    const ownsSupervisorObligation = agentOwnsSupervisorObligation(run, lookup.agentRecord);
+    if (!ownsStageObligation && !ownsMasterLeadObligation && !ownsSupervisorObligation) continue;
     if (ownsStageObligation && lookup.agentRecord.waitingForAgentId && lookup.agentRecord.awaitingSince) {
       // A direct reply timeout restores the stage obligation instead of pausing the whole pipeline.
       if (restoreExpiredDirectReply(ctx, run, agentId)) continue;

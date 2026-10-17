@@ -138,6 +138,17 @@ export async function definePipeline(
       }
       mutableRun.pipelines[pipelineId] = pipeline;
       mutableRun.status = "running";
+      const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
+      if (masterLeadRecord?.awaitingTool === "slp_define_pipeline") {
+        masterLeadRecord.awaitingTool = null;
+        masterLeadRecord.awaitingSince = null;
+        masterLeadRecord.nudges = 0;
+      }
+      // Drop any undelivered delegation or reminder mail still demanding slp_define_pipeline once a pipeline exists.
+      mutableRun.mailbox = mutableRun.mailbox.filter(
+        (queuedMessage) =>
+          !(queuedMessage.toAgentId === mutableRun.masterLeadAgentId && queuedMessage.awaitTool === "slp_define_pipeline"),
+      );
     });
     ctx.logEvent(runId, {
       taskId: null,

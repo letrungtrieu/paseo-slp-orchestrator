@@ -155,8 +155,14 @@ export function report(ctx: PipelineContext, runId: string, summary: string): st
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.finalReport = summary;
     mutableRun.status = "reporting";
+    const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
+    if (masterLeadRecord?.awaitingTool === "slp_report") {
+      masterLeadRecord.awaitingTool = null;
+      masterLeadRecord.awaitingSince = null;
+      masterLeadRecord.nudges = 0;
+    }
     mutableRun.mailbox.push(stageMail(mutableRun.supervisorAgentId,
-      reportForSupervisor(summary, mutableRun.baseBranch, mutableRun.integrationBranch), null));
+      reportForSupervisor(summary, mutableRun.baseBranch, mutableRun.integrationBranch), "slp_present_to_manager"));
   });
   return "Report sent to the Supervisor. End your turn.";
 }
@@ -167,6 +173,15 @@ export function requestRework(ctx: PipelineContext, runId: string, feedback: str
   // Integrated pipelines are immutable history; rework starts a new Lead-authored pipeline instead of reopening a closed stage.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "planning";
+    const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
+    if (supervisorRecord) {
+      supervisorRecord.awaitingTool = null;
+      supervisorRecord.awaitingSince = null;
+      supervisorRecord.nudges = 0;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) => !(queuedMessage.toAgentId === mutableRun.supervisorAgentId && queuedMessage.awaitTool === "slp_present_to_manager"),
+    );
     // A rework request is a new pipeline assignment, so its message belongs to the same durable transition.
     mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId,
       `${reworkNotice(feedback)}\nDefine a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
@@ -180,6 +195,15 @@ export function presentToManager(ctx: PipelineContext, runId: string, assessment
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "awaiting_user";
     mutableRun.supervisorReport = assessment;
+    const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
+    if (supervisorRecord) {
+      supervisorRecord.awaitingTool = null;
+      supervisorRecord.awaitingSince = null;
+      supervisorRecord.nudges = 0;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) => !(queuedMessage.toAgentId === mutableRun.supervisorAgentId && queuedMessage.awaitTool === "slp_present_to_manager"),
+    );
     mutableRun.gate = {
       kind: "final_approval",
       openedAt: new Date().toISOString(),

@@ -5,21 +5,27 @@ import { TWO_PEER_PIPELINE, approveCurrentStage, currentStage, reportPeer, start
 const createFlow = useFlowFixture();
 
 describe("stage coordination", () => {
-  it("keeps the stage goal and equal peer assignments visible to the Forked Lead", async () => {
+  it("keeps the Forked Lead idle at stage start and delivers the full stage goal and roster once peers report", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const coordinatorId = flow.agentId(runId, "forked_lead", stage.id);
-    const briefing = flow.mailTo(runId, coordinatorId).at(-1)?.text ?? "";
 
-    expect(briefing).toContain(stage.goal);
-    expect(briefing).toContain("reviewer");
-    expect(briefing).toContain("developer");
-    expect(briefing).toContain("slp_approve_stage");
+    // Forked Lead stays idle without an empty startup turn while peers work.
+    expect(flow.mailTo(runId, coordinatorId)).toEqual([]);
     expect(stage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].role)).toEqual(["peer", "peer"]);
+
+    await reportPeer(flow, runId, pipelineId, "reviewer", "Boundary review finished.");
+    await reportPeer(flow, runId, pipelineId, "developer", "Implementation plan ready.");
+
+    const reviewBriefing = flow.mailTo(runId, coordinatorId).at(-1)?.text ?? "";
+    expect(reviewBriefing).toContain(stage.goal);
+    expect(reviewBriefing).toContain("reviewer");
+    expect(reviewBriefing).toContain("developer");
+    expect(reviewBriefing).toContain("slp_approve_stage");
   });
 
-  it("lets peers send direct messages and report evidence before the coordinator approves", async () => {
+  it("lets peers send direct messages and releases a waiting peer when the recipient submits slp_stage_report", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
@@ -34,9 +40,15 @@ describe("stage coordination", () => {
     expect(message.isError).toBe(false);
     expect(flow.pipeline(runId, pipelineId)!.stages[0].messages.at(-1)?.message).toContain("idempotency");
     expect(flow.mailTo(runId, developerId).at(-1)?.text).toContain("idempotency");
+    expect(flow.run(runId).agents[reviewerId].waitingForAgentId).toBe(developerId);
+
+    // When developer submits its stage report instead of sending a direct reply, reviewer's wait is released immediately.
+    await reportPeer(flow, runId, pipelineId, "developer", "Idempotency check added and verified.");
+    expect(flow.run(runId).agents[reviewerId].waitingForAgentId).toBeNull();
+    expect(flow.mailTo(runId, reviewerId).at(-1)?.awaitTool).toBe("slp_stage_report");
 
     await reportPeer(flow, runId, pipelineId, "reviewer", "Boundary and retry behavior reviewed.");
-    expect(currentStage(flow, runId, pipelineId).reports).toHaveLength(1);
+    expect(currentStage(flow, runId, pipelineId).reports).toHaveLength(2);
     expect(currentStage(flow, runId, pipelineId).status).toBe("running");
   });
 

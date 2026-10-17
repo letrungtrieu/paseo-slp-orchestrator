@@ -28,7 +28,7 @@ Hard rules:
 - Pipeline definitions, stage reports and communication history live in SQLite. Read them with the available slp_ tools.
 - Project role Markdown under .slp is editable configuration. Its front matter describes the business role; its body is the workflow for that role.
 - A role name is a business assignment, not a permanent capability. Follow the current stage brief and the permission mode granted by the engine.
-- After slp_stage_report, slp_approve_stage, slp_stage_rework, slp_escalate, slp_delegate, slp_report, slp_request_rework, slp_present_to_manager or slp_finalize_pipeline succeeds, END YOUR TURN.
+- After slp_stage_report, slp_approve_stage, slp_stage_rework, slp_escalate, slp_delegate, slp_report, slp_request_rework or slp_present_to_manager succeeds, END YOUR TURN. After slp_finalize_pipeline succeeds, call slp_report in the same turn if all pipelines are integrated; otherwise END YOUR TURN.
 - Read-only queries do not end your turn. Never create runtime specification, report or pipeline files.
 `;
 
@@ -51,26 +51,14 @@ function projectDefinition(
 }
 
 function stageAssignment(context: StagePromptContext): string {
-  // Keep all stage inputs in one visible block so peers can reason from the same bounded context.
-  const lines = [
+  // Keep only compact stage identity in systemPrompt because full task briefs, rosters and prior results are delivered in stage mail.
+  return [
     `PIPELINE: ${context.pipelineName ?? context.pipelineId ?? "unnamed"}`,
     context.pipelineId ? `PIPELINE ID: ${context.pipelineId}` : "",
     `STAGE: ${context.stageName}${context.stageId ? ` (${context.stageId})` : ""}`,
     `WORKTREE: ${context.worktree}`,
     `STAGE GOAL: ${context.goal}`,
-    `YOUR BRIEF: ${context.task}`,
-  ];
-  if (context.peerRoster?.length) {
-    lines.push("PEER ROSTER:");
-    for (const peer of context.peerRoster) lines.push(`- ${peer.role}: ${peer.task}`);
-  }
-  if (context.priorResults?.length) {
-    lines.push("PRIOR STAGE RESULTS:", ...context.priorResults.map((result) => `- ${result}`));
-  }
-  if (context.history?.length) {
-    lines.push("STAGE MESSAGE HISTORY:", ...context.history.map((message) => `- ${message}`));
-  }
-  return lines.filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function systemPromptFor(

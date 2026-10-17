@@ -39,8 +39,8 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   const activeRun = ctx.store.require(run.id);
   if (activeRun.engineVersion !== "dynamic-stages-v1" || ["completed", "aborted"].includes(activeRun.status)) return;
   const hasDynamicPipeline = Object.keys(activeRun.pipelines).length > 0;
-  // Both active stage participants and a planning/running Master Lead can owe workflow tools.
-  if (hasDynamicPipeline || ["planning", "running"].includes(activeRun.status)) {
+  // Active stage participants, a planning/running Master Lead, and a reporting Supervisor can owe workflow tools.
+  if (hasDynamicPipeline || ["planning", "running", "reporting"].includes(activeRun.status)) {
     sweepStageNudges(ctx, activeRun.id, liveStatuses);
   }
   // Respawn a vanished or archived Master Lead before flushing so its transferred or inferred mail delivers immediately.

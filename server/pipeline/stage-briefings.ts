@@ -47,11 +47,14 @@ export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageSta
 
 export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: StageState, peerIndex: number): string {
   const assignment = stage.peers[peerIndex];
-  // Business roles share authority; none gains a hidden reviewer or primary-implementer position.
+  // Tailor collaboration instructions so a single peer does not waste a turn looking for sibling peers to message.
+  const coordinationGuidance = stage.peers.length === 1
+    ? "You are the sole peer in this stage. Complete your task in the worktree and submit evidence with `slp_stage_report` (or use `slp_escalate` if blocked). The Forked Lead decides when this stage is complete."
+    : "All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with `slp_send_peer_message` when needed, then submit evidence with `slp_stage_report`. The Forked Lead decides when this stage is complete.";
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,
-    "All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with `slp_send_peer_message`, then submit evidence with `slp_stage_report`. The Forked Lead decides when this stage is complete.",
+    coordinationGuidance,
     stageBriefing(run, pipeline, stage, peerIndex),
   ].join("\n\n");
 }

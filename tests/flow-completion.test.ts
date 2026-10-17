@@ -34,7 +34,8 @@ describe("pipeline completion and integration", () => {
     });
     expect(finalization.isError).toBe(false);
     expect(flow.pipeline(runId, pipelineId)).toMatchObject({ status: "integrated", finalReport: "All declared stages were approved and integrated." });
-    expect(flow.mailTo(runId, flow.run(runId).masterLeadAgentId).at(-1)?.awaitTool).toBe("slp_report");
+    expect(flow.run(runId).agents[flow.run(runId).masterLeadAgentId].awaitingTool).toBe("slp_report");
+    expect(flow.mailTo(runId, flow.run(runId).masterLeadAgentId)).toEqual([]);
   });
 
   it("rejects integration until every declared stage is approved", async () => {

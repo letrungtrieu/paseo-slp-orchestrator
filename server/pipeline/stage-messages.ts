@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { BusCaller } from "../bus/http-mcp";
 import type { StageReportSubmission } from "../../shared/pipeline";
 import type { PipelineContext } from "./context";
+import { coordinatorRevivalBriefing } from "./stage-briefings";
 import { pausePipeline, requireStageLead, stageForCaller } from "./stage-context";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
@@ -41,30 +42,69 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
 }
 
 export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submission: StageReportSubmission): string {
-  const { run, stage, agent } = stageForCaller(ctx, caller);
+  const { run, pipeline, stage, agent } = stageForCaller(ctx, caller);
   if (agent.role !== "peer" || !agent.projectRole) throw new ToolError("Only an assigned stage peer submits peer evidence.");
   const coordinatorId = stage.forkedLeadAgentId;
   if (!coordinatorId) throw new ToolError("Stage coordinator is unavailable.");
   const report = { ...submission, agentId: caller.agentId, role: agent.projectRole, submittedAt: new Date().toISOString() };
-  const findingsSection = report.findings.length > 0
-    ? `\nFindings:\n${report.findings.map((finding) => `- ${finding}`).join("\n")}`
-    : "";
-  ctx.store.mutate(run.id, () => {
+  let notifiedCoordinator = false;
+  ctx.store.mutate(run.id, (mutableRun) => {
     // Follow-up reports append evidence instead of erasing the discussion that led to the latest conclusion.
     stage.reports.push(report);
+    agent.awaitingTool = null;
+    agent.awaitingSince = null;
+    agent.nudges = 0;
     agent.waitingForAgentId = null;
     agent.deferredTool = null;
-    if (run.agents[coordinatorId]) {
-      // A report is also a reply to a coordinator's request; it replaces any deferred conversation wait.
-      run.agents[coordinatorId].waitingForAgentId = null;
-      run.agents[coordinatorId].deferredTool = null;
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) => !(queuedMessage.toAgentId === caller.agentId && queuedMessage.awaitTool === "slp_stage_report"),
+    );
+    // Release any sibling peer that was waiting on this caller for a direct reply so it does not hang for 120 seconds.
+    for (const siblingPeerId of stage.peerAgentIds) {
+      if (!siblingPeerId || siblingPeerId === caller.agentId) continue;
+      const siblingRecord = mutableRun.agents[siblingPeerId];
+      if (siblingRecord && !siblingRecord.archivedAt && siblingRecord.waitingForAgentId === caller.agentId) {
+        const restoredPeerTool = siblingRecord.deferredTool ?? "slp_stage_report";
+        siblingRecord.waitingForAgentId = null;
+        siblingRecord.deferredTool = null;
+        mutableRun.mailbox.push(stageMail(
+          siblingPeerId,
+          `Peer **${report.role}** (\`${caller.agentId}\`) submitted its stage report (${report.status}): ${report.summary}\nContinue your work and submit your own evidence with ${restoredPeerTool}.`,
+          restoredPeerTool,
+        ));
+      }
     }
-    // A report and its wake-up are one durable transition, preventing lost evidence notifications after reload.
-    run.mailbox.push(stageMail(coordinatorId,
-      `Stage '${stage.name}' peer report from **${report.role}** (\`${report.agentId}\`) [${report.status}]:\nSummary: ${report.summary}${findingsSection}\n\nCompare this evidence with goal '${stage.goal}'. Direct more work or approve when you accept the result.`, "slp_approve_stage"));
+    if (mutableRun.agents[coordinatorId]?.waitingForAgentId === caller.agentId) {
+      // A report is also a reply to a coordinator's request; it replaces any deferred conversation wait.
+      mutableRun.agents[coordinatorId].waitingForAgentId = null;
+      mutableRun.agents[coordinatorId].deferredTool = null;
+    }
+    // Check whether any other active peer in this stage still owes its stage report before waking the Forked Lead.
+    const otherPeersStillOwingReport = stage.peerAgentIds.some((peerAgentId) => {
+      if (!peerAgentId || peerAgentId === caller.agentId) return false;
+      const peerRecord = mutableRun.agents[peerAgentId];
+      if (!peerRecord || peerRecord.archivedAt) return false;
+      const hasQueuedReportMail = mutableRun.mailbox.some(
+        (queuedMessage) => queuedMessage.toAgentId === peerAgentId && queuedMessage.awaitTool === "slp_stage_report",
+      );
+      return peerRecord.awaitingTool === "slp_stage_report"
+        || peerRecord.deferredTool === "slp_stage_report"
+        || hasQueuedReportMail;
+    });
+    if (!otherPeersStillOwingReport || report.status === "blocked") {
+      mutableRun.mailbox = mutableRun.mailbox.filter(
+        (queuedMessage) => !(queuedMessage.toAgentId === coordinatorId && queuedMessage.awaitTool === "slp_approve_stage"),
+      );
+      mutableRun.mailbox.push(
+        stageMail(coordinatorId, coordinatorRevivalBriefing(mutableRun, pipeline, stage), "slp_approve_stage"),
+      );
+      notifiedCoordinator = true;
+    }
   });
   ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: coordinatorId, kind: "stage.report", summary: `${agent.projectRole}: ${submission.status}`, outcome: "queued" });
-  return "Stage report saved for the Forked Lead. End your turn; further assignments arrive as messages.";
+  return notifiedCoordinator
+    ? "Stage report saved and queued for the Forked Lead. End your turn; further assignments arrive as messages."
+    : "Stage report saved. Waiting for remaining stage peers to finish before waking the Forked Lead. End your turn.";
 }
 
 export function requestStageRework(ctx: PipelineContext, caller: BusCaller, input: { agentIds: string[]; feedback: string }): string {

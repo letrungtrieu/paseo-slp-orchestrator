@@ -5,17 +5,23 @@ import { TWO_PEER_PIPELINE, approveCurrentStage, currentStage, reportPeer, start
 const createFlow = useFlowFixture();
 
 describe("peer evidence and stage decisions", () => {
-  it("stores independent reports from every equal peer and delivers them to the coordinator", async () => {
+  it("stores independent reports from every equal peer and wakes the coordinator once all peers have reported", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const coordinatorId = flow.agentId(runId, "forked_lead", stage.id);
 
     await reportPeer(flow, runId, pipelineId, "reviewer", "Review found a retry boundary.");
+    // Coordinator is not woken prematurely while developer still owes slp_stage_report.
+    expect(flow.mailTo(runId, coordinatorId).filter((message) => message.awaitTool === "slp_approve_stage")).toHaveLength(0);
+
     await reportPeer(flow, runId, pipelineId, "developer", "The proposed change preserves the boundary.");
 
     expect(currentStage(flow, runId, pipelineId).reports.map((report) => report.role)).toEqual(["reviewer", "developer"]);
-    expect(flow.mailTo(runId, coordinatorId).filter((message) => message.awaitTool === "slp_approve_stage")).toHaveLength(2);
+    const approvalMessages = flow.mailTo(runId, coordinatorId).filter((message) => message.awaitTool === "slp_approve_stage");
+    expect(approvalMessages).toHaveLength(1);
+    expect(approvalMessages[0].text).toContain("Review found a retry boundary.");
+    expect(approvalMessages[0].text).toContain("The proposed change preserves the boundary.");
     expect(currentStage(flow, runId, pipelineId).status).toBe("running");
   });
 

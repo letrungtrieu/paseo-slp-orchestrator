@@ -72,8 +72,25 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
         // The same catalogue selects the schema and handler; the cast only bridges their mapped-type correlation.
         const invoke = TOOL_HANDLERS[toolName] as ToolHandler<typeof toolName>;
         const text = await invoke(ctx, caller, parsedInput.data);
-        const agent = lookup.run.agents[caller.agentId];
-        if (agent?.awaitingTool === toolName) ctx.store.mutate(caller.runId, () => { agent.awaitingTool = null; });
+        const refreshedRun = ctx.store.require(caller.runId);
+        const callerRecord = refreshedRun.agents[caller.agentId];
+        const hasSatisfiedMail = refreshedRun.mailbox.some(
+          (queuedMessage) => queuedMessage.toAgentId === caller.agentId && queuedMessage.awaitTool === toolName,
+        );
+        if (callerRecord?.awaitingTool === toolName || hasSatisfiedMail) {
+          ctx.store.mutate(caller.runId, (mutableRun) => {
+            const mutableCaller = mutableRun.agents[caller.agentId];
+            if (mutableCaller?.awaitingTool === toolName) {
+              mutableCaller.awaitingTool = null;
+              mutableCaller.awaitingSince = null;
+              mutableCaller.nudges = 0;
+            }
+            // Purge retry or reminder mail for the obligation that this tool execution just satisfied.
+            mutableRun.mailbox = mutableRun.mailbox.filter(
+              (queuedMessage) => !(queuedMessage.toAgentId === caller.agentId && queuedMessage.awaitTool === toolName),
+            );
+          });
+        }
         logCall("delivered");
         return { text, isError: false };
       } catch (failure) {

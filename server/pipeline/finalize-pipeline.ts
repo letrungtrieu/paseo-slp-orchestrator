@@ -3,7 +3,6 @@ import type { PipelineState } from "../../shared/pipeline";
 import { currentBranchName, runGit } from "../git/git";
 import type { PipelineContext } from "./context";
 import { requirePipeline } from "./stage-context";
-import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
 
 // A run-level lock prevents two concurrent Lead turns from merging the same integration branch.
@@ -20,12 +19,15 @@ function completedPipeline(pipeline: PipelineState): boolean {
     && pipeline.stages.every((stage) => stage.status === "completed" && stage.result !== null);
 }
 
-function integratedResult(pipeline: PipelineState): string {
+function integratedResult(pipeline: PipelineState, allIntegrated = true): string {
   return JSON.stringify({
     pipelineId: pipeline.id,
     status: pipeline.status,
     mergedCommit: pipeline.mergedCommit,
     integratedAt: pipeline.integratedAt,
+    nextAction: allIntegrated
+      ? "All defined pipelines are integrated. Verify the combined result, then call slp_report in this turn."
+      : "Other pipelines still need integration; continue coordinating them before calling slp_report.",
   });
 }
 
@@ -39,7 +41,10 @@ export async function finalizePipeline(
   const initialPipeline = requirePipeline(initialRun, pipelineId);
   // Retried tool calls after a successful merge return the durable result instead of creating a
   // second merge commit or sending duplicate completion mail.
-  if (initialPipeline.status === "integrated") return integratedResult(initialPipeline);
+  if (initialPipeline.status === "integrated") {
+    const allPipelinesDone = Object.values(initialRun.pipelines).every((candidate) => candidate.status === "integrated");
+    return integratedResult(initialPipeline, allPipelinesDone);
+  }
   if (finalizingRuns.has(runId)) throw new ToolError("Another pipeline in this run is being finalized.");
   finalizingRuns.add(runId);
   try {
@@ -90,6 +95,7 @@ export async function finalizePipeline(
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 
     const integratedAt = new Date().toISOString();
+    let allIntegrated = false;
     ctx.store.mutate(runId, (mutableRun) => {
       const mutablePipeline = requirePipeline(mutableRun, pipelineId);
       mutablePipeline.status = "integrated";
@@ -99,13 +105,15 @@ export async function finalizePipeline(
       mutablePipeline.pausedReason = null;
       mutablePipeline.gate = null;
       mutablePipeline.updatedAt = integratedAt;
-      const allIntegrated = Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
-      // Record an already completed merge even if abort overlapped it, without waking a stopped session.
-      if (mutableRun.status === "running") {
-        mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId,
-          `Pipeline '${mutablePipeline.name}' is integrated on ${mutableRun.integrationBranch} at ${mergedCommit}. ${allIntegrated
-            ? "All defined pipelines are integrated. Verify the combined result, then call slp_report."
-            : "Other pipelines still need integration; continue coordinating them before reporting."}`, allIntegrated ? "slp_report" : null));
+      allIntegrated = Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
+      // Stamp slp_report directly on the calling Master Lead instead of sending a self-mail that wastes an extra turn.
+      if (mutableRun.status === "running" && allIntegrated) {
+        const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
+        if (masterLeadRecord) {
+          masterLeadRecord.awaitingTool = "slp_report";
+          masterLeadRecord.awaitingSince = integratedAt;
+          masterLeadRecord.nudges = 0;
+        }
       }
     });
     ctx.logEvent(runId, {
@@ -116,7 +124,7 @@ export async function finalizePipeline(
       summary: `${pipeline.name}: ${mergedCommit}`,
       outcome: "delivered",
     });
-    return JSON.stringify({ pipelineId, status: "integrated", mergedCommit, integratedAt });
+    return integratedResult(ctx.store.require(runId).pipelines[pipelineId], allIntegrated);
   } finally {
     finalizingRuns.delete(runId);
   }

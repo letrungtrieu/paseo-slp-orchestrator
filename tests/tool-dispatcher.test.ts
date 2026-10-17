@@ -92,10 +92,23 @@ describe("stage dispatch and bookkeeping", () => {
   });
 
   it("stores peer evidence and sends it to the Forked Lead", async () => {
-    store.mutate("run-1", (run) => { run.agents["peer-1"].awaitingTool = "slp_stage_report"; });
+    store.mutate("run-1", (run) => {
+      run.agents["peer-1"].awaitingTool = "slp_stage_report";
+      // Simulate a stale retry row left behind when a previous prompt delivery threw a transient error.
+      run.mailbox.push({
+        id: "stale-report-mail",
+        toAgentId: "peer-1",
+        text: "stale stage assignment",
+        taskId: null,
+        awaitTool: "slp_stage_report",
+        isReminder: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+    });
     const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_stage_report", { summary: "Evidence", findings: ["covered edge cases"] });
     expect(outcome.isError).toBe(false);
     expect(store.require("run-1").pipelines["pipeline-1"].stages[0].reports).toMatchObject([{ role: "developer", summary: "Evidence" }]);
+    expect(store.require("run-1").mailbox.some((queuedMessage) => queuedMessage.id === "stale-report-mail")).toBe(false);
     expect(store.require("run-1").mailbox.at(-1)).toMatchObject({
       toAgentId: "stage-lead", text: expect.stringContaining("Evidence"), awaitTool: "slp_approve_stage",
     });

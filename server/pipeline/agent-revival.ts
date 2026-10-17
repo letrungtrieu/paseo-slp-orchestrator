@@ -34,6 +34,27 @@ export const MASTER_LEAD_OWED_TOOLS: ReadonlySet<string> = new Set([
   "slp_report",
 ]);
 
+// Verify that a Master Lead's stamped tool obligation still matches the live run and pipeline state.
+export function isMasterLeadObligationActive(run: Run, awaitedTool: string | null): boolean {
+  if (!awaitedTool || !MASTER_LEAD_OWED_TOOLS.has(awaitedTool)) return false;
+  if (awaitedTool === "slp_define_pipeline") {
+    // Once at least one pipeline is defined and the run enters 'running', defining extra pipelines is optional.
+    return run.status === "planning";
+  }
+  if (run.status !== "running") return false;
+  const runPipelines = Object.values(run.pipelines);
+  if (awaitedTool === "slp_resume_pipeline") {
+    return runPipelines.some((pipeline) => pipeline.status === "paused" && !pipeline.gate);
+  }
+  if (awaitedTool === "slp_finalize_pipeline") {
+    return runPipelines.some((pipeline) => pipeline.status === "completed" && !pipeline.gate);
+  }
+  if (awaitedTool === "slp_report") {
+    return runPipelines.length > 0 && runPipelines.every((pipeline) => pipeline.status === "integrated");
+  }
+  return false;
+}
+
 function inferMasterLeadObligation(
   run: Run,
   previousAwaitingTool: string | null,
@@ -77,10 +98,10 @@ function inferMasterLeadObligation(
       };
     }
   }
-  // Preserve any explicit valid tool obligation that was stamped on the previous Master Lead before it died.
-  if (previousAwaitingTool && MASTER_LEAD_OWED_TOOLS.has(previousAwaitingTool)) {
+  // Preserve any explicit valid tool obligation only when it still matches the current run state.
+  if (isMasterLeadObligationActive(run, previousAwaitingTool)) {
     return {
-      awaitTool: previousAwaitingTool,
+      awaitTool: previousAwaitingTool!,
       briefingText: `Your Master Lead session was revived while owing ${previousAwaitingTool}. Inspect slp_get_run and slp_list_pipelines, then call ${previousAwaitingTool}.`,
     };
   }
