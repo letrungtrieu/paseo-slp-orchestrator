@@ -284,16 +284,24 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (!stage.result) throw new Error("Stage cannot complete without its Forked Lead approval.");
   const stageAgents = Object.values(run.agents).filter((agent) => agent.pipelineId === pipelineId && agent.stageId === stage.id);
-  for (const peerAgentId of stageAgents.filter((agent) => agent.role === "peer").map((agent) => agent.agentId)) {
-    // Close peers first; advancing before archival could let an old cohort edit the next stage's worktree.
-    if (!run.agents[peerAgentId]?.archivedAt) await ctx.gateway.archive(peerAgentId);
-  }
+  const isFinalPipelineStage = pipeline.currentStageIndex + 1 >= pipeline.stages.length;
   for (const coordinator of stageAgents.filter((agent) => agent.role === "forked_lead" && !agent.archivedAt)) {
     // Approval tools return before this asynchronous boundary, allowing the coordinator's last turn to finish.
     await ctx.gateway.waitForIdle(coordinator.agentId, 60_000);
-    await ctx.gateway.archive(coordinator.agentId);
   }
-  const participantIds = new Set(stageAgents.map((agent) => agent.agentId));
+  if (isFinalPipelineStage) {
+    // Keep stage peers (and their parent Forked Leads, since archiving a parent in Paseo archives its children)
+    // alive across intermediate stages for cross-stage Q&A, retiring all pipeline cohorts only when the pipeline finishes.
+    const allPipelineAgents = Object.values(ctx.store.require(runId).agents).filter(
+      (agent) => agent.pipelineId === pipelineId && !agent.archivedAt,
+    );
+    for (const peerAgent of allPipelineAgents.filter((agent) => agent.role === "peer")) {
+      await ctx.gateway.archive(peerAgent.agentId);
+    }
+    for (const coordinator of allPipelineAgents.filter((agent) => agent.role === "forked_lead")) {
+      await ctx.gateway.archive(coordinator.agentId);
+    }
+  }
   const latestRun = ctx.store.require(runId);
   const latestPipeline = requirePipeline(latestRun, pipelineId);
   const latestStage = latestPipeline.stages[latestPipeline.currentStageIndex];
@@ -306,7 +314,18 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
     currentStage.completedAt = new Date().toISOString();
     currentPipeline.currentStageIndex += 1;
     currentPipeline.updatedAt = currentStage.completedAt;
-    mutableRun.mailbox = mutableRun.mailbox.filter((message) => !participantIds.has(message.toAgentId));
+    // Clear workflow obligations on all agents in this pipeline before opening the next stage.
+    for (const pipelineAgent of Object.values(mutableRun.agents)) {
+      if (pipelineAgent.pipelineId !== pipelineId) continue;
+      pipelineAgent.awaitingTool = null;
+      pipelineAgent.awaitingSince = null;
+      pipelineAgent.nudges = 0;
+      pipelineAgent.waitingForAgentId = null;
+      pipelineAgent.deferredTool = null;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (message) => mutableRun.agents[message.toAgentId]?.pipelineId !== pipelineId,
+    );
     const complete = currentPipeline.currentStageIndex === currentPipeline.stages.length;
     currentPipeline.status = complete ? "completed" : "queued";
     if (complete) currentPipeline.finalReport = currentPipeline.stages.map((completedStage) => `${completedStage.name}: ${completedStage.result?.summary}`).join("\n\n");

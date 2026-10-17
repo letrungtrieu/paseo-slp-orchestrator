@@ -94,6 +94,16 @@ export async function finalizePipeline(
     mergedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 
+    const remainingPipelineAgents = Object.values(ctx.store.require(runId).agents).filter(
+      (agentRecord) => agentRecord.pipelineId === pipelineId && !agentRecord.archivedAt,
+    );
+    // Close any remaining peers before Forked Leads so parent archival never orphans child tracking.
+    for (const peerRecord of remainingPipelineAgents.filter((agentRecord) => agentRecord.role === "peer")) {
+      await ctx.gateway.archive(peerRecord.agentId).catch(() => undefined);
+    }
+    for (const coordinatorRecord of remainingPipelineAgents.filter((agentRecord) => agentRecord.role === "forked_lead")) {
+      await ctx.gateway.archive(coordinatorRecord.agentId).catch(() => undefined);
+    }
     const integratedAt = new Date().toISOString();
     let allIntegrated = false;
     ctx.store.mutate(runId, (mutableRun) => {

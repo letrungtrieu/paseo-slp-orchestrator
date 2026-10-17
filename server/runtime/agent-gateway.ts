@@ -323,9 +323,15 @@ export class AgentGateway {
     } while (directoryCursor);
 
     const currentRun = this.store.require(runId);
+    const recipientsWithQueuedMail = new Set(currentRun.mailbox.map((queuedMessage) => queuedMessage.toAgentId));
     const missingActiveAgents = Object.values(currentRun.agents).filter(
       (agentRecord) =>
-        (isCurrentStageAgent(currentRun, agentRecord) || isActiveMasterLead(currentRun, agentRecord))
+        !agentRecord.archivedAt
+        && (
+          isCurrentStageAgent(currentRun, agentRecord)
+          || isActiveMasterLead(currentRun, agentRecord)
+          || recipientsWithQueuedMail.has(agentRecord.agentId)
+        )
         && !statusByAgentId.has(agentRecord.agentId),
     );
     // Directory projections can lag immediately after creation; refresh only the bounded active cohort and Master Lead.

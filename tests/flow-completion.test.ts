@@ -6,7 +6,7 @@ import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipe
 const createFlow = useFlowFixture();
 
 describe("pipeline completion and integration", () => {
-  it("creates a fresh peer cohort per stage and archives the previous cohort after approval", async () => {
+  it("creates a fresh peer cohort per stage, keeps prior peers alive across stages, and archives all cohorts when the pipeline completes", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
     const firstStage = currentStage(flow, runId, pipelineId);
@@ -17,8 +17,17 @@ describe("pipeline completion and integration", () => {
     const secondStage = currentStage(flow, runId, pipelineId);
     expect(secondStage.id).not.toBe(firstStage.id);
     expect(secondStage.peerAgentIds.some((agentId) => firstCohort.includes(agentId))).toBe(false);
-    for (const agentId of firstCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
+    // Stage 1 peers remain alive during Stage 2 for cross-stage consultation, and are listed in Stage 2's briefing.
+    for (const peerAgentId of firstStage.peerAgentIds) {
+      expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
+    }
+    const secondStageBriefing = flow.mailTo(runId, secondStage.peerAgentIds[0]).at(-1)?.text ?? "";
+    expect(secondStageBriefing).toContain("Prior Stage Peers");
+    expect(secondStageBriefing).toContain(firstStage.peerAgentIds[0]);
     expect(secondStage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].projectRole)).toEqual(["developer"]);
+
+    await completePipeline(flow, runId, pipelineId);
+    for (const agentId of firstCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
   });
 
   it("accepts and integrates a completed Lead-authored pipeline", async () => {

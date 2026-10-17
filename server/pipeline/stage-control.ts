@@ -23,7 +23,7 @@ export function approveStage(ctx: PipelineContext, caller: BusCaller, summary: s
   });
   ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: "pipeline", kind: "stage.approved", summary: `${pipeline.name}/${stage.name}: ${summary}`, outcome: "delivered" });
   scheduleRecovery(ctx, run.id);
-  return "Stage approval saved. End your turn. The engine closes this cohort and hands accepted results to the next stage.";
+  return "Stage approval saved. End your turn. The engine hands accepted results to the next stage (keeping stage peers available until the pipeline finishes).";
 }
 
 export function resumePipeline(ctx: PipelineContext, runId: string, pipelineId: string, feedback: string): string {

@@ -93,7 +93,19 @@ describe("project system prompt composition", () => {
     expect(leadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
     expect(leadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
     // A selected business role is independent of whether this assignment grants tests or read-only review.
-    expect(systemPromptFor("peer", configuration, "qa-engineer")).toContain("PRIVATE_QA_WORKFLOW");
-    expect(systemPromptFor("peer", configuration, "developer")).not.toContain("PRIVATE_QA_WORKFLOW");
+    const qaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
+    const developerPrompt = systemPromptFor("peer", configuration, "developer");
+    const forkedLeadPrompt = systemPromptFor("forked_lead", configuration);
+    expect(qaPrompt).toContain("PRIVATE_QA_WORKFLOW");
+    expect(developerPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
+    // Enforce mandatory metrics communication, Lead anti-bloat audit, QA screenshot evidence, and cross-stage peer rules.
+    expect(developerPrompt).toContain("STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE");
+    expect(developerPrompt).toContain("CROSS-STAGE PEER LIFECYCLE");
+    expect(forkedLeadPrompt).toContain("system garbage/bloat");
+    expect(leadPrompt).toContain("system garbage/bloat");
+    expect(qaPrompt).toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    expect(qaPrompt).toContain("screenshot evidence");
+    expect(developerPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
   });
 });
+

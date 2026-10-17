@@ -16,11 +16,23 @@ function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];
     const stage = pipeline?.stages[pipeline.currentStageIndex];
-    // Only the running stage may receive permissions; completing and paused stages are closed.
+    // Only the running stage may receive write permissions; completed prior-stage peers become read-only.
     return Boolean(run.status === "running"
       && pipeline?.status === "running"
       && stage?.id === agentRecord.stageId
       && stage.status === "running");
+  }
+  return true;
+}
+
+// Completed-stage peers remain alive until their pipeline finishes so they can answer cross-stage questions read-only.
+function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean {
+  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
+  if (run.status === "completed" || run.status === "aborted") return false;
+  if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
+    if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
+    const pipeline = run.pipelines[agentRecord.pipelineId];
+    return Boolean(run.status === "running" && pipeline?.status === "running");
   }
   return true;
 }
@@ -62,16 +74,17 @@ export async function handlePermissionRequest(
     console.warn("[slp] live agent status unavailable while answering permission", statusError);
   }
   const stageActive = stageIsCurrent(run, agentRecord);
+  const pipelineRunning = pipelineIsRunningForAgent(run, agentRecord);
   answeredRequestIds.add(request.id);
-  const decision: PermissionDecision = stageActive
+  const decision: PermissionDecision = pipelineRunning
     ? decidePermission(request, {
       role: agentRecord.role,
       agentCwd: workingDirectoryOf(run, agentRecord),
-      // A live pipeline peer with an empty scope receives the whole stage worktree by default.
-      writableScope: agentRecord.role === "peer" ? agentRecord.writeScope : [],
+      // Only a peer in the currently active stage receives writable scope; prior-stage peers are read-only.
+      writableScope: agentRecord.role === "peer" && stageActive ? agentRecord.writeScope : [],
       pipelineId: agentRecord.pipelineId,
       stageId: agentRecord.stageId,
-      stageActive: true,
+      stageActive,
       archived: false,
     })
     : { behavior: "deny", message: "This agent belongs to an archived or inactive pipeline stage." };
