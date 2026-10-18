@@ -5,14 +5,20 @@ import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, definePipeline, delegateToLead, st
 const createFlow = useFlowFixture();
 
 describe("dynamic pipeline startup", () => {
-  it("starts only orchestration roles, then delegates acceptance criteria to the Lead", async () => {
+  it("starts only orchestration roles in the Supervisor workspace on baseBranch, then delegates acceptance criteria to the Lead", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
     const run = flow.run(runId);
 
     expect(run.status).toBe("delegating");
     expect(run.tasks).toEqual({});
+    // Master Lead shares the Supervisor's checkout on baseBranch so finalized pipeline branches merge straight into baseBranch.
+    expect(run.devWorkspaceId).toBe(run.supervisorWorkspaceId);
+    expect(run.devCwd).toBe(flow.repoPath);
+    expect(run.integrationBranch).toBe(run.baseBranch);
+    expect(flow.paseo.createdWorkspaces).toHaveLength(0);
     expect(Object.values(run.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "supervisor"]);
+    expect(flow.gateway.createdAgents.every(({ spec }) => spec.workspaceId === run.supervisorWorkspaceId)).toBe(true);
     expect(flow.gateway.createdAgents.every(({ spec }) => spec.pipelineId == null && spec.stageId == null)).toBe(true);
 
     await delegateToLead(flow, runId);
@@ -20,9 +26,10 @@ describe("dynamic pipeline startup", () => {
     expect(flow.mailTo(runId, run.masterLeadAgentId).at(-1)?.text).toContain("slp_define_pipeline");
   });
 
-  it("accepts the Lead's complete JSON and creates one Forked Lead plus equal peers", async () => {
+  it("accepts the Lead's complete JSON and creates one Forked Lead in the base workspace plus equal peers in the pipeline worktree", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
+    const run = flow.run(runId);
     const pipeline = flow.pipeline(runId, pipelineId)!;
     const stage = pipeline.stages[0];
 
@@ -32,9 +39,17 @@ describe("dynamic pipeline startup", () => {
     expect(stage.status).toBe("running");
     expect(stage.peerAgentIds).toHaveLength(2);
     expect(stage.forkedLeadAgentId).toBeTruthy();
-    expect(stage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].projectRole)).toEqual(["reviewer", "developer"]);
-    expect(stage.peerAgentIds.every((agentId) => flow.run(runId).agents[agentId].pipelineId === pipelineId)).toBe(true);
-    expect(stage.peerAgentIds.every((agentId) => flow.run(runId).agents[agentId].stageId === stage.id)).toBe(true);
+    // Only pipeline peers get an isolated worktree branch; the Forked Lead stays in the Supervisor/Lead workspace.
+    const forkedLeadSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === stage.forkedLeadAgentId)?.spec;
+    expect(forkedLeadSpec?.workspaceId).toBe(run.supervisorWorkspaceId);
+    expect(pipeline.workspaceId).not.toBe(run.supervisorWorkspaceId);
+    for (const peerAgentId of stage.peerAgentIds) {
+      const peerCreationSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === peerAgentId)?.spec;
+      expect(peerCreationSpec?.workspaceId).toBe(pipeline.workspaceId);
+    }
+    expect(stage.peerAgentIds.map((agentId) => run.agents[agentId].projectRole)).toEqual(["reviewer", "developer"]);
+    expect(stage.peerAgentIds.every((agentId) => run.agents[agentId].pipelineId === pipelineId)).toBe(true);
+    expect(stage.peerAgentIds.every((agentId) => run.agents[agentId].stageId === stage.id)).toBe(true);
   });
 
   it("rejects a second pipeline with the same name and version before allocating a cohort", async () => {

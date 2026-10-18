@@ -224,6 +224,9 @@ describe("pipeline completion and integration", () => {
     });
     expect(supervisorAccept.isError).toBe(false);
     expect(flow.run(runId).status).toBe("completed");
+    // Only owned pipeline peer worktree workspaces are archived; the shared Supervisor/Master Lead workspace stays open.
+    expect(flow.paseo.archivedWorkspaceIds).not.toContain(flow.run(runId).supervisorWorkspaceId);
+    expect(flow.paseo.archivedWorkspaceIds.length).toBeGreaterThanOrEqual(3);
   });
 
   it("lets Master Lead split a spec into parallel tasks, forks one dedicated Forked Lead per task reused across stages, and serializes concurrent merges", async () => {

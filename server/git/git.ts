@@ -73,6 +73,10 @@ export async function mergeIntegrationIntoBase(
   // Untracked files are ignored on purpose; only tracked changes can conflict with the merge.
   const dirtyStatus = (await runGit(repoPath, ["status", "--porcelain", "--untracked-files=no"])).trim();
   if (dirtyStatus) throw new Error("Base branch has uncommitted changes; commit or stash them first");
+  // When Leads share the Supervisor's checkout, pipeline branches are already merged directly into baseBranch during finalization.
+  if (integrationBranch === baseBranch) {
+    return (await runGit(repoPath, ["rev-parse", "HEAD"])).trim();
+  }
   // --no-ff keeps one merge commit per run so the whole SLP result can be reverted in one step.
   try {
     await runGit(repoPath, ["merge", "--no-ff", "-m", `SLP: merge ${integrationBranch}`, integrationBranch]);

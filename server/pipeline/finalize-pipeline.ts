@@ -24,9 +24,21 @@ async function withRunFinalizeLock<ResultType>(runId: string, operation: () => P
   }
 }
 
-async function requireCleanWorktree(worktreePath: string, label: string): Promise<void> {
-  const porcelainStatus = await runGit(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  if (porcelainStatus.trim()) throw new ToolError(`${label} has uncommitted or untracked files.`);
+async function requireCleanWorktree(
+  worktreePath: string,
+  label: string,
+  includeUntracked = true,
+): Promise<void> {
+  // Pipeline worktrees must commit all untracked files, whereas the main checkout may contain untracked .slp/*.md templates.
+  const untrackedFlag = includeUntracked ? "--untracked-files=all" : "--untracked-files=no";
+  const porcelainStatus = await runGit(worktreePath, ["status", "--porcelain=v1", untrackedFlag]);
+  if (porcelainStatus.trim()) {
+    throw new ToolError(
+      includeUntracked
+        ? `${label} has uncommitted or untracked files.`
+        : `${label} has uncommitted tracked changes.`,
+    );
+  }
 }
 
 function completedPipeline(pipeline: PipelineState): boolean {
@@ -157,10 +169,9 @@ export async function finalizePipeline(
     if (integrationBranch !== run.integrationBranch) {
       throw new ToolError(`Lead worktree is on '${integrationBranch}', expected '${run.integrationBranch}'.`);
     }
-    // Both source and destination must be clean, including untracked files, before the merge can
-    // be attributed to this pipeline and safely retried after a daemon restart.
-    await requireCleanWorktree(pipeline.worktree, "Pipeline worktree");
-    await requireCleanWorktree(run.devCwd, "Lead worktree");
+    // Pipeline worktrees must be completely clean (including untracked files), while the Lead checkout only requires clean tracked files.
+    await requireCleanWorktree(pipeline.worktree, "Pipeline worktree", true);
+    await requireCleanWorktree(run.devCwd, "Lead worktree", false);
     // Read-only git checks await subprocesses; cancellation must be observed before starting the merge.
     if (ctx.store.require(runId).status !== "running") throw new ToolError("Run stopped before pipeline integration.");
 
@@ -184,7 +195,7 @@ export async function finalizePipeline(
     } catch (verificationError) {
       throw new ToolError(`Merged branch verification failed for '${pipeline.name}': ${verificationError instanceof Error ? verificationError.message : String(verificationError)}`);
     }
-    await requireCleanWorktree(run.devCwd, "Lead worktree after merge");
+    await requireCleanWorktree(run.devCwd, "Lead worktree after merge", false);
     mergedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { ROLE_LABELS, type RunMode } from "../../shared/roles";
 import type { ProviderChoices, Run } from "../../shared/state";
 import { assertGitRepository, currentBranchName, mergeIntegrationIntoBase } from "../git/git";
-import { createIntegrationWorkspace, openSupervisorWorkspace } from "../git/worktree";
+import { openSupervisorWorkspace } from "../git/worktree";
 import { loadProjectPrompts } from "../project-prompts/load";
 import { validateProjectAgentSettings } from "../project-prompts/agent-settings";
 import {
@@ -46,11 +46,11 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   // Reject bad Markdown before creating worktrees or agents; all children use this same project-root snapshot.
   const promptConfig = await loadProjectPrompts(input.repoPath);
   const runId = randomUUID();
-  // Branch names use the short run id so concurrent runs on one repo never collide on slp/<run>/dev.
+  // Both Supervisor and Master Lead work directly on baseBranch in the main checkout; only pipeline peers use separate worktree branches.
   const runMetadata: Pick<Run, "repoPath" | "baseBranch" | "integrationBranch" | "title"> = {
     repoPath: input.repoPath,
     baseBranch,
-    integrationBranch: `slp/${runId.slice(0, 8)}/dev`,
+    integrationBranch: baseBranch,
     title: input.title?.trim() || `SLP ${runId.slice(0, 8)}`,
   };
   // Each role can use a different provider so the user can mix a strong Lead with cheaper peers.
@@ -67,9 +67,8 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   };
   validateProjectAgentSettings(promptConfig, providers);
   const paseo = await ctx.holder.get();
-  // The Supervisor works in the user's own checkout; only the Master Lead gets an isolated integration worktree.
+  // Supervisor, Master Lead, and Forked Leads share the main checkout so finalized pipeline branches merge straight into baseBranch.
   const supervisorWorkspace = await openSupervisorWorkspace(paseo, input.repoPath);
-  const integrationWorkspace = await createIntegrationWorkspace(paseo, runMetadata);
   const now = new Date().toISOString();
   // Initialize dynamic collections explicitly so SQLite snapshots are immediately self-describing.
   ctx.store.insert({
@@ -87,8 +86,8 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     supervisorAgentId: "",
     supervisorWorkspaceId: supervisorWorkspace.workspaceId,
     masterLeadAgentId: "",
-    devWorkspaceId: integrationWorkspace.workspaceId,
-    devCwd: integrationWorkspace.cwd,
+    devWorkspaceId: supervisorWorkspace.workspaceId,
+    devCwd: supervisorWorkspace.cwd,
     tasks: {},
     pipelines: {},
     pipelineWorkspaces: {},
@@ -123,7 +122,7 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     thinkingOptionId: providers.leadThinkingOptionId ?? undefined,
     permissionModeId: providers.leadPermissionModeId ?? undefined,
     parentAgentId: supervisor.agentId,
-    workspaceId: integrationWorkspace.workspaceId,
+    workspaceId: supervisorWorkspace.workspaceId,
     title: `[${ROLE_LABELS.master_lead}] [${runMetadata.title}]`,
     awaitTool: null,
   });

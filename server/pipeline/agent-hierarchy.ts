@@ -140,7 +140,11 @@ export async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Pr
     return;
   }
   const paseo = await ctx.holder.get();
-  const ownedWorkspaceIds = new Set<string>([run.devWorkspaceId]);
+  const ownedWorkspaceIds = new Set<string>();
+  // Never archive the user's primary repository workspace when Master Lead and Supervisor share the same workspace.
+  if (run.devWorkspaceId && run.devWorkspaceId !== run.supervisorWorkspaceId) {
+    ownedWorkspaceIds.add(run.devWorkspaceId);
+  }
   for (const pipelineWorkspace of Object.values(run.pipelineWorkspaces)) {
     if (pipelineWorkspace.owned) ownedWorkspaceIds.add(pipelineWorkspace.workspaceId);
   }
