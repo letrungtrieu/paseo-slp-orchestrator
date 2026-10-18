@@ -1,7 +1,7 @@
 // Every fresh cohort receives the same goal, roster and durable handover before any peer starts work.
 import type { PipelineState, StageState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
-import { isDeveloperProjectRole, type StagePromptContext } from "../prompts/system-prompts";
+import type { StagePromptContext } from "../prompts/system-prompts";
 
 export function stagePromptContext(pipeline: PipelineState, stage: StageState, task: string): StagePromptContext {
   // The goal and assignment are system context even before the final roster is activated through the mailbox.
@@ -73,25 +73,20 @@ export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: Stag
     : "";
   // Tailor collaboration instructions so a single peer does not waste a turn looking for sibling peers to message.
   const coordinationGuidance = stage.peers.length === 1
-    ? `You are the sole peer in this stage.${crossStageHint} Complete your task in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). Your session stays alive until the pipeline is merged into the integration branch so downstream stage peers or the Forked Lead (during merge conflict resolution) can message you. The Forked Lead decides when this stage is complete.`
-    : `All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, then submit evidence with \`slp_stage_report\`. Your session stays alive until the pipeline is merged into the integration branch so downstream stage peers or the Forked Lead (during merge conflict resolution) can message you. The Forked Lead decides when this stage is complete.`;
-  const developerMethodologySuffix = isDeveloperProjectRole(assignment.role)
-    ? " As a developer peer, you MUST also present your methodological argument and rejected alternatives step-by-step with metrics (e.g., \"I used technique A to solve problem B; with input data C, it produced output D in time/complexity E. I did not use technique F because G...\")."
-    : "";
-  const metricsRule = `**Mandatory Technical Reporting Rule**: Present all messages and \`slp_stage_report\` evidence with concrete metrics: for each function/feature, state (1) the exact logic, (2) expected inputs, and (3) expected output values/metrics (or the exact observable runtime outcome if non-numeric).${developerMethodologySuffix}`;
+    ? `You are the sole peer in this stage.${crossStageHint} Apply your configured \`.slp\` workflow in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). The Forked Lead decides when this stage is complete.`
+    : `All stage peers are equal participants. Stay focused on the shared goal, collaborate with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, apply your configured \`.slp\` workflow, and submit evidence with \`slp_stage_report\`. The Forked Lead decides when this stage is complete.`;
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,
     coordinationGuidance,
-    metricsRule,
     stageBriefing(run, pipeline, stage, peerIndex),
   ].join("\n\n");
 }
 
 export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
-  // The coordinator judges the goal; peer report counts and majority votes do not replace that judgment.
+  // The coordinator judges the goal according to its configured .slp/FORKED_LEAD.md workflow.
   return [
-    "You are the **Forked Lead** controlling this stage from its start until closure. Direct peers through `slp_send_peer_message` or `slp_stage_rework`, inspect their evidence and the worktree, and keep them focused on goal. Rigorously audit peer metrics (exact logic, expected inputs, expected outputs/outcomes) against the stage goal: verify there is no missing or redundant data, no system garbage/bloat, and that every generated data structure or artifact is strictly necessary to solve the problem. You decide when the result is acceptable with `slp_approve_stage({summary})`. If blocked beyond your authority, use `slp_escalate`. Do not approve merely because peers stopped talking.",
+    "You are the **Forked Lead** controlling this stage from its start until closure. Apply your configured `.slp` workflow to direct peers through `slp_send_peer_message` or `slp_stage_rework`, inspect their evidence and the worktree, and decide when the result is acceptable with `slp_approve_stage({summary})` (or use `slp_escalate` if blocked beyond your authority).",
     stageBriefing(run, pipeline, stage),
   ].join("\n\n");
 }
@@ -106,7 +101,7 @@ export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, st
       : "";
     return `- **${peerReport.role}** (\`${peerReport.agentId}\`) [${peerReport.status}]: ${peerReport.summary}${findingsText}`;
   }).join("\n");
-  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formattedReports}\n\nAudit the reported metrics (logic, expected inputs, expected outputs/outcomes) against goal '${stage.goal}', verify there is no missing/redundant data or system garbage/bloat, and confirm every added element is strictly necessary. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
+  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formattedReports}\n\nReview the submitted reports against goal '${stage.goal}' according to your configured \`.slp\` workflow. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
 }
 
 // Inform a surviving Forked Lead when dead peer slots are replaced so direct messages and rework target the new identities.

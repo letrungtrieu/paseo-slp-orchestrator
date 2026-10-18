@@ -3,7 +3,7 @@ import type { ProjectPromptConfig, ProjectRole } from "../../shared/project-prom
 import { DEFAULT_WORKFLOWS } from "../prompts/default-workflows";
 import { normalizeRoleId, parseRoleMarkdown } from "./markdown";
 
-// Seed roles are examples only; users can replace every peer file without changing engine code.
+// Seed roles provide the initial .slp/*.md files; users can edit or replace every file without changing engine code.
 const DEFAULT_ROLES = [
   {
     role: "supervisor",
@@ -13,11 +13,18 @@ const DEFAULT_ROLES = [
     workflow: DEFAULT_WORKFLOWS.supervisor.trim(),
   },
   {
-    role: "master_lead",
+    role: "master-lead",
     name: "Lead",
-    description: "Plan the solution, assign project peer roles and integrate accepted work.",
+    description: "Plan the solution, decompose parallel tasks, assign project peer roles and oversee integration.",
     file: "LEAD.md",
     workflow: DEFAULT_WORKFLOWS.master_lead.trim(),
+  },
+  {
+    role: "forked-lead",
+    name: "Forked Lead",
+    description: "Coordinate one task pipeline across all of its stages, audit peer metrics and data hygiene, and merge the completed pipeline branch into integration.",
+    file: "FORKED_LEAD.md",
+    workflow: DEFAULT_WORKFLOWS.forked_lead.trim(),
   },
   {
     role: "developer",
@@ -27,7 +34,7 @@ const DEFAULT_ROLES = [
     workflow: [
       "Focus on clean implementation, automated tests, zero redundant system bloat, and verifiable changes in the shared pipeline worktree. Document the exact logic, expected inputs, and expected outputs/metrics (or concrete runtime outcomes) for every function or feature touched.",
       "",
-      "SPECIAL DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT RULE (MANDATORY):",
+      "MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT:",
       "1. Chosen Method & Problem Mapping: Explicitly state the engineering technique/algorithm/pattern (A) you used to solve the assigned problem (B).",
       "2. Step-by-Step Quantitative Progression: Present the chosen method step-by-step with concrete data and metrics—showing how input data (C) is transformed through each processing step to yield output/outcome (D) in measured time or complexity (E).",
       "3. Rejected Alternatives & Rationale: Explicitly explain which alternative technique(s) (F) you chose NOT to use and why (G) (e.g., worse time/memory complexity, boundary distortion, edge-case failure, or redundant system bloat).",
@@ -38,11 +45,21 @@ const DEFAULT_ROLES = [
     ].join("\n"),
   },
   {
-    role: "reviewer",
-    name: "Reviewer",
-    description: "Review the current stage's design, metrics, data hygiene and implementation, challenging weak assumptions or system bloat.",
-    file: "peers/REVIEWER.md",
-    workflow: `Focus on architecture, correctness, maintainability, input/logic/output metrics, and challenging weak assumptions or redundant system garbage with concrete file/line evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
+    role: "end-user",
+    name: "End-User UAT Tester",
+    description: "Simulate a real end user to perform final User Acceptance Testing (UAT) across all merged features, verifying end-to-end user journeys, UI behavior, and cross-feature interactions.",
+    file: "peers/END_USER_UAT.md",
+    workflow: [
+      "Act as a real End User performing final User Acceptance Testing (UAT) on the integrated branch.",
+      "Exercise end-to-end user flows across all merged features together, verify that combined functionality works seamlessly, capture concrete runtime/visual evidence, and report any regressions or usability defects via `slp_stage_report`.",
+      "",
+      "MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:",
+      "1. End-to-End User Journeys & Edge Cases: Verify real user workflows across combined features, stating the exact flow, inputs, expected outcomes, and edge cases tested.",
+      "2. Automated vs. Manual Verification: Execute automated end-to-end checks where available and document manual user-journey verifications.",
+      "3. UI / Visual & Screenshot Evidence: When UI or visual behavior is involved, capture concrete screenshot or runtime evidence and cite it in `slp_stage_report`.",
+      "",
+      DEFAULT_WORKFLOWS.peer.trim(),
+    ].join("\n"),
   },
   {
     role: "qa-engineer",
@@ -52,7 +69,7 @@ const DEFAULT_ROLES = [
     workflow: [
       "Focus on exercising the delivered behavior, regression coverage, boundary conditions and reproducible verification evidence.",
       "",
-      "SPECIAL QA VERIFICATION & VISUAL EVIDENCE RULE (MANDATORY):",
+      "MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:",
       "1. Logic, Inputs/Outputs & Edge-Case Analysis: For every piece of logic or feature processed in the pipeline, explicitly analyze and state its exact logic, expected inputs, expected outputs/outcomes, and enumerate all potential edge cases that can occur.",
       "2. Automated vs. Manual Test Assessment: Explicitly determine and report which edge cases and flows can be verified via automated tests (and run/write those automated tests) versus which scenarios require manual testing and why.",
       "3. UI / Visual Impact Assessment: Explicitly analyze whether the changes affect the user interface (UI) or visual rendering, and explain how the layout, state, interaction, or rendering is affected.",
@@ -61,6 +78,13 @@ const DEFAULT_ROLES = [
       "",
       DEFAULT_WORKFLOWS.peer.trim(),
     ].join("\n"),
+  },
+  {
+    role: "reviewer",
+    name: "Reviewer",
+    description: "Review the current stage's design, metrics, data hygiene and implementation, challenging weak assumptions or system bloat.",
+    file: "peers/REVIEWER.md",
+    workflow: `Focus on architecture, correctness, maintainability, input/logic/output metrics, and challenging weak assumptions or redundant system garbage with concrete file/line evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
   },
   {
     role: "security-reviewer",
@@ -74,44 +98,31 @@ const DEFAULT_ROLES = [
 export function defaultPromptFiles(): Array<{ relativePath: string; markdown: string }> {
   return DEFAULT_ROLES.map((definition) => ({
     relativePath: definition.file,
-    // Each .slp/peers file is the agent prompt for that role; its YAML front matter is the summary injected into the Lead.
+    // Each .slp file is the editable system prompt for that role; peer YAML front matter is the summary injected into the Lead.
     markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n---\n\n# Workflow\n\n${definition.workflow}\n`,
   }));
 }
 
 export function defaultProjectPrompts(): ProjectPromptConfig {
-  const roles = defaultPromptFiles().map((definition) => parseRoleMarkdown(definition.markdown, `.slp/${definition.relativePath}`));
+  const roles = defaultPromptFiles().map((definition) =>
+    parseRoleMarkdown(definition.markdown, `.slp/${definition.relativePath}`),
+  );
   // Root files have a fixed purpose; peer names are discovered solely from their front matter.
-  const [supervisor, lead, ...peers] = roles;
-  return { supervisor, lead, peers };
+  const [supervisor, lead, forkedLead, ...peers] = roles;
+  return { supervisor, lead, forkedLead, peers };
 }
 
-// Built-in End-User UAT aliases allow the Master Lead to spawn a final UAT team even in projects seeded with the 4 standard peer files.
-const BUILTIN_END_USER_UAT_ALIASES = new Set(["end-user", "uat", "uat-tester", "end-user-tester"]);
+// Common UAT role aliases map to the project's configured .slp/peers/END_USER_UAT.md role when present.
+const END_USER_UAT_ROLE_ALIASES = new Set(["end-user", "uat", "uat-tester", "end-user-tester"]);
 
 export function peerRole(config: ProjectPromptConfig | null | undefined, roleId: string): ProjectRole {
   const peers = (config ?? defaultProjectPrompts()).peers;
   const normalizedRoleId = normalizeRoleId(roleId);
   const selectedRole = peers.find((peer) => peer.role === normalizedRoleId);
   if (selectedRole) return selectedRole;
-  if (BUILTIN_END_USER_UAT_ALIASES.has(normalizedRoleId)) {
-    const endUserDescription =
-      "Simulate a real end user to perform final User Acceptance Testing (UAT) across all merged features, verifying end-to-end user journeys, UI behavior, and cross-feature interactions.";
-    return {
-      role: normalizedRoleId,
-      name: "End-User UAT Tester",
-      description: endUserDescription,
-      model: null,
-      thinking: null,
-      sourcePath: ".slp/peers/END_USER_UAT.md",
-      frontMatter: `role: ${normalizedRoleId}\nname: End-User UAT Tester\ndescription: ${endUserDescription}`,
-      workflow: [
-        "Act as a real End User performing final User Acceptance Testing (UAT) on the integrated branch.",
-        "Exercise end-to-end user flows across all merged features together, verify that combined functionality works seamlessly, capture concrete runtime/visual evidence, and report any regressions or usability defects via `slp_stage_report`.",
-        "",
-        DEFAULT_WORKFLOWS.peer.trim(),
-      ].join("\n"),
-    };
+  if (END_USER_UAT_ROLE_ALIASES.has(normalizedRoleId)) {
+    const configuredEndUserRole = peers.find((peer) => END_USER_UAT_ROLE_ALIASES.has(peer.role));
+    if (configuredEndUserRole) return configuredEndUserRole;
   }
   throw new Error(`Unknown project peer role '${roleId}'. Available roles: ${peers.map((peer) => peer.role).join(", ") || "(none)"}`);
 }

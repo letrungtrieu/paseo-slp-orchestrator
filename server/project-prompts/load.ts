@@ -29,16 +29,34 @@ async function markdownFiles(directory: string, rootDirectory = directory): Prom
   return discoveredFiles;
 }
 
+async function writeMissingDefaultPromptFile(configurationDirectory: string, relativePath: string, markdown: string): Promise<void> {
+  const promptPath = join(configurationDirectory, relativePath);
+  await mkdir(dirname(promptPath), { recursive: true });
+  try {
+    // Exclusive creation protects user edits and prevents race conditions when two initializations overlap.
+    await writeFile(promptPath, markdown, { encoding: "utf8", flag: "wx" });
+  } catch (writeError) {
+    if ((writeError as NodeJS.ErrnoException).code !== "EEXIST") throw writeError;
+  }
+}
+
 async function initializeEmptyConfiguration(configurationDirectory: string): Promise<void> {
-  if ((await markdownFiles(configurationDirectory)).length) return;
-  for (const promptFile of defaultPromptFiles()) {
-    const promptPath = join(configurationDirectory, promptFile.relativePath);
-    await mkdir(dirname(promptPath), { recursive: true });
-    try {
-      // Exclusive creation also protects edits when two run initializations race.
-      await writeFile(promptPath, promptFile.markdown, { encoding: "utf8", flag: "wx" });
-    } catch (writeError) {
-      if ((writeError as NodeJS.ErrnoException).code !== "EEXIST") throw writeError;
+  const discoveredMarkdownFiles = await markdownFiles(configurationDirectory);
+  if (discoveredMarkdownFiles.length === 0) {
+    for (const promptFile of defaultPromptFiles()) {
+      await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
+    }
+    return;
+  }
+  // Upgrade pre-existing .slp folders that were created before FORKED_LEAD.md and END_USER_UAT.md existed on disk.
+  const hasForkedLeadFile = discoveredMarkdownFiles.some(
+    (filePath) => relative(configurationDirectory, filePath).replace(/\\/g, "/").toUpperCase() === "FORKED_LEAD.MD",
+  );
+  if (!hasForkedLeadFile) {
+    for (const promptFile of defaultPromptFiles()) {
+      if (promptFile.relativePath === "FORKED_LEAD.md" || promptFile.relativePath === "peers/END_USER_UAT.md") {
+        await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
+      }
     }
   }
 }
@@ -65,11 +83,23 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
     // Every .slp Markdown file defines its own front-matter summary and role agent prompt directly.
     const definition = parseRoleMarkdown(markdownText, sourcePath);
     const relativePath = relative(configurationDirectory, markdownPath).replace(/\\/g, "/").toUpperCase();
-    const rootRole = relativePath === "SUPERVISOR.MD" ? "supervisor" : relativePath === "LEAD.MD" ? "lead" : null;
+    const rootRole =
+      relativePath === "SUPERVISOR.MD"
+        ? "supervisor"
+        : relativePath === "LEAD.MD"
+          ? "lead"
+          : relativePath === "FORKED_LEAD.MD"
+            ? "forkedLead"
+            : null;
     if (rootRole) {
       // A misplaced role is usually a copied template; reject it instead of silently applying the wrong workflow.
-      const allowedRoles = rootRole === "lead" ? ["lead", "master-lead"] : ["supervisor"];
-      if (!allowedRoles.includes(definition.role)) throw new Error(`${sourcePath}: role must be '${rootRole}'`);
+      const allowedRoles =
+        rootRole === "lead"
+          ? ["lead", "master-lead"]
+          : rootRole === "forkedLead"
+            ? ["forked-lead", "lead"]
+            : ["supervisor"];
+      if (!allowedRoles.includes(definition.role)) throw new Error(`${sourcePath}: role must be '${allowedRoles[0]}'`);
       if (rootSourcePaths.has(rootRole)) throw new Error(`${sourcePath}: duplicate ${rootRole} configuration`);
       rootSourcePaths.set(rootRole, sourcePath);
       configuration[rootRole] = definition;

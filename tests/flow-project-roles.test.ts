@@ -14,6 +14,7 @@ describe("project business roles", () => {
     // Recursive discovery reads .slp/peers/ in lexicographical filename order.
     expect(configuration.peers.map((peer) => peer.role)).toEqual([
       "developer",
+      "end-user",
       "qa-engineer",
       "reviewer",
       "security-reviewer",

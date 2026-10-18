@@ -28,12 +28,23 @@ describe("project model and thinking overrides", () => {
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toMatchObject({ provider: "claude/form-model", thinkingOptionId: "high" });
   });
 
-  // LEAD.md governs both the Master Lead's model and the session family used by its temporary forks.
+  // LEAD.md governs both the Master Lead's model and the session family used by its temporary forks unless FORKED_LEAD.md overrides them.
   it.each(["supervisor", "master_lead", "forked_lead"] as const)("applies root model settings to %s", (role) => {
     const configuration = defaultProjectPrompts();
     const definition = role === "supervisor" ? configuration.supervisor : configuration.lead;
     definition.model = "claude/project-root"; definition.thinking = "high";
     expect(resolveAgentSettings(configuration, role, undefined, runDefaults)).toMatchObject({ provider: "claude/project-root", thinkingOptionId: "high" });
+  });
+
+  it("allows FORKED_LEAD.md to override model or thinking independently of LEAD.md", () => {
+    const configuration = defaultProjectPrompts();
+    configuration.lead.model = "claude/master-lead-model";
+    configuration.lead.thinking = "high";
+    configuration.forkedLead!.model = "claude/forked-lead-model";
+    expect(resolveAgentSettings(configuration, "forked_lead", undefined, runDefaults)).toMatchObject({
+      provider: "claude/forked-lead-model",
+      thinkingOptionId: "high",
+    });
   });
 
   it("keeps the form's provider when a file specifies a short model ID", () => {

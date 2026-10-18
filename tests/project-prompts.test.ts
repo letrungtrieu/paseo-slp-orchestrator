@@ -12,9 +12,17 @@ describe("project prompt initialization", () => {
   it("seeds the requested layout for an empty project", async () => {
     const repoPath = await createDirectory("project-prompts");
     const configuration = await loadProjectPrompts(repoPath);
-    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual(["developer", "qa-engineer", "reviewer", "security-reviewer"]);
+    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "developer",
+      "end-user",
+      "qa-engineer",
+      "reviewer",
+      "security-reviewer",
+    ]);
     expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toContain("# Workflow");
+    expect(await readFile(join(repoPath, ".slp/FORKED_LEAD.md"), "utf8")).toContain("role: forked-lead");
     expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
+    expect(await readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).toContain("role: end-user");
     // Business-role metadata must not prescribe a permanent pipeline kind.
     expect(await readFile(join(repoPath, ".slp/peers/QA_ENGINEER.md"), "utf8")).not.toContain("kind:");
   });
@@ -37,7 +45,7 @@ describe("project prompt initialization", () => {
     await mkdir(join(repoPath, ".slp"));
     await writeFile(join(repoPath, ".slp/comm-log.jsonl"), "historic log");
     await writeFile(join(repoPath, ".slp/MASTER_SPEC.md"), "historic spec without YAML");
-    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(4);
+    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(5);
     expect(await readFile(join(repoPath, ".slp/comm-log.jsonl"), "utf8")).toBe("historic log");
   });
 
@@ -45,7 +53,7 @@ describe("project prompt initialization", () => {
     const repoPath = await createDirectory("project-prompts");
     const configurations = await Promise.all([loadProjectPrompts(repoPath), loadProjectPrompts(repoPath)]);
     expect(configurations[0]).toEqual(configurations[1]);
-    expect(configurations[0].peers).toHaveLength(4);
+    expect(configurations[0].peers).toHaveLength(5);
   });
 });
 
@@ -81,35 +89,53 @@ describe("Markdown role discovery", () => {
 });
 
 describe("project system prompt composition", () => {
-  it("injects peer metadata into the Lead and only the selected workflow into a peer", async () => {
+  it("includes full default workflows in seeded .slp files while letting custom .slp edits completely replace the workflow without hardcoded wrappers", async () => {
     const repoPath = await createDirectory("project-prompts");
     const configuration = await loadProjectPrompts(repoPath);
+    const defaultDeveloperPrompt = systemPromptFor("peer", configuration, "developer");
+    const defaultQaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
+    const defaultForkedLeadPrompt = systemPromptFor("forked_lead", configuration);
+    const defaultLeadPrompt = systemPromptFor("master_lead", configuration);
+
+    // Seeded .slp files contain the default metrics, methodology, anti-bloat, and QA screenshot rules out of the box.
+    expect(defaultDeveloperPrompt).toContain("STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE");
+    expect(defaultDeveloperPrompt).toContain("CROSS-STAGE PEER LIFECYCLE");
+    expect(defaultDeveloperPrompt).toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
+    expect(defaultDeveloperPrompt).toContain("I used technique A to solve problem B");
+    expect(defaultDeveloperPrompt).toContain("I did not use technique F because G");
+    expect(defaultQaPrompt).toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    expect(defaultQaPrompt).toContain("screenshot evidence");
+    expect(defaultQaPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
+    expect(defaultDeveloperPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    expect(defaultForkedLeadPrompt).toContain("system garbage/bloat");
+    expect(defaultLeadPrompt).toContain("system garbage/bloat");
+
+    // Customizing .slp workflows replaces the prompt body cleanly without any hardcoded contract wrappers remaining.
     const qa = configuration.peers.find((peer) => peer.role === "qa-engineer")!;
+    const developer = configuration.peers.find((peer) => peer.role === "developer")!;
     qa.frontMatter += "\nfeatures: [invoice-regression]";
     qa.workflow = "PRIVATE_QA_WORKFLOW: test invoice fractions.";
+    developer.workflow = "CUSTOM_DEV_WORKFLOW: write minimal code.";
     configuration.lead.workflow = "CUSTOM_LEAD_WORKFLOW: prioritize acceptance risk.";
-    const leadPrompt = systemPromptFor("master_lead", configuration);
-    expect(leadPrompt).toContain("features: [invoice-regression]");
-    expect(leadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
-    expect(leadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
-    // A selected business role is independent of whether this assignment grants tests or read-only review.
-    const qaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
-    const developerPrompt = systemPromptFor("peer", configuration, "developer");
-    const forkedLeadPrompt = systemPromptFor("forked_lead", configuration);
-    expect(qaPrompt).toContain("PRIVATE_QA_WORKFLOW");
-    expect(developerPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
-    // Enforce mandatory metrics communication, Lead anti-bloat audit, Developer methodology argument, QA screenshot evidence, and cross-stage peer rules.
-    expect(developerPrompt).toContain("STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE");
-    expect(developerPrompt).toContain("CROSS-STAGE PEER LIFECYCLE");
-    expect(developerPrompt).toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
-    expect(developerPrompt).toContain("I used technique A to solve problem B");
-    expect(developerPrompt).toContain("I did not use technique F because G");
-    expect(qaPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
-    expect(forkedLeadPrompt).toContain("system garbage/bloat");
-    expect(leadPrompt).toContain("system garbage/bloat");
-    expect(qaPrompt).toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
-    expect(qaPrompt).toContain("screenshot evidence");
-    expect(developerPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    configuration.forkedLead!.workflow = "CUSTOM_FORKED_LEAD_WORKFLOW: coordinate stage only.";
+
+    const customLeadPrompt = systemPromptFor("master_lead", configuration);
+    const customForkedLeadPrompt = systemPromptFor("forked_lead", configuration);
+    const customQaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
+    const customDeveloperPrompt = systemPromptFor("peer", configuration, "developer");
+
+    expect(customLeadPrompt).toContain("features: [invoice-regression]");
+    expect(customLeadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
+    expect(customLeadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
+    expect(customLeadPrompt).not.toContain("CUSTOM_FORKED_LEAD_WORKFLOW");
+    expect(customForkedLeadPrompt).toContain("CUSTOM_FORKED_LEAD_WORKFLOW");
+    expect(customForkedLeadPrompt).not.toContain("CUSTOM_LEAD_WORKFLOW");
+    expect(customQaPrompt).toContain("PRIVATE_QA_WORKFLOW");
+    expect(customQaPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    expect(customDeveloperPrompt).toContain("CUSTOM_DEV_WORKFLOW");
+    expect(customDeveloperPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
+    expect(customDeveloperPrompt).not.toContain("ROLE CONTRACT:");
+    expect(customDeveloperPrompt).not.toContain("RUNTIME CONTRACT PRIORITY:");
   });
 });
 

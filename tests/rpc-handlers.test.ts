@@ -40,7 +40,13 @@ describe("run RPCs", () => {
     const configuration = await rpc.call<{ directory: string; peers: Array<{ role: string }> }>(initializeProjectPromptsRpc, { repoPath: flow.repoPath });
     // Project selection prepares editable files but must not create a run or a pipeline.
     expect(configuration.directory).toBe(`${flow.repoPath}/.slp`);
-    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual(["developer", "qa-engineer", "reviewer", "security-reviewer"]);
+    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "developer",
+      "end-user",
+      "qa-engineer",
+      "reviewer",
+      "security-reviewer",
+    ]);
     expect(flow.store.list()).toHaveLength(0);
     expect(flow.gateway.createdAgents).toHaveLength(0);
   });

@@ -22,14 +22,25 @@ export function resolveAgentSettings(
   projectRoleId: string | undefined, defaults: AgentModelSettings,
 ): AgentModelSettings {
   const projectPrompts = configuration ?? defaultProjectPrompts();
+  // Forked Lead reads FORKED_LEAD.md when present, inheriting unset model/thinking fields from LEAD.md.
   const definition = role === "supervisor" ? projectPrompts.supervisor
-    : role === "master_lead" || role === "forked_lead" ? projectPrompts.lead
+    : role === "master_lead" ? projectPrompts.lead
+    : role === "forked_lead" ? (projectPrompts.forkedLead ?? projectPrompts.lead)
     : projectRoleId ? peerRole(projectPrompts, projectRoleId) : projectPrompts.peers[0];
   if (!definition) throw new Error("No project peer workflow is configured under .slp/peers");
+  const effectiveModel = role === "forked_lead"
+    ? (projectPrompts.forkedLead?.model ?? projectPrompts.lead.model)
+    : definition.model;
+  const effectiveThinking = role === "forked_lead"
+    ? (projectPrompts.forkedLead?.thinking ?? projectPrompts.lead.thinking)
+    : definition.thinking;
+  const modelSourcePath = role === "forked_lead" && !projectPrompts.forkedLead?.model
+    ? projectPrompts.lead.sourcePath
+    : definition.sourcePath;
   const defaultProviderId = defaults.provider.split("/", 1)[0];
   // Full provider/model IDs can switch providers; a short model ID keeps the provider selected in the form.
-  const provider = definition.model
-    ? definition.model.includes("/") ? definition.model : `${defaultProviderId}/${definition.model}`
+  const provider = effectiveModel
+    ? effectiveModel.includes("/") ? effectiveModel : `${defaultProviderId}/${effectiveModel}`
     : defaults.provider;
   const selectedProviderId = provider.split("/", 1)[0];
   // Missing legacy settings mean Full Access, matching the SLP global default.
@@ -37,13 +48,13 @@ export function resolveAgentSettings(
   if (selectedProviderId !== defaultProviderId) {
     // Native permission IDs differ by provider. Preserve Full Access intent without passing another provider's ID.
     if (permissionModeId && permissionModeId !== unattendedModeForProvider(defaultProviderId)) {
-      throw new Error(`${definition.sourcePath}: model switches to '${selectedProviderId}', but permission mode '${permissionModeId}' belongs to '${defaultProviderId}'. Select compatible provider permissions in SLP.`);
+      throw new Error(`${modelSourcePath}: model switches to '${selectedProviderId}', but permission mode '${permissionModeId}' belongs to '${defaultProviderId}'. Select compatible provider permissions in SLP.`);
     }
     permissionModeId = unattendedModeForProvider(selectedProviderId);
   }
   return { provider, permissionModeId,
     // Resolve independently: setting just thinking must not replace the chosen model, and vice versa.
-    thinkingOptionId: definition.thinking ?? defaults.thinkingOptionId };
+    thinkingOptionId: effectiveThinking ?? defaults.thinkingOptionId };
 }
 
 export function validateProjectAgentSettings(configuration: ProjectPromptConfig, providers: ProviderChoices): void {
@@ -56,5 +67,6 @@ export function validateProjectAgentSettings(configuration: ProjectPromptConfig,
   // Catch incompatible provider permission overrides before a run creates any worktree or session.
   resolveAgentSettings(configuration, "supervisor", undefined, supervisorDefaults);
   resolveAgentSettings(configuration, "master_lead", undefined, leadDefaults);
+  resolveAgentSettings(configuration, "forked_lead", undefined, leadDefaults);
   for (const peer of configuration.peers) resolveAgentSettings(configuration, "peer", peer.role, peerDefaults);
 }

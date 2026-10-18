@@ -97,12 +97,18 @@ async function forkOptions(ctx: PipelineContext, runId: string) {
   const run = ctx.store.require(runId);
   // Native providers save their session at turn end; the tool that defines this pipeline must return first.
   const leadTurn = await ctx.gateway.waitForIdle(run.masterLeadAgentId, 120_000);
-  const settings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, {
-    provider: run.providers.lead, thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
+  const leadDefaults = {
+    provider: run.providers.lead,
+    thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
     permissionModeId: run.providers.leadPermissionModeId ?? undefined,
-  });
+  };
+  const masterLeadSettings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, leadDefaults);
+  const forkedLeadSettings = resolveAgentSettings(run.promptConfig, "forked_lead", undefined, leadDefaults);
   const sessionId = leadTurn.status === "idle" ? await ctx.gateway.sessionIdOf(run.masterLeadAgentId) : null;
-  const binding = await ctx.forks.resolve(sessionId ? { provider: settings.provider, providerSessionId: sessionId } : null, settings.provider);
+  const binding = await ctx.forks.resolve(
+    sessionId ? { provider: masterLeadSettings.provider, providerSessionId: sessionId } : null,
+    forkedLeadSettings.provider,
+  );
   ctx.store.mutate(runId, (mutableRun) => {
     // Unsupported native forks still receive the complete pipeline and accepted earlier results in their briefing.
     mutableRun.forkDegradedReason = binding.mode === "stored-spec" ? binding.reason : null;

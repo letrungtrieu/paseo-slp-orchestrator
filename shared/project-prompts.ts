@@ -19,6 +19,8 @@ export type ProjectRole = z.infer<typeof ProjectRoleSchema>;
 export const ProjectPromptConfigSchema = z.object({
   supervisor: ProjectRoleSchema,
   lead: ProjectRoleSchema,
+  // Optional so existing SQLite run snapshots created before FORKED_LEAD.md was introduced still parse cleanly.
+  forkedLead: ProjectRoleSchema.optional(),
   // Store a run snapshot so worktrees and plugin restarts agree even if project files change later.
   peers: z.array(ProjectRoleSchema),
 });

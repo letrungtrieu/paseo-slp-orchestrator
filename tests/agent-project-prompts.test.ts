@@ -32,7 +32,8 @@ describe("gateway project workflow injection", () => {
       provider: "claude/test", thinkingOptionId: "medium", workspaceId: "ws-task", title: "Performance", awaitTool: "slp_stage_report" });
     expect(agent.role).toBe("peer");
     expect(createdConfiguration?.systemPrompt).toContain("Measure frame times before proposing a fix.");
-    expect(createdConfiguration?.systemPrompt).toContain("project peer assigned to one stage");
+    expect(createdConfiguration?.systemPrompt).toContain("PROJECT ROLE: Performance (performance)");
+    expect(createdConfiguration?.systemPrompt).not.toContain("ROLE CONTRACT:");
     expect(createdLabels["slp.peer-role"]).toBe("performance");
     // Assert the real Paseo creation boundary receives both overrides, not merely the rendered prompt text.
     expect(createdConfiguration?.provider).toBe("claude/performance-model");

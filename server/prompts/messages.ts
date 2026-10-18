@@ -1,11 +1,11 @@
-// Top-level messages describe responsibilities; stage order and peer assignments come from the Lead's JSON.
+// Top-level messages deliver runtime events; role behavior and workflow rules come from .slp/*.md.
 export function supervisorBriefing(): string {
-  return "You are the Supervisor of an SLP run. Greet the human in Vietnamese in one sentence and wait for their requirement. Do not delegate until requirements are clear.";
+  return "You are the Supervisor of an SLP run. Greet the human briefly and wait for their requirement according to your configured .slp/SUPERVISOR.md workflow. Do not delegate until requirements are clear.";
 }
 
 export function delegationMessage(acceptanceCriteria: string): string {
-  // The Master Lead decomposes the spec into one or more parallel task pipelines; each pipeline forks a dedicated Forked Lead.
-  return `The Supervisor delegated this project.\nAcceptance criteria:\n${acceptanceCriteria}\nSurvey the project and available .slp peer roles. Decompose the specification into independent parallel tasks/workstreams whenever possible. Call slp_define_pipeline with {pipelines:[{name,version,worktree?,description,stages:[{name,goal,peers:[{role,task}]}]}]} (or call slp_create_worktree + slp_define_pipeline for each task; if 'worktree' is omitted, an isolated worktree is created automatically). Each defined pipeline forks you into a dedicated Forked Lead that coordinates its assigned task's stages in parallel, resolves conflicts, and merges its branch into integration. Once defined, end your turn. Store all plans and reports through tools, without runtime files.`;
+  // The Master Lead follows its configured .slp/LEAD.md workflow to plan and define pipelines.
+  return `The Supervisor delegated this project.\nAcceptance criteria:\n${acceptanceCriteria}\nFollow your configured .slp/LEAD.md workflow and available .slp peer roles to define the pipeline(s) with slp_define_pipeline. Once defined, end your turn.`;
 }
 
 export function reportForSupervisor(summary: string, baseBranch: string, integrationBranch: string): string {
