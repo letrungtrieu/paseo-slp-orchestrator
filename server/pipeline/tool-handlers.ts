@@ -19,11 +19,11 @@ type ToolHandler<Name extends BusToolName> = (ctx: PipelineContext, caller: BusC
 
 // A complete mapped type makes every exposed tool require an implementation at compile time.
 const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
-  slp_define_pipeline: (ctx, caller, input) => definePipeline(ctx, caller.runId, input.pipeline),
+  slp_define_pipeline: (ctx, caller, input) => definePipeline(ctx, caller.runId, input),
   slp_create_worktree: (ctx, caller, input) => createPipelineWorktree(ctx, caller.runId, input.name),
   slp_list_pipelines: (ctx, caller) => listPipelines(ctx, caller),
   slp_get_pipeline: (ctx, caller, input) => readPipeline(ctx, caller, input.pipelineId),
-  slp_finalize_pipeline: (ctx, caller, input) => finalizePipeline(ctx, caller.runId, input.pipelineId, input.summary),
+  slp_finalize_pipeline: (ctx, caller, input) => finalizePipeline(ctx, caller, input.pipelineId, input.summary),
   slp_resume_pipeline: (ctx, caller, input) => resumePipeline(ctx, caller.runId, input.pipelineId, input.feedback),
   slp_send_peer_message: (ctx, caller, input) => sendPeerMessage(ctx, caller, input),
   slp_stage_report: (ctx, caller, input) => submitStageReport(ctx, caller, input),

@@ -14,11 +14,13 @@ export function readRun(ctx: PipelineContext, caller: BusCaller): string {
 }
 
 export function listPipelines(ctx: PipelineContext, caller: BusCaller): string {
-  // Summaries make coordination cheap; full stage history is read only for a selected pipeline.
+  // Summaries make coordination cheap and expose Forked Lead / Peer IDs for cross-pipeline conflict consultation.
   return JSON.stringify({ pipelines: Object.values(ctx.store.require(caller.runId).pipelines).map((pipeline) => ({
     id: pipeline.id, name: pipeline.name, version: pipeline.version, description: pipeline.description,
-    worktree: pipeline.worktree, status: pipeline.status, currentStageIndex: pipeline.currentStageIndex,
-    stages: pipeline.stages.map(({ id, name, goal, status }) => ({ id, name, goal, status })),
+    worktree: pipeline.worktree, branch: pipeline.branch, status: pipeline.status, currentStageIndex: pipeline.currentStageIndex,
+    stages: pipeline.stages.map(({ id, name, goal, status, forkedLeadAgentId, peerAgentIds }) => ({
+      id, name, goal, status, forkedLeadAgentId, peerAgentIds,
+    })),
   })) });
 }
 

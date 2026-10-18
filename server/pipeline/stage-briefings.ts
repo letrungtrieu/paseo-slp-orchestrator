@@ -73,8 +73,8 @@ export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: Stag
     : "";
   // Tailor collaboration instructions so a single peer does not waste a turn looking for sibling peers to message.
   const coordinationGuidance = stage.peers.length === 1
-    ? `You are the sole peer in this stage.${crossStageHint} Complete your task in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). Your session stays alive until the entire pipeline completes so downstream stage peers can also message you. The Forked Lead decides when this stage is complete.`
-    : `All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, then submit evidence with \`slp_stage_report\`. Your session stays alive until the entire pipeline completes so downstream stage peers can also message you. The Forked Lead decides when this stage is complete.`;
+    ? `You are the sole peer in this stage.${crossStageHint} Complete your task in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). Your session stays alive until the pipeline is merged into the integration branch so downstream stage peers or the Forked Lead (during merge conflict resolution) can message you. The Forked Lead decides when this stage is complete.`
+    : `All stage peers are equal participants. Stay focused on the shared goal. Discuss directly with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, then submit evidence with \`slp_stage_report\`. Your session stays alive until the pipeline is merged into the integration branch so downstream stage peers or the Forked Lead (during merge conflict resolution) can message you. The Forked Lead decides when this stage is complete.`;
   const developerMethodologySuffix = isDeveloperProjectRole(assignment.role)
     ? " As a developer peer, you MUST also present your methodological argument and rejected alternatives step-by-step with metrics (e.g., \"I used technique A to solve problem B; with input data C, it produced output D in time/complexity E. I did not use technique F because G...\")."
     : "";
@@ -109,7 +109,6 @@ export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, st
   return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formattedReports}\n\nAudit the reported metrics (logic, expected inputs, expected outputs/outcomes) against goal '${stage.goal}', verify there is no missing/redundant data or system garbage/bloat, and confirm every added element is strictly necessary. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
 }
 
-
 // Inform a surviving Forked Lead when dead peer slots are replaced so direct messages and rework target the new identities.
 export function peerRosterUpdateNotice(stage: StageState, revivedPeerIndices: ReadonlySet<number>): string {
   const revivedPeerSummaries = [...revivedPeerIndices].map((peerIndex) => {
@@ -118,4 +117,44 @@ export function peerRosterUpdateNotice(stage: StageState, revivedPeerIndices: Re
     return `${peerAssignment.role} (${replacementPeerAgentId})`;
   });
   return `Stage '${stage.name}' revived dead peer session(s): ${revivedPeerSummaries.join(", ")}. Continue coordinating this stage with the updated peer roster.`;
+}
+
+// Provide the final Forked Lead with peer and sibling-Forked-Lead contacts so it can merge autonomously and consult on conflicts.
+export function pipelineFinalizationBriefing(run: Run, pipeline: PipelineState): string {
+  const pipelinePeerLines = pipeline.stages.flatMap((completedStage) =>
+    completedStage.peerAgentIds.flatMap((peerAgentId, peerIndex) => {
+      if (!peerAgentId || run.agents[peerAgentId]?.archivedAt) return [];
+      const peerAssignment = completedStage.peers[peerIndex];
+      return [`- [Stage **${completedStage.name}**] **${peerAssignment?.role ?? "peer"}** (\`${peerAgentId}\`): ${peerAssignment?.task ?? ""}`];
+    }),
+  );
+  // Expose active Forked Leads from sibling pipelines so cross-pipeline merge conflicts can be resolved collaboratively.
+  const siblingForkedLeadLines = Object.values(run.pipelines)
+    .filter((candidatePipeline) => candidatePipeline.id !== pipeline.id)
+    .flatMap((siblingPipeline) => {
+      const siblingCoordinatorId = [...siblingPipeline.stages]
+        .reverse()
+        .map((siblingStage) => siblingStage.forkedLeadAgentId)
+        .find((coordinatorId): coordinatorId is string => Boolean(coordinatorId && !run.agents[coordinatorId]?.archivedAt));
+      if (!siblingCoordinatorId) return [];
+      return [
+        `- Pipeline **${siblingPipeline.name}** (\`${siblingPipeline.id}\`, branch \`${siblingPipeline.branch ?? "n/a"}\`, status \`${siblingPipeline.status}\`): Forked Lead \`${siblingCoordinatorId}\``,
+      ];
+    });
+  const briefingSections = [
+    `Pipeline '${pipeline.name}' (${pipeline.id}) completed all stages. You are responsible for verifying and merging its branch into the integration branch.`,
+    [
+      "### Merge & Finalization Instructions",
+      `1. Inspect \`${pipeline.worktree}\` (branch \`${pipeline.branch}\`) and commit any remaining valid stage work so the worktree is clean.`,
+      `2. Call \`slp_finalize_pipeline({ pipelineId: "${pipeline.id}", summary })\` with a consolidated summary of all delivered changes and verified metrics to merge \`${pipeline.branch}\` into \`${run.integrationBranch}\` (\`${run.devCwd}\`).`,
+      `3. If \`slp_finalize_pipeline\` reports a merge conflict: inspect the conflicting files. If you do not fully understand why a conflicting change was made, message the responsible **Peer** in this pipeline or the sibling **Forked Lead** of the related feature pipeline via \`slp_send_peer_message({ toAgentId, message, waitForReply: true })\`. Then merge \`${run.integrationBranch}\` into \`${pipeline.branch}\` inside \`${pipeline.worktree}\`, resolve the conflicts cleanly, commit, and call \`slp_finalize_pipeline\` again.`,
+    ].join("\n"),
+  ];
+  if (pipelinePeerLines.length > 0) {
+    briefingSections.push(`### Pipeline Peers (Available for Merge/Conflict Questions via slp_send_peer_message)\n${pipelinePeerLines.join("\n")}`);
+  }
+  if (siblingForkedLeadLines.length > 0) {
+    briefingSections.push(`### Sibling Pipeline Forked Leads (Available for Cross-Feature Conflict Consultation via slp_send_peer_message)\n${siblingForkedLeadLines.join("\n")}`);
+  }
+  return briefingSections.join("\n\n");
 }

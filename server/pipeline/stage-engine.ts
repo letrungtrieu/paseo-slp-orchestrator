@@ -9,6 +9,7 @@ import {
   coordinatorRevivalBriefing,
   peerRosterUpdateNotice,
   peerStageBriefing,
+  pipelineFinalizationBriefing,
   stagePromptContext,
 } from "./stage-briefings";
 import { pausePipeline, requirePipeline } from "./stage-context";
@@ -203,6 +204,23 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
       if (agent.role === "forked_lead") currentStage.forkedLeadAgentId = agent.agentId;
       if (agent.role === "peer" && agent.stagePeerId !== null) currentStage.peerAgentIds[Number(agent.stagePeerId)] = agent.agentId;
     }
+    if (!currentStage.forkedLeadAgentId) {
+      // Reuse the pipeline's existing Forked Lead across stages so one Forked Lead owns its assigned task from start to merge.
+      const existingPipelineCoordinator = Object.values(run.agents).find(
+        (agent) => agent.pipelineId === pipeline.id && agent.role === "forked_lead" && !agent.archivedAt,
+      );
+      if (existingPipelineCoordinator) {
+        if (!live.has(existingPipelineCoordinator.agentId)) {
+          throw new Error(`Cannot confirm stage participant '${existingPipelineCoordinator.agentId}'; retry recovery after the directory is available.`);
+        }
+        if (live.get(existingPipelineCoordinator.agentId)?.archived) {
+          existingPipelineCoordinator.archivedAt = new Date().toISOString();
+        } else {
+          existingPipelineCoordinator.stageId = currentStage.id;
+          currentStage.forkedLeadAgentId = existingPipelineCoordinator.agentId;
+        }
+      }
+    }
     // Sparse arrays are transient during recovery and must not reach a persisted Zod array.
     currentStage.peerAgentIds = currentStage.peers.map((_, peerIndex) => currentStage.peerAgentIds[peerIndex] ?? "");
   });
@@ -261,6 +279,17 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
         if (participantRecord.waitingForAgentId && replacementByDeadAgentId.has(participantRecord.waitingForAgentId)) {
           participantRecord.waitingForAgentId = replacementByDeadAgentId.get(participantRecord.waitingForAgentId) ?? null;
         }
+        // Re-parent surviving children when their stage coordinator was replaced during revival.
+        if (participantRecord.parentAgentId && replacementByDeadAgentId.has(participantRecord.parentAgentId)) {
+          participantRecord.parentAgentId = replacementByDeadAgentId.get(participantRecord.parentAgentId) ?? participantRecord.parentAgentId;
+        }
+      }
+    }
+    // Ensure every active peer in the current stage is linked to the active stage Forked Lead coordinator.
+    for (const stagePeerAgentId of currentStage.peerAgentIds) {
+      const stagePeerRecord = mutableRun.agents[stagePeerAgentId];
+      if (stagePeerRecord && currentStage.forkedLeadAgentId) {
+        stagePeerRecord.parentAgentId = currentStage.forkedLeadAgentId;
       }
     }
     // All roster entries and initial assignments become visible together before any agent can send a message.
@@ -284,24 +313,12 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (!stage.result) throw new Error("Stage cannot complete without its Forked Lead approval.");
   const stageAgents = Object.values(run.agents).filter((agent) => agent.pipelineId === pipelineId && agent.stageId === stage.id);
-  const isFinalPipelineStage = pipeline.currentStageIndex + 1 >= pipeline.stages.length;
   for (const coordinator of stageAgents.filter((agent) => agent.role === "forked_lead" && !agent.archivedAt)) {
     // Approval tools return before this asynchronous boundary, allowing the coordinator's last turn to finish.
     await ctx.gateway.waitForIdle(coordinator.agentId, 60_000);
   }
-  if (isFinalPipelineStage) {
-    // Keep stage peers (and their parent Forked Leads, since archiving a parent in Paseo archives its children)
-    // alive across intermediate stages for cross-stage Q&A, retiring all pipeline cohorts only when the pipeline finishes.
-    const allPipelineAgents = Object.values(ctx.store.require(runId).agents).filter(
-      (agent) => agent.pipelineId === pipelineId && !agent.archivedAt,
-    );
-    for (const peerAgent of allPipelineAgents.filter((agent) => agent.role === "peer")) {
-      await ctx.gateway.archive(peerAgent.agentId);
-    }
-    for (const coordinator of allPipelineAgents.filter((agent) => agent.role === "forked_lead")) {
-      await ctx.gateway.archive(coordinator.agentId);
-    }
-  }
+  // Keep stage peers and Forked Leads alive even after the final stage completes so the Forked Lead can merge the branch
+  // via slp_finalize_pipeline and consult peers or sibling Forked Leads if merge conflicts arise.
   const latestRun = ctx.store.require(runId);
   const latestPipeline = requirePipeline(latestRun, pipelineId);
   const latestStage = latestPipeline.stages[latestPipeline.currentStageIndex];
@@ -314,7 +331,7 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
     currentStage.completedAt = new Date().toISOString();
     currentPipeline.currentStageIndex += 1;
     currentPipeline.updatedAt = currentStage.completedAt;
-    // Clear workflow obligations on all agents in this pipeline before opening the next stage.
+    // Clear workflow obligations on all agents in this pipeline before opening the next stage or finalization step.
     for (const pipelineAgent of Object.values(mutableRun.agents)) {
       if (pipelineAgent.pipelineId !== pipelineId) continue;
       pipelineAgent.awaitingTool = null;
@@ -344,8 +361,13 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
       mutableRun.mailbox.push(stageMail(mutableRun.supervisorAgentId,
         `Pipeline '${currentPipeline.name}' is waiting for the human gate selected by run mode ${mutableRun.mode}: ${currentPipeline.gate.note}\nTell the human to open SLP Orchestrator and approve the pipeline gate.`, null));
     } else if (currentPipeline.status === "completed") {
-      mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId,
-        `Pipeline '${currentPipeline.name}' (${currentPipeline.id}) completed all stages. Read slp_get_pipeline, commit any remaining changes in ${currentPipeline.worktree}, then call slp_finalize_pipeline to integrate its branch.`, "slp_finalize_pipeline"));
+      // Assign pipeline branch integration and conflict resolution directly to the final stage's Forked Lead.
+      const finalizingAgentId = currentStage.forkedLeadAgentId && !mutableRun.agents[currentStage.forkedLeadAgentId]?.archivedAt
+        ? currentStage.forkedLeadAgentId
+        : mutableRun.masterLeadAgentId;
+      mutableRun.mailbox.push(
+        stageMail(finalizingAgentId, pipelineFinalizationBriefing(mutableRun, currentPipeline), "slp_finalize_pipeline"),
+      );
     }
   });
 }

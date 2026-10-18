@@ -124,6 +124,46 @@ describe("hook registration", () => {
     expect(fixture.logs.some((entry) => entry.kind === "supervisor.archived")).toBe(true);
   });
 
+  // Archiving a stage Forked Lead must recursively archive all of its child stage peers across worktrees.
+  it("cascades Forked Lead agent.archived to recursively archive its child stage peers and pause the stage pipeline", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    await hooks.fire("agent.archived", {
+      agent: { id: fixture.stageLeadId },
+      archivedAt: "2026-01-01T00:05:00.000Z",
+    });
+    expect(fixture.archivedAgentIds).toEqual([fixture.peerId]);
+    const updatedRun = fixture.store.require(fixture.runId);
+    expect(updatedRun.status).toBe("running");
+    expect(updatedRun.pipelines[fixture.pipelineId].status).toBe("paused");
+    expect(updatedRun.agents[fixture.stageLeadId].archivedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(updatedRun.agents[fixture.peerId].archivedAt).toBeTruthy();
+    expect(updatedRun.agents[fixture.masterLeadId].archivedAt).toBeNull();
+    expect(updatedRun.agents[fixture.supervisorId].archivedAt).toBeNull();
+    expect(fixture.logs.some((entry) => entry.kind === "forked_lead.archived")).toBe(true);
+  });
+
+  // Archiving the Master Lead must recursively archive child Forked Leads and grandchild Peers in bottom-up order.
+  it("cascades Master Lead agent.archived to recursively archive child Forked Leads and grandchild Peers", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    await hooks.fire("agent.archived", {
+      agent: { id: fixture.masterLeadId },
+      archivedAt: "2026-01-01T00:05:00.000Z",
+    });
+    expect(fixture.archivedAgentIds).toEqual([fixture.peerId, fixture.stageLeadId]);
+    const updatedRun = fixture.store.require(fixture.runId);
+    expect(updatedRun.status).toBe("running");
+    expect(updatedRun.pipelines[fixture.pipelineId].status).toBe("paused");
+    expect(updatedRun.agents[fixture.masterLeadId].archivedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(updatedRun.agents[fixture.stageLeadId].archivedAt).toBeTruthy();
+    expect(updatedRun.agents[fixture.peerId].archivedAt).toBeTruthy();
+    expect(updatedRun.agents[fixture.supervisorId].archivedAt).toBeNull();
+    expect(fixture.logs.some((entry) => entry.kind === "master_lead.archived")).toBe(true);
+  });
+
   // Antigravity stdio MCP bridge processes inherit the agent's launch env to authenticate to slp-bus.
   it("injects the SLP agent token and bus URL into agent.session_open for run agents only", async () => {
     const fixture = dynamicHookContext();

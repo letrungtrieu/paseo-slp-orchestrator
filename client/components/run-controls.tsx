@@ -2,11 +2,9 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import type { Run } from "../../shared/state";
-import type { RunMode } from "../../shared/roles";
 import type { UiStyles } from "../styles";
 import { describeRpcError, useRunActions } from "../use-run";
 import { ActionButton } from "./action-button";
-import { ModeSelector } from "./mode-selector";
 
 interface RunControlsProps {
   styles: UiStyles;
@@ -16,16 +14,16 @@ interface RunControlsProps {
 }
 
 export function RunControls({ styles, theme, run, readOnly = false }: RunControlsProps) {
-  // Each action keeps its own pending/error state, so approving a gate never disables or mislabels the abort button.
-  const { setRunMode, approveGate, approveMain, abortRun } = useRunActions();
+  // Each action keeps its own pending/error state, so retrying a blocked merge never disables or mislabels the abort button.
+  const { approveGate, approveMain, abortRun } = useRunActions();
   // Abort is destructive and irreversible, so the first press only arms it.
   const [abortArmed, setAbortArmed] = useState(false);
 
   // Only the first error is shown: the buttons are mutually exclusive in practice and several stacked messages would be noise.
   const controlErrorMessage = describeRpcError(
-    setRunMode.error ?? approveGate.error ?? approveMain.error ?? abortRun.error,
+    approveGate.error ?? approveMain.error ?? abortRun.error,
   );
-  // The final merge into the base branch is only meaningful once the daemon is waiting for it.
+  // Runs merge into baseBranch automatically on Supervisor acceptance; this fallback only appears if a dirty base checkout blocked auto-merge.
   const canApproveMain = run.status === "awaiting_user";
   const isRunFinished = run.status === "completed" || run.status === "aborted";
 
@@ -47,14 +45,6 @@ export function RunControls({ styles, theme, run, readOnly = false }: RunControl
 
   return (
     <View style={styles.stack}>
-      <Text style={styles.fieldLabel}>Mode (switchable at any time)</Text>
-      <ModeSelector
-        styles={styles}
-        selectedMode={run.mode}
-        // Mode changes apply immediately and take effect at the next gate decision, so no confirmation is needed.
-        onSelectMode={(nextMode: RunMode) => setRunMode.mutate({ runId: run.id, mode: nextMode })}
-      />
-
       {run.gate ? (
         <View style={[styles.stack, { padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }]}>
           <Text style={styles.warningText}>

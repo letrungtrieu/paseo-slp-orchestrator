@@ -13,9 +13,17 @@ import {
   reworkNotice,
   supervisorBriefing,
 } from "../prompts/messages";
+import {
+  archiveAgentSubtree,
+  archiveOwnedWorkspaces,
+  handleAgentArchived,
+  handleSupervisorArchived,
+} from "./agent-hierarchy";
 import { archiveAgentLogged, type PipelineContext } from "./context";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
+
+export { handleAgentArchived, handleSupervisorArchived };
 
 export const DEFAULT_PROVIDER = "claude/claude-sonnet-5-5";
 
@@ -33,8 +41,8 @@ function allPipelinesIntegrated(run: Run): boolean {
 
 export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   await assertGitRepository(input.repoPath);
-  // Fail before creating anything: a non-repo path would otherwise leave orphan workspaces behind.
-  const baseBranch = input.baseBranch ?? (await currentBranchName(input.repoPath));
+  // Always detect the currently checked-out branch of the project repository as the base branch.
+  const baseBranch = await currentBranchName(input.repoPath);
   // Reject bad Markdown before creating worktrees or agents; all children use this same project-root snapshot.
   const promptConfig = await loadProjectPrompts(input.repoPath);
   const runId = randomUUID();
@@ -169,10 +177,14 @@ export function report(ctx: PipelineContext, runId: string, summary: string): st
 
 export function requestRework(ctx: PipelineContext, runId: string, feedback: string): string {
   const run = ctx.store.require(runId);
-  if (run.status !== "reporting") throw new ToolError(`Cannot request rework while run is '${run.status}'.`);
+  // Allow rework both during initial reporting and when the human requests changes at the final approval gate.
+  if (run.status !== "reporting" && run.status !== "awaiting_user") {
+    throw new ToolError(`Cannot request rework while run is '${run.status}'.`);
+  }
   // Integrated pipelines are immutable history; rework starts a new Lead-authored pipeline instead of reopening a closed stage.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "planning";
+    mutableRun.gate = null;
     const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
     if (supervisorRecord) {
       supervisorRecord.awaitingTool = null;
@@ -189,7 +201,7 @@ export function requestRework(ctx: PipelineContext, runId: string, feedback: str
   return "Sent back to the Master Lead. End your turn while it defines a fresh pipeline.";
 }
 
-export function presentToManager(ctx: PipelineContext, runId: string, assessment: string): string {
+export async function presentToManager(ctx: PipelineContext, runId: string, assessment: string): Promise<string> {
   const run = ctx.store.require(runId);
   if (run.status !== "reporting") throw new ToolError("There is no Master Lead report to present yet.");
   ctx.store.mutate(runId, (mutableRun) => {
@@ -204,112 +216,38 @@ export function presentToManager(ctx: PipelineContext, runId: string, assessment
     mutableRun.mailbox = mutableRun.mailbox.filter(
       (queuedMessage) => !(queuedMessage.toAgentId === mutableRun.supervisorAgentId && queuedMessage.awaitTool === "slp_present_to_manager"),
     );
-    mutableRun.gate = {
-      kind: "final_approval",
-      openedAt: new Date().toISOString(),
-      note: "Result verified by the Supervisor. Approve to merge the integration branch into the base branch.",
-    };
   });
-  return "Result presented. Give the Supreme Manager your short Vietnamese report in chat, then end your turn.";
-}
-
-// Prevent concurrent agent.archived events and sweeper ticks from running duplicate cascade archives for the same run.
-const archivingSupervisorRuns = new Set<string>();
-
-function orderedDependentAgentIds(run: Run): string[] {
-  // Archive stage peers before Forked Leads and Master Lead so child sessions close cleanly before their parent coordinators.
-  const roleArchiveOrder: Record<string, number> = {
-    peer: 0,
-    forked_lead: 1,
-    master_lead: 2,
-  };
-  return Object.values(run.agents)
-    .filter((agentRecord) => agentRecord.role !== "supervisor" && !agentRecord.archivedAt)
-    .sort((leftAgent, rightAgent) => (roleArchiveOrder[leftAgent.role] ?? 3) - (roleArchiveOrder[rightAgent.role] ?? 3))
-    .map((agentRecord) => agentRecord.agentId);
-}
-
-async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Promise<void> {
-  // Unit fixtures that stub only the gateway may not initialize a live Paseo SDK handle.
-  if (typeof ctx.holder?.get !== "function" || (typeof ctx.holder.isReady === "function" && !ctx.holder.isReady())) {
-    return;
-  }
-  const paseo = await ctx.holder.get();
-  const workspaceIds = new Set<string>([run.devWorkspaceId]);
-  for (const workspace of Object.values(run.pipelineWorkspaces)) {
-    if (workspace.owned) workspaceIds.add(workspace.workspaceId);
-  }
-  for (const workspaceId of workspaceIds) {
-    // Workspace cleanup is best effort because a user can close an external Paseo workspace first.
-    await paseo.workspaces.archive(workspaceId).catch(() => undefined);
+  // Autonomous SLP runs merge the verified integration branch directly into baseBranch when the Supervisor accepts the result.
+  try {
+    const mergeSummary = await approveMain(ctx, runId);
+    return `${mergeSummary}. Result presented and merged into ${run.baseBranch}. Give the Supreme Manager your short Vietnamese report in chat, then end your turn.`;
+  } catch (autoMergeError) {
+    const failureNote = autoMergeError instanceof Error ? autoMergeError.message : String(autoMergeError);
+    ctx.store.mutate(runId, (mutableRun) => {
+      if (mutableRun.status === "awaiting_user") {
+        mutableRun.gate = {
+          kind: "final_approval",
+          openedAt: new Date().toISOString(),
+          note: `Auto-merge into '${mutableRun.baseBranch}' was blocked (${failureNote}). Clean the base checkout and approve to merge.`,
+        };
+      }
+    });
+    return `Result verified, but auto-merge into ${run.baseBranch} was blocked: ${failureNote}. Inform the Supreme Manager in Vietnamese, then end your turn.`;
   }
 }
 
 async function retireRunResources(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
-  // The Supervisor remains available for the Supreme Manager; every Lead and stage peer is retired in bottom-up order.
-  for (const dependentAgentId of orderedDependentAgentIds(run)) {
-    await archiveAgentLogged(ctx, runId, null, dependentAgentId);
-  }
-  await archiveOwnedWorkspaces(ctx, run);
-}
-
-// When the Supervisor is archived, cascade-archive all dependent Master Lead, Forked Lead and Peer sessions and stop the run.
-export async function handleSupervisorArchived(
-  ctx: PipelineContext,
-  runId: string,
-  archivedAt?: string,
-): Promise<void> {
-  if (archivingSupervisorRuns.has(runId)) return;
-  archivingSupervisorRuns.add(runId);
-  try {
-    const initialRun = ctx.store.require(runId);
-    const effectiveArchivedAt = archivedAt ?? new Date().toISOString();
-    const dependentAgentIds = orderedDependentAgentIds(initialRun);
-    const wasActiveRun = !["completed", "aborted"].includes(initialRun.status);
-    // Persist the stopped run status before awaiting SDK archive calls so in-flight stage creation and sweeper recovery stop immediately.
-    ctx.store.mutate(runId, (mutableRun) => {
-      const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
-      if (supervisorRecord) {
-        supervisorRecord.archivedAt ??= effectiveArchivedAt;
-      }
-      if (!["completed", "aborted"].includes(mutableRun.status)) {
-        mutableRun.status = "aborted";
-      }
-      mutableRun.gate = null;
-      mutableRun.mailbox = [];
-      for (const agent of Object.values(mutableRun.agents)) {
-        agent.awaitingTool = null;
-        agent.awaitingSince = null;
-        agent.waitingForAgentId = null;
-        agent.deferredTool = null;
-      }
-    });
-    for (const dependentAgentId of dependentAgentIds) {
-      await archiveAgentLogged(ctx, runId, null, dependentAgentId);
-    }
-    // Catch any stage agent whose in-flight creation completed while earlier dependent agents were being archived.
-    for (const lateDependentAgentId of orderedDependentAgentIds(ctx.store.require(runId))) {
-      await archiveAgentLogged(ctx, runId, null, lateDependentAgentId);
-    }
-    if (wasActiveRun || dependentAgentIds.length > 0) {
-      await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
-      ctx.logEvent(runId, {
-        taskId: null,
-        from: initialRun.supervisorAgentId || "supervisor",
-        to: "pipeline",
-        kind: "supervisor.archived",
-        summary: `Supervisor archived; archived ${dependentAgentIds.length} dependent lead/peer agent(s)`,
-        outcome: "info",
-      });
-    }
-  } finally {
-    archivingSupervisorRuns.delete(runId);
-  }
+  // The Supervisor remains available for the Supreme Manager; every Lead and stage peer is retired recursively in bottom-up order.
+  await archiveAgentSubtree(ctx, runId, run.supervisorAgentId);
+  await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
 }
 
 export async function approveMain(ctx: PipelineContext, runId: string): Promise<string> {
   const run = ctx.store.require(runId);
+  if (run.status === "completed") {
+    return `Already merged ${run.integrationBranch} into ${run.baseBranch}`;
+  }
   if (run.status !== "awaiting_user") throw new Error(`Run is '${run.status}', not awaiting approval`);
   if (!allPipelinesIntegrated(run)) throw new ToolError("Every pipeline must be integrated before final approval.");
   // Merge happens before the status change so a conflict leaves the run awaiting approval and the human can retry.
@@ -341,10 +279,6 @@ export async function approveRunGate(ctx: PipelineContext, runId: string, taskId
 
 export async function abortRun(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
-  const dependentAgentIds = orderedDependentAgentIds(run);
-  const supervisorAgentIds = Object.values(run.agents)
-    .filter((agentRecord) => agentRecord.role === "supervisor" && !agentRecord.archivedAt)
-    .map((agentRecord) => agentRecord.agentId);
   // Mark the run closed before any SDK call so an in-flight stage creator sees the abort and stops.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "aborted";
@@ -356,9 +290,12 @@ export async function abortRun(ctx: PipelineContext, runId: string): Promise<voi
       agent.deferredTool = null;
     }
   });
-  // Archive dependent peers and leads before the Supervisor so every child session closes cleanly.
-  for (const agentId of [...dependentAgentIds, ...supervisorAgentIds]) {
-    await archiveAgentLogged(ctx, runId, null, agentId);
+  // Recursively archive dependent peers and leads bottom-up before closing the root Supervisor session.
+  await archiveAgentSubtree(ctx, runId, run.supervisorAgentId, { includeRoot: true });
+  for (const remainingAgent of Object.values(ctx.store.require(runId).agents)) {
+    if (!remainingAgent.archivedAt) {
+      await archiveAgentLogged(ctx, runId, null, remainingAgent.agentId);
+    }
   }
   await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
   ctx.logEvent(runId, { taskId: null, from: "manager", to: "pipeline", kind: "run.aborted", summary: "aborted by the Supreme Manager", outcome: "info" });

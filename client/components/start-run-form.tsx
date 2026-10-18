@@ -24,10 +24,9 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
   // Project and session fields belong to this run; reusable agent defaults come from Paseo settings.
   const [repoPath, setRepoPath] = useState("");
   const [runTitle, setRunTitle] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
   const providerCatalog = useProviderCatalog(repoPath);
   const settings = useSlpSettings(providerCatalog);
-  const { mode: runMode, roles: roleSelections } = settings.configuration;
+  const { roles: roleSelections } = settings.configuration;
   const projectPrompts = useProjectPrompts(repoPath);
 
   // Empty optional fields must be omitted, not sent as "", so the daemon applies its defaults.
@@ -54,13 +53,13 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
   };
 
   // Trimmed here because a pasted path often carries a trailing newline that git would reject.
+  // Omit baseBranch and force FULL_AUTO so the daemon auto-detects the project's checked-out branch and runs autonomously.
   const submitRun = () => {
     startRun.mutate(
       {
         repoPath: repoPath.trim(),
         title: omitIfBlank(runTitle),
-        baseBranch: omitIfBlank(baseBranch),
-        mode: runMode,
+        mode: "FULL_AUTO",
         supervisorProvider: roleProviderModels.supervisor?.value,
         leadProvider: roleProviderModels.lead?.value,
         peerProvider: roleProviderModels.peer?.value,
@@ -106,7 +105,6 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
         </View>
       ) : null}
       <LabeledInput styles={styles} theme={theme} label="Title (optional)" value={runTitle} onChangeText={setRunTitle} />
-      <LabeledInput styles={styles} theme={theme} label="Base branch (optional)" value={baseBranch} onChangeText={setBaseBranch} placeholder="main" />
       <AgentDefaultSettings styles={styles} theme={theme} catalog={providerCatalog} settings={settings} />
       <ActionButton
         styles={styles}

@@ -196,4 +196,53 @@ describe("sweeper", () => {
       expect(flow.gateway.archivedAgentIds).toContain(peerId);
     }
   });
+
+  // When a stage Forked Lead is archived in Paseo, the sweeper must recursively archive its child stage peers.
+  it("recursively archives child stage peers and pauses the pipeline when a Forked Lead is archived", async () => {
+    const { flow, runId, masterLeadId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+    const stagePeerIds = [...firstStage.peerAgentIds];
+    const supervisorId = flow.run(runId).supervisorAgentId;
+    await flow.gateway.archive(coordinatorId);
+
+    await tick();
+    const updatedRun = flow.run(runId);
+    expect(updatedRun.status).toBe("running");
+    expect(flow.pipeline(runId)!.status).toBe("paused");
+    for (const stagePeerId of stagePeerIds) {
+      expect(flow.gateway.archivedAgentIds).toContain(stagePeerId);
+      expect(updatedRun.agents[stagePeerId].archivedAt).toBeTruthy();
+    }
+    expect(updatedRun.agents[masterLeadId].archivedAt).toBeNull();
+    expect(updatedRun.agents[supervisorId].archivedAt).toBeNull();
+  });
+
+  // When the Master Lead is archived during an active pipeline, the sweeper must recursively archive all child Forked Leads and grandchild Peers.
+  it("recursively archives child Forked Leads and grandchild Peers when the Master Lead is archived during a running pipeline", async () => {
+    const { flow, runId, masterLeadId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+    const stagePeerIds = [...firstStage.peerAgentIds];
+    const supervisorId = flow.run(runId).supervisorAgentId;
+    await flow.gateway.archive(masterLeadId);
+
+    await tick();
+    const updatedRun = flow.run(runId);
+    expect(updatedRun.status).toBe("running");
+    expect(flow.pipeline(runId)!.status).toBe("paused");
+    for (const stagePeerId of stagePeerIds) {
+      expect(flow.gateway.archivedAgentIds).toContain(stagePeerId);
+      expect(updatedRun.agents[stagePeerId].archivedAt).toBeTruthy();
+      // Leaf peers must be archived before their parent stage Forked Lead coordinator.
+      expect(flow.gateway.archivedAgentIds.indexOf(stagePeerId)).toBeLessThan(
+        flow.gateway.archivedAgentIds.indexOf(coordinatorId),
+      );
+    }
+    expect(flow.gateway.archivedAgentIds).toContain(coordinatorId);
+    expect(updatedRun.agents[coordinatorId].archivedAt).toBeTruthy();
+    expect(updatedRun.agents[supervisorId].archivedAt).toBeNull();
+  });
 });

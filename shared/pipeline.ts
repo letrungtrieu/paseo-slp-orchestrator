@@ -51,7 +51,18 @@ export const PipelineDefinitionSchema = z.object({
 });
 export type PipelineDefinition = z.infer<typeof PipelineDefinitionSchema>;
 
-export const PipelineEnvelopeSchema = z.object({ pipeline: PipelineDefinitionSchema });
+export const PipelineInputDefinitionSchema = PipelineDefinitionSchema.extend({
+  // Default version to "1.0" when Master Lead omits it during multi-task decomposition.
+  version: z.string().trim().min(1).default("1.0"),
+  // Optional on input: when omitted, definePipeline automatically provisions a dedicated worktree for the task.
+  worktree: z.string().trim().min(1).optional(),
+});
+export type PipelineInputDefinition = z.infer<typeof PipelineInputDefinitionSchema>;
+
+export const PipelineEnvelopeSchema = z.object({
+  pipeline: PipelineInputDefinitionSchema.optional(),
+  pipelines: z.array(PipelineInputDefinitionSchema).min(1).optional(),
+});
 export type PipelineEnvelope = z.infer<typeof PipelineEnvelopeSchema>;
 
 export const PIPELINE_STATUSES = [

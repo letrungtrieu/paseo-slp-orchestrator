@@ -1,6 +1,7 @@
 // Approval is the Forked Lead's decision; engine state only coordinates closure and subsequent stages.
 import type { BusCaller } from "../bus/http-mcp";
 import type { PipelineContext } from "./context";
+import { pipelineFinalizationBriefing } from "./stage-briefings";
 import { requirePipeline, requireStageLead } from "./stage-context";
 import { recoverPipelines } from "./stage-engine";
 import { ToolError } from "./tool-error";
@@ -23,7 +24,7 @@ export function approveStage(ctx: PipelineContext, caller: BusCaller, summary: s
   });
   ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: "pipeline", kind: "stage.approved", summary: `${pipeline.name}/${stage.name}: ${summary}`, outcome: "delivered" });
   scheduleRecovery(ctx, run.id);
-  return "Stage approval saved. End your turn. The engine hands accepted results to the next stage (keeping stage peers available until the pipeline finishes).";
+  return "Stage approval saved. End your turn. The engine hands accepted results to the next stage (or assigns slp_finalize_pipeline to merge the completed pipeline branch).";
 }
 
 export function resumePipeline(ctx: PipelineContext, runId: string, pipelineId: string, feedback: string): string {
@@ -64,10 +65,13 @@ export function approvePipelineGate(ctx: PipelineContext, runId: string, pipelin
     // A completed pipeline waits for integration; an intermediate approval schedules its next declared stage.
     pipeline.status = gate.kind === "before_integration" ? "completed" : "queued";
     if (gate.kind === "before_integration") {
-      run.mailbox.push(stageMail(run.masterLeadAgentId,
-        `Human approved integration of pipeline '${pipeline.name}'. Call slp_finalize_pipeline after checking its branch.`, "slp_finalize_pipeline"));
+      const finalStageCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId;
+      const finalizingAgentId = finalStageCoordinatorId && !run.agents[finalStageCoordinatorId]?.archivedAt
+        ? finalStageCoordinatorId
+        : run.masterLeadAgentId;
+      run.mailbox.push(stageMail(finalizingAgentId, pipelineFinalizationBriefing(run, pipeline), "slp_finalize_pipeline"));
     }
   });
   scheduleRecovery(ctx, runId);
-  return gate.kind === "before_integration" ? "Integration approved for the Master Lead." : "Next stage scheduled.";
+  return gate.kind === "before_integration" ? "Integration approved for the Forked Lead." : "Next stage scheduled.";
 }

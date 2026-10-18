@@ -127,27 +127,16 @@ export async function reviveMasterLead(
     const previousMasterLeadId = initialRun.masterLeadAgentId;
     const previousMasterLeadRecord = initialRun.agents[previousMasterLeadId];
     const previousAwaitingTool = previousMasterLeadRecord?.awaitingTool ?? null;
-    // Skip redundant SDK archive calls when Paseo already reported the session as archived.
-    if (
-      previousMasterLeadId
-      && previousMasterLeadRecord
-      && !previousMasterLeadRecord.archivedAt
-      && !liveStatuses?.get(previousMasterLeadId)?.archived
-    ) {
-      await ctx.gateway.archive(previousMasterLeadId).catch(() => undefined);
-    }
-    const refreshedRun = ctx.store.require(runId);
-    if (["completed", "aborted"].includes(refreshedRun.status)) return null;
     const replacementMasterLead = await ctx.gateway.createAgent({
       runId,
       role: "master_lead",
       taskId: null,
-      provider: refreshedRun.providers.lead,
-      thinkingOptionId: refreshedRun.providers.leadThinkingOptionId ?? undefined,
-      permissionModeId: refreshedRun.providers.leadPermissionModeId ?? undefined,
-      parentAgentId: refreshedRun.supervisorAgentId || undefined,
-      workspaceId: refreshedRun.devWorkspaceId,
-      title: `[${ROLE_LABELS.master_lead}] [${refreshedRun.title}]`,
+      provider: initialRun.providers.lead,
+      thinkingOptionId: initialRun.providers.leadThinkingOptionId ?? undefined,
+      permissionModeId: initialRun.providers.leadPermissionModeId ?? undefined,
+      parentAgentId: initialRun.supervisorAgentId || undefined,
+      workspaceId: initialRun.devWorkspaceId,
+      title: `[${ROLE_LABELS.master_lead}] [${initialRun.title}]`,
       awaitTool: null,
     });
     const postCreateRun = ctx.store.require(runId);
@@ -167,6 +156,12 @@ export async function reviveMasterLead(
         deadLeadRecord.deferredTool = null;
       }
       mutableRun.masterLeadAgentId = replacementMasterLead.agentId;
+      // Re-parent active child Forked Leads to the replacement Master Lead before retiring the old session.
+      for (const childRecord of Object.values(mutableRun.agents)) {
+        if (childRecord.parentAgentId === previousMasterLeadId) {
+          childRecord.parentAgentId = replacementMasterLead.agentId;
+        }
+      }
       // Transfer unread mail from the dead Master Lead identity so pending escalations or delegations are not lost.
       for (const queuedMessage of mutableRun.mailbox) {
         if (queuedMessage.toAgentId === previousMasterLeadId) {
@@ -185,6 +180,15 @@ export async function reviveMasterLead(
         }
       }
     });
+    // Archive the old session after re-parenting children so an agent.archived callback sees zero remaining children on it.
+    if (
+      previousMasterLeadId
+      && previousMasterLeadRecord
+      && !previousMasterLeadRecord.archivedAt
+      && !liveStatuses?.get(previousMasterLeadId)?.archived
+    ) {
+      await ctx.gateway.archive(previousMasterLeadId).catch(() => undefined);
+    }
     // Register the replacement as idle in the current sweep map so Mailbox.flush delivers its briefing on the same tick.
     liveStatuses?.set(replacementMasterLead.agentId, {
       agentId: replacementMasterLead.agentId,
@@ -227,6 +231,17 @@ export async function recoverMasterLead(
     || Boolean(masterLeadRecord.archivedAt)
     || Boolean(masterLeadLiveStatus?.archived);
   if (!isMasterLeadDead) return false;
+  const hasQueuedMasterLeadMail = Boolean(
+    currentMasterLeadId && currentRun.mailbox.some((queuedMessage) => queuedMessage.toAgentId === currentMasterLeadId),
+  );
+  // Do not auto-respawn a Master Lead that was retired with no remaining workflow obligation or queued mail.
+  if (
+    masterLeadRecord
+    && !hasQueuedMasterLeadMail
+    && !isMasterLeadObligationActive(currentRun, masterLeadRecord.awaitingTool)
+  ) {
+    return false;
+  }
   const replacementLead = await reviveMasterLead(
     ctx,
     runId,
@@ -245,10 +260,7 @@ export async function markStageParticipantForRevival(
   const currentRun = ctx.store.require(runId);
   const participantRecord = currentRun.agents[targetAgentId];
   if (!participantRecord || !participantRecord.pipelineId || !participantRecord.stageId) return null;
-  // Archive in Paseo first unless the directory poll already confirmed the session is archived.
-  if (!participantRecord.archivedAt && !liveStatuses?.get(targetAgentId)?.archived) {
-    await ctx.gateway.archive(targetAgentId).catch(() => undefined);
-  }
+  const wasAlreadyArchived = Boolean(participantRecord.archivedAt) || Boolean(liveStatuses?.get(targetAgentId)?.archived);
   const archivedAt = new Date().toISOString();
   let affectedPipelineId: string | null = null;
   ctx.store.mutate(runId, (mutableRun) => {
@@ -264,6 +276,13 @@ export async function markStageParticipantForRevival(
     if (!targetPipeline || !currentStage || currentStage.id !== mutableParticipant.stageId) return;
     if (currentStage.forkedLeadAgentId === targetAgentId) {
       currentStage.forkedLeadAgentId = null;
+      // Detach surviving stage peers before archiving a wedged coordinator so they can be re-parented to its replacement.
+      for (const peerAgentId of currentStage.peerAgentIds) {
+        const peerRecord = mutableRun.agents[peerAgentId];
+        if (peerRecord?.parentAgentId === targetAgentId) {
+          peerRecord.parentAgentId = null;
+        }
+      }
     }
     currentStage.peerAgentIds = currentStage.peerAgentIds.map((peerId) => (peerId === targetAgentId ? "" : peerId));
     currentStage.status = "starting";
@@ -274,6 +293,10 @@ export async function markStageParticipantForRevival(
     }
     affectedPipelineId = targetPipeline.id;
   });
+  // Archive in Paseo after detaching stage children unless the directory poll already confirmed the session is archived.
+  if (!wasAlreadyArchived) {
+    await ctx.gateway.archive(targetAgentId).catch(() => undefined);
+  }
   if (liveStatuses?.has(targetAgentId)) {
     const existingStatus = liveStatuses.get(targetAgentId)!;
     liveStatuses.set(targetAgentId, { ...existingStatus, archived: true });

@@ -3,9 +3,9 @@
 import type { Run } from "../shared/state";
 import { handlePermissionRequest } from "./hooks/permission-handler";
 import { sweepStageNudges } from "./hooks/lifecycle-hooks";
+import { collectDescendantAgentIds, handleAgentArchived, handleSupervisorArchived } from "./pipeline/agent-hierarchy";
 import { recoverMasterLead } from "./pipeline/agent-revival";
 import type { PipelineContext } from "./pipeline/context";
-import { handleSupervisorArchived } from "./pipeline/run-lifecycle";
 import { recoverPipelines } from "./pipeline/stage-engine";
 
 // 3 s keeps permission prompts and mail feeling immediate without hammering the daemon's agent directory.
@@ -34,6 +34,31 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   if (supervisorRecord && (supervisorRecord.archivedAt || liveStatuses.get(supervisorRecord.agentId)?.archived)) {
     await handleSupervisorArchived(ctx, currentRun.id, supervisorRecord.archivedAt ?? undefined);
     return;
+  }
+  // If a Master Lead or Forked Lead was archived while an event was missed, recursively archive its child leads and peers.
+  const archivedParentLeadRecords = Object.values(currentRun.agents).filter(
+    (agentRecord) =>
+      (agentRecord.role === "master_lead" || agentRecord.role === "forked_lead")
+      && (Boolean(agentRecord.archivedAt) || Boolean(liveStatuses.get(agentRecord.agentId)?.archived))
+      && collectDescendantAgentIds(currentRun, agentRecord.agentId).length > 0,
+  );
+  for (const archivedParentLead of archivedParentLeadRecords) {
+    await handleAgentArchived(
+      ctx,
+      currentRun.id,
+      archivedParentLead.agentId,
+      archivedParentLead.archivedAt ?? undefined,
+    );
+  }
+  if (archivedParentLeadRecords.length > 0) {
+    const refreshedAfterCascade = ctx.store.require(currentRun.id);
+    for (const [agentId, agentRecord] of Object.entries(refreshedAfterCascade.agents)) {
+      if (!agentRecord.archivedAt) continue;
+      const existingLiveStatus = liveStatuses.get(agentId);
+      if (existingLiveStatus && !existingLiveStatus.archived) {
+        liveStatuses.set(agentId, { ...existingLiveStatus, archived: true });
+      }
+    }
   }
   for (const liveStatus of liveStatuses.values()) {
     // Answering here duplicates the event hook on purpose; handlePermissionRequest de-duplicates by request id.

@@ -6,7 +6,7 @@ import type { AgentRecord, Run } from "../../shared/state";
 import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
 import { isMasterLeadObligationActive } from "../pipeline/agent-revival";
 import type { PipelineContext } from "../pipeline/context";
-import { handleSupervisorArchived } from "../pipeline/run-lifecycle";
+import { handleAgentArchived } from "../pipeline/run-lifecycle";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { nudgeReminder } from "../prompts/messages";
 import type { AgentLiveStatus } from "../runtime/agent-gateway";
@@ -25,8 +25,13 @@ function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
   if (run.engineVersion !== "dynamic-stages-v1" || run.status !== "running"
     || !agentRecord.pipelineId || !agentRecord.stageId || agentRecord.archivedAt) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
-  const currentStage = pipeline?.stages[pipeline.currentStageIndex];
-  return Boolean(pipeline?.status === "running"
+  if (!pipeline) return false;
+  // The final stage's Forked Lead continues to own the pipeline while merging its branch via slp_finalize_pipeline.
+  if (pipeline.status === "completed" && agentRecord.role === "forked_lead") {
+    return pipeline.stages.at(-1)?.forkedLeadAgentId === agentRecord.agentId;
+  }
+  const currentStage = pipeline.stages[pipeline.currentStageIndex];
+  return Boolean(pipeline.status === "running"
     && currentStage?.id === agentRecord.stageId
     && currentStage.status === "running");
 }
@@ -55,10 +60,13 @@ function agentOwnsSupervisorObligation(run: Run, agentRecord: AgentRecord): bool
   );
 }
 
-function stageObligationFor(agentRecord: AgentRecord): string | null {
+function stageObligationFor(run: Run, agentRecord: AgentRecord): string | null {
   if (agentRecord.deferredTool) return agentRecord.deferredTool;
   if (agentRecord.role === "peer") return "slp_stage_report";
-  if (agentRecord.role === "forked_lead") return "slp_approve_stage";
+  if (agentRecord.role === "forked_lead") {
+    const pipeline = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId] : undefined;
+    return pipeline?.status === "completed" ? "slp_finalize_pipeline" : "slp_approve_stage";
+  }
   return null;
 }
 
@@ -79,7 +87,7 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
     if (!Number.isFinite(refreshedStartedAtMs) || Date.now() - refreshedStartedAtMs < DIRECT_REPLY_TIMEOUT_MS) return;
     const stage = mutableRun.pipelines[mutableAgent.pipelineId!]?.stages.find((candidate) => candidate.id === mutableAgent.stageId);
     if (!stage) return;
-    restoredTool = stageObligationFor(mutableAgent);
+    restoredTool = stageObligationFor(mutableRun, mutableAgent);
     if (!restoredTool) return;
     mutableAgent.waitingForAgentId = null;
     mutableAgent.deferredTool = null;
@@ -124,9 +132,7 @@ function nudgeIfToolMissing(
   if (run.mailbox.some((message) => message.toAgentId === agentId)) return false;
   const turnStartedAt = lastTurnStartedAt.get(agentId);
   const owesTool = agentRecord.awaitingTool && agentRecord.awaitingSince;
-  const expectedStageTool = agentRecord.role === "peer"
-    ? "slp_stage_report"
-    : agentRecord.role === "forked_lead" ? "slp_approve_stage" : null;
+  const expectedStageTool = stageObligationFor(run, agentRecord);
   // A stale legacy obligation must never nudge a dynamic cohort for the wrong protocol step.
   if (expectedStageTool && agentRecord.awaitingTool !== expectedStageTool) return false;
   // a turn that began before the request was sent is not the agent's reply to it
@@ -220,14 +226,12 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
       ctx.holder.capture(hookContext.paseo);
       await handlePermissionRequest(ctx, event.agent.id, event.request);
     }),
-    // Archiving the Supervisor retires all dependent Master Lead, Forked Lead and Peer sessions for that run.
+    // Archiving any parent agent (Supervisor, Master Lead or Forked Lead) recursively archives its child sessions.
     server.on("agent.archived", async (event, hookContext) => {
       ctx.holder.capture(hookContext.paseo);
       const lookup = ctx.store.findAgent(event.agent.id);
       if (!lookup) return;
-      if (lookup.agentRecord.role === "supervisor" || lookup.run.supervisorAgentId === event.agent.id) {
-        await handleSupervisorArchived(ctx, lookup.run.id, event.archivedAt);
-      }
+      await handleAgentArchived(ctx, lookup.run.id, event.agent.id, event.archivedAt);
     }),
   ];
   if (typeof server.before === "function") {

@@ -4,7 +4,6 @@ import type { UiStyles } from "../styles";
 import type { useProviderCatalog } from "../use-provider-catalog";
 import type { useSlpSettings } from "../use-slp-settings";
 import { ActionButton } from "./action-button";
-import { ModeSelector } from "./mode-selector";
 import { RoleProviderFields } from "./role-provider-fields";
 
 interface AgentDefaultSettingsProps {
@@ -15,13 +14,10 @@ interface AgentDefaultSettingsProps {
 }
 
 export function AgentDefaultSettings({ styles, theme, catalog, settings }: AgentDefaultSettingsProps) {
-  // Both the run form and Paseo Settings edit the same document through the same controls.
+  // Both the run form and Paseo Settings edit the same document through the same controls; execution mode is always autonomous.
   const disabled = !settings.isEditable;
   return (
     <View style={styles.stack}>
-      <Text style={styles.fieldLabel}>Mode</Text>
-      <ModeSelector styles={styles} selectedMode={settings.configuration.mode}
-        onSelectMode={settings.changeMode} disabled={disabled} />
       <RoleProviderFields styles={styles} theme={theme} modelChoices={catalog.modelChoices}
         permissionModesByProvider={catalog.permissionModesByProvider} selections={settings.configuration.roles}
         isLoading={catalog.isPending || disabled} onSelectionChange={settings.changeRoleSelection} />

@@ -8,15 +8,26 @@ import type { PipelineContext } from "../pipeline/context";
 // requestIds already answered; a second answer to a resolved request would fail in the SDK
 const answeredRequestIds = new Set<string>();
 
+function isFinalizingForkedLead(run: Run, agentRecord: AgentRecord): boolean {
+  if (agentRecord.role !== "forked_lead" || !agentRecord.pipelineId || agentRecord.archivedAt) return false;
+  const pipeline = run.pipelines[agentRecord.pipelineId];
+  return Boolean(
+    run.status === "running"
+    && pipeline?.status === "completed"
+    && pipeline.stages.at(-1)?.forkedLeadAgentId === agentRecord.agentId,
+  );
+}
+
 function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
   // Archived agents and legacy or finished runs must never receive new write or shell permissions.
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
   if (run.status === "completed" || run.status === "aborted") return false;
   if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
+    if (isFinalizingForkedLead(run, agentRecord)) return true;
     const pipeline = run.pipelines[agentRecord.pipelineId];
     const stage = pipeline?.stages[pipeline.currentStageIndex];
-    // Only the running stage may receive write permissions; completed prior-stage peers become read-only.
+    // Only the running stage (or a finalizing Forked Lead) may receive write permissions; completed prior-stage peers become read-only.
     return Boolean(run.status === "running"
       && pipeline?.status === "running"
       && stage?.id === agentRecord.stageId
@@ -25,14 +36,19 @@ function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
   return true;
 }
 
-// Completed-stage peers remain alive until their pipeline finishes so they can answer cross-stage questions read-only.
+// Completed-stage peers and sibling Forked Leads remain alive until integration finishes so they can answer conflict questions read-only.
 function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean {
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
   if (run.status === "completed" || run.status === "aborted") return false;
   if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];
-    return Boolean(run.status === "running" && pipeline?.status === "running");
+    return Boolean(
+      run.status === "running"
+      && (pipeline?.status === "running"
+        || pipeline?.status === "completed"
+        || (agentRecord.role === "forked_lead" && pipeline?.status === "integrated")),
+    );
   }
   return true;
 }
@@ -75,6 +91,8 @@ export async function handlePermissionRequest(
   }
   const stageActive = stageIsCurrent(run, agentRecord);
   const pipelineRunning = pipelineIsRunningForAgent(run, agentRecord);
+  const finalizingPipeline = isFinalizingForkedLead(run, agentRecord);
+  const pipelineWorktree = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId]?.worktree : undefined;
   answeredRequestIds.add(request.id);
   const decision: PermissionDecision = pipelineRunning
     ? decidePermission(request, {
@@ -86,6 +104,8 @@ export async function handlePermissionRequest(
       stageId: agentRecord.stageId,
       stageActive,
       archived: false,
+      finalizingPipeline,
+      additionalWritableRoots: finalizingPipeline && pipelineWorktree ? [pipelineWorktree] : [],
     })
     : { behavior: "deny", message: "This agent belongs to an archived or inactive pipeline stage." };
   try {

@@ -117,18 +117,15 @@ function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
     !agentRecord.archivedAt
     && agentRecord.role === "master_lead"
     && agentRecord.agentId === run.masterLeadAgentId
-    && ["delegating", "planning", "running", "reporting"].includes(run.status)
+    && !["completed", "aborted"].includes(run.status)
   );
 }
 
-// Verify Supervisor directory misses so archiving the Supervisor in Paseo always cascades to dependent Leads and Peers.
-function isActiveSupervisor(run: Run, agentRecord: AgentRecord): boolean {
-  return (
-    !agentRecord.archivedAt
-    && agentRecord.role === "supervisor"
-    && agentRecord.agentId === run.supervisorAgentId
-    && !["completed", "aborted"].includes(run.status)
-  );
+// Verify Supervisor and Forked Lead directory misses so archiving any parent in Paseo always cascades to its child agents.
+function isActiveParentCoordinator(run: Run, agentRecord: AgentRecord): boolean {
+  if (agentRecord.archivedAt || ["completed", "aborted"].includes(run.status)) return false;
+  if (agentRecord.role === "supervisor") return agentRecord.agentId === run.supervisorAgentId;
+  return agentRecord.role === "forked_lead";
 }
 
 export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
@@ -196,6 +193,7 @@ export class AgentGateway {
       pipelineId: spec.pipelineId ?? null,
       stageId: spec.stageId ?? null,
       stagePeerId: spec.stagePeerId ?? null,
+      parentAgentId: spec.parentAgentId ?? null,
       archivedAt: null,
       token: randomBytes(24).toString("base64url"),
       // Direct stage messages can temporarily defer an agent's normal report obligation.
@@ -340,7 +338,7 @@ export class AgentGateway {
         && (
           isCurrentStageAgent(currentRun, agentRecord)
           || isActiveMasterLead(currentRun, agentRecord)
-          || isActiveSupervisor(currentRun, agentRecord)
+          || isActiveParentCoordinator(currentRun, agentRecord)
           || recipientsWithQueuedMail.has(agentRecord.agentId)
         )
         && !statusByAgentId.has(agentRecord.agentId),

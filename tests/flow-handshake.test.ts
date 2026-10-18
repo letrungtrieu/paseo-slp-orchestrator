@@ -73,6 +73,15 @@ describe("stage coordination", () => {
     await reportPeer(flow, runId, pipelineId, "reviewer", "Retry behavior is now covered.");
     await approveCurrentStage(flow, runId, pipelineId);
     expect(flow.pipeline(runId, pipelineId)!.stages[0].status).toBe("completed");
+    // Peers and Forked Lead stay alive while the pipeline is 'completed' so the Forked Lead can merge and consult peers on conflicts.
+    expect(flow.gateway.archivedAgentIds).not.toContain(reviewerId);
+    expect(flow.gateway.archivedAgentIds).not.toContain(coordinatorId);
+    expect(flow.mailTo(runId, coordinatorId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
+
+    const finalization = await flow.callAs(coordinatorId, "slp_finalize_pipeline", {
+      summary: "Stage changes verified and merged cleanly.",
+    });
+    expect(finalization.isError).toBe(false);
     expect(flow.gateway.archivedAgentIds).toContain(reviewerId);
     expect(flow.gateway.archivedAgentIds).toContain(coordinatorId);
   });

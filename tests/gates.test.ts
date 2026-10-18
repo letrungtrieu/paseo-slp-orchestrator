@@ -16,18 +16,23 @@ describe("Lead-authored dynamic pipeline contract", () => {
         ],
       },
     });
-    expect(envelope.pipeline.stages.map((stage) => stage.name)).toEqual(["review-codebase", "coding", "qa"]);
-    expect(envelope.pipeline.stages[0].peers.map((peer) => peer.role)).toEqual(["reviewer", "developer"]);
-    expect(envelope.pipeline.stages[2].peers[0].role).toBe("qa-engineer");
+    // Single-pipeline envelopes populate pipeline while leaving batch pipelines undefined
+    expect(envelope.pipeline?.stages.map((stage) => stage.name)).toEqual(["review-codebase", "coding", "qa"]);
+    expect(envelope.pipeline?.stages[0].peers.map((peer) => peer.role)).toEqual(["reviewer", "developer"]);
+    expect(envelope.pipeline?.stages[2].peers[0].role).toBe("qa-engineer");
   });
 
-  it("accepts a Lead-supplied systemPrompt but leaves workflow authority to the daemon", () => {
+  it("accepts a Lead-supplied systemPrompt and batch pipelines without explicit worktrees", () => {
     const envelope = PipelineEnvelopeSchema.parse({
       pipeline: { name: "task", version: "1", worktree: ".", description: "Work", stages: [
         { name: "inspect", goal: "Inspect", peers: [{ role: "reviewer", systemPrompt: "untrusted hint", task: "Review" }] },
       ] },
+      pipelines: [
+        { name: "subtask-a", description: "Parallel task A", stages: [{ name: "code", goal: "Build A", peers: [{ role: "developer", task: "Build A" }] }] },
+      ],
     });
-    expect(envelope.pipeline.stages[0].peers[0].systemPrompt).toBe("untrusted hint");
+    expect(envelope.pipeline?.stages[0].peers[0].systemPrompt).toBe("untrusted hint");
+    expect(envelope.pipelines?.[0].worktree).toBeUndefined();
   });
 
   it("models stage approval gates without reintroducing task phases", () => {

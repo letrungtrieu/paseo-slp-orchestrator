@@ -82,6 +82,7 @@ export class FakeAgentGateway {
       pipelineId: spec.pipelineId ?? null,
       stageId: spec.stageId ?? null,
       stagePeerId: spec.stagePeerId ?? null,
+      parentAgentId: spec.parentAgentId ?? null,
       archivedAt: null,
       taskId: spec.taskId,
       token: `token-${agentId}`,

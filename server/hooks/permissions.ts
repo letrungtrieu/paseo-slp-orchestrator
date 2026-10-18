@@ -14,6 +14,10 @@ export interface PermissionContext {
   // False means this agent belongs to an archived or no-longer-current stage.
   stageActive: boolean;
   archived: boolean;
+  // True when a Forked Lead is merging its completed pipeline branch and resolving conflicts.
+  finalizingPipeline?: boolean;
+  // Additional worktree paths (such as the pipeline worktree) writable by a finalizing Forked Lead.
+  additionalWritableRoots?: readonly string[];
 }
 
 export type PermissionDecision =
@@ -69,11 +73,13 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
   if (context.archived || !context.stageActive) return false;
   switch (context.role) {
     case "master_lead":
-      // The Lead owns the integration checkout and is the only agent allowed to merge.
+      // The Master Lead owns the integration checkout.
       return true;
-    case "supervisor":
     case "forked_lead":
-      // Supervisor and Forked Lead coordinate and review; production edits stay with peers or Lead.
+      // Forked Lead stays read-only during stage review, but may write when finalizing its pipeline and resolving conflicts.
+      return Boolean(context.finalizingPipeline);
+    case "supervisor":
+      // Supervisor coordinates and reviews; production edits stay with peers or Leads.
       return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;
@@ -84,12 +90,14 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
 }
 
 function decideFileWrite(request: AgentPermissionRequest, context: PermissionContext): PermissionDecision {
+  const allowedRoots = [context.agentCwd, ...(context.additionalWritableRoots ?? [])];
   for (const writePath of extractWritePaths(request)) {
-    // Paths are resolved against the agent's cwd first so '../' tricks cannot reach another worktree.
+    // Paths are resolved against the agent's cwd first so '../' tricks cannot reach an unauthorized directory.
     const absolutePath = isAbsolute(writePath) ? writePath : resolve(context.agentCwd, writePath);
-    const relativePath = relative(context.agentCwd, absolutePath).replace(/\\/g, "/");
-    const escapesWorktree = relativePath.startsWith("..") || isAbsolute(relativePath);
-    if (escapesWorktree || !roleMayWritePath(context, relativePath)) {
+    const matchingRelativePath = allowedRoots
+      .map((rootPath) => relative(rootPath, absolutePath).replace(/\\/g, "/"))
+      .find((candidateRelative) => !candidateRelative.startsWith("..") && !isAbsolute(candidateRelative));
+    if (matchingRelativePath === undefined || !roleMayWritePath(context, matchingRelativePath)) {
       return {
         behavior: "deny",
         message: `Writing '${writePath}' is not allowed for ${context.role} in stage ${context.stageId ?? "n/a"}. Stay inside your writable scope or use slp_escalate.`,
@@ -113,8 +121,10 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
   const peerMayMutate = context.role === "peer"
     && context.stageActive
     && Boolean(context.pipelineId && context.stageId);
+  const forkedLeadMayMutate = context.role === "forked_lead"
+    && Boolean(context.finalizingPipeline);
   const mayMutate = !context.archived && context.stageActive
-    && (context.role === "master_lead" || peerMayMutate);
+    && (context.role === "master_lead" || peerMayMutate || forkedLeadMayMutate);
   if (!mayMutate && MUTATING_SHELL.test(shellCommand)) {
     return { behavior: "deny", message: `Command looks mutating but ${context.role} is read-only right now.` };
   }

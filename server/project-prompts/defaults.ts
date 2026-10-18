@@ -86,10 +86,32 @@ export function defaultProjectPrompts(): ProjectPromptConfig {
   return { supervisor, lead, peers };
 }
 
+// Built-in End-User UAT aliases allow the Master Lead to spawn a final UAT team even in projects seeded with the 4 standard peer files.
+const BUILTIN_END_USER_UAT_ALIASES = new Set(["end-user", "uat", "uat-tester", "end-user-tester"]);
+
 export function peerRole(config: ProjectPromptConfig | null | undefined, roleId: string): ProjectRole {
   const peers = (config ?? defaultProjectPrompts()).peers;
   const normalizedRoleId = normalizeRoleId(roleId);
   const selectedRole = peers.find((peer) => peer.role === normalizedRoleId);
-  if (!selectedRole) throw new Error(`Unknown project peer role '${roleId}'. Available roles: ${peers.map((peer) => peer.role).join(", ") || "(none)"}`);
-  return selectedRole;
+  if (selectedRole) return selectedRole;
+  if (BUILTIN_END_USER_UAT_ALIASES.has(normalizedRoleId)) {
+    const endUserDescription =
+      "Simulate a real end user to perform final User Acceptance Testing (UAT) across all merged features, verifying end-to-end user journeys, UI behavior, and cross-feature interactions.";
+    return {
+      role: normalizedRoleId,
+      name: "End-User UAT Tester",
+      description: endUserDescription,
+      model: null,
+      thinking: null,
+      sourcePath: ".slp/peers/END_USER_UAT.md",
+      frontMatter: `role: ${normalizedRoleId}\nname: End-User UAT Tester\ndescription: ${endUserDescription}`,
+      workflow: [
+        "Act as a real End User performing final User Acceptance Testing (UAT) on the integrated branch.",
+        "Exercise end-to-end user flows across all merged features together, verify that combined functionality works seamlessly, capture concrete runtime/visual evidence, and report any regressions or usability defects via `slp_stage_report`.",
+        "",
+        DEFAULT_WORKFLOWS.peer.trim(),
+      ].join("\n"),
+    };
+  }
+  throw new Error(`Unknown project peer role '${roleId}'. Available roles: ${peers.map((peer) => peer.role).join(", ") || "(none)"}`);
 }

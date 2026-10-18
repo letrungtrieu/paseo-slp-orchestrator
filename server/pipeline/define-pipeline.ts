@@ -1,52 +1,102 @@
 // Pipeline creation is the boundary where Lead-authored JSON becomes durable orchestration state.
 import { randomUUID } from "node:crypto";
 import {
-  PipelineDefinitionSchema,
+  PipelineInputDefinitionSchema,
   PipelineStateSchema,
   type PipelineDefinition,
+  type PipelineEnvelope,
+  type PipelineInputDefinition,
+  type PipelineState,
 } from "../../shared/pipeline";
 import { peerRole } from "../project-prompts/defaults";
-import { openPipelineWorktree } from "./pipeline-workspaces";
+import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
 import { recoverPipelines } from "./stage-engine";
 import type { PipelineContext } from "./context";
 import { ToolError } from "./tool-error";
 
-// A run-level lock prevents two Lead turns from handing the same branch to overlapping cohorts.
-const definingRuns = new Set<string>();
+// Serialize concurrent pipeline definition calls per run so parallel tool invocations from Master Lead never collide.
+const definingRunLocks = new Map<string, Promise<unknown>>();
+
+async function withRunDefineLock<ResultType>(runId: string, operation: () => Promise<ResultType>): Promise<ResultType> {
+  const previousLock = definingRunLocks.get(runId) ?? Promise.resolve();
+  const currentExecution = previousLock.catch(() => undefined).then(operation);
+  definingRunLocks.set(runId, currentExecution);
+  try {
+    return await currentExecution;
+  } finally {
+    if (definingRunLocks.get(runId) === currentExecution) {
+      definingRunLocks.delete(runId);
+    }
+  }
+}
 
 function pipelineKey(name: string, version: string): string {
   return `${name.trim().toLocaleLowerCase()}\u0000${version.trim()}`;
 }
 
-function validateUniqueNames(ctx: PipelineContext, runId: string, definition: PipelineDefinition): void {
-  const stageNames = new Set<string>();
-  for (const stage of definition.stages) {
-    const normalizedName = stage.name.trim().toLocaleLowerCase();
-    if (stageNames.has(normalizedName)) throw new ToolError(`Stage name '${stage.name}' is duplicated.`);
-    stageNames.add(normalizedName);
+function normalizeInputDefinitions(rawInput: PipelineEnvelope | PipelineInputDefinition): PipelineInputDefinition[] {
+  if ("pipelines" in rawInput || "pipeline" in rawInput) {
+    const collectedDefinitions: PipelineInputDefinition[] = [];
+    if (rawInput.pipeline) collectedDefinitions.push(PipelineInputDefinitionSchema.parse(rawInput.pipeline));
+    if (rawInput.pipelines) {
+      for (const candidateDefinition of rawInput.pipelines) {
+        collectedDefinitions.push(PipelineInputDefinitionSchema.parse(candidateDefinition));
+      }
+    }
+    if (collectedDefinitions.length === 0) {
+      throw new ToolError("Provide 'pipeline' or 'pipelines' to define one or more task pipelines.");
+    }
+    return collectedDefinitions;
   }
-  const requestedKey = pipelineKey(definition.name, definition.version);
-  const duplicate = Object.values(ctx.store.require(runId).pipelines).find(
-    (pipeline) => pipelineKey(pipeline.name, pipeline.version) === requestedKey,
-  );
-  if (duplicate) throw new ToolError(`Pipeline '${definition.name}' version '${definition.version}' already exists.`);
+  return [PipelineInputDefinitionSchema.parse(rawInput)];
 }
 
-function validatePeerRoles(ctx: PipelineContext, runId: string, definition: PipelineDefinition): void {
+function validateUniqueNames(
+  ctx: PipelineContext,
+  runId: string,
+  definitions: readonly PipelineInputDefinition[],
+): void {
+  const existingPipelines = Object.values(ctx.store.require(runId).pipelines);
+  const batchPipelineKeys = new Set<string>();
+  for (const definition of definitions) {
+    const stageNames = new Set<string>();
+    for (const stage of definition.stages) {
+      const normalizedName = stage.name.trim().toLocaleLowerCase();
+      if (stageNames.has(normalizedName)) throw new ToolError(`Stage name '${stage.name}' is duplicated.`);
+      stageNames.add(normalizedName);
+    }
+    const requestedKey = pipelineKey(definition.name, definition.version);
+    const duplicate = existingPipelines.find(
+      (pipeline) => pipelineKey(pipeline.name, pipeline.version) === requestedKey,
+    );
+    if (duplicate || batchPipelineKeys.has(requestedKey)) {
+      throw new ToolError(`Pipeline '${definition.name}' version '${definition.version}' already exists.`);
+    }
+    batchPipelineKeys.add(requestedKey);
+  }
+}
+
+function validatePeerRoles(
+  ctx: PipelineContext,
+  runId: string,
+  definitions: readonly PipelineInputDefinition[],
+): void {
   const run = ctx.store.require(runId);
-  for (const stage of definition.stages) {
-    for (const assignment of stage.peers) {
-      try {
-        // The snapshot is authoritative: arbitrary JSON cannot smuggle an unconfigured workflow.
-        peerRole(run.promptConfig, assignment.role);
-      } catch (roleError) {
-        throw new ToolError(roleError instanceof Error ? roleError.message : String(roleError));
+  for (const definition of definitions) {
+    for (const stage of definition.stages) {
+      for (const assignment of stage.peers) {
+        try {
+          // The snapshot is authoritative: arbitrary JSON cannot smuggle an unconfigured workflow.
+          peerRole(run.promptConfig, assignment.role);
+        } catch (roleError) {
+          throw new ToolError(roleError instanceof Error ? roleError.message : String(roleError));
+        }
       }
     }
   }
 }
 
-function sanitizeDefinition(definition: PipelineDefinition, canonicalWorktree: string): PipelineDefinition {
+function sanitizeDefinition(definition: PipelineInputDefinition, canonicalWorktree: string): PipelineDefinition {
   return {
     ...definition,
     worktree: canonicalWorktree,
@@ -63,16 +113,18 @@ function recheckWorkspaceAndIdentity(
   runId: string,
   definition: PipelineDefinition,
   workspace: { cwd: string; branch: string },
+  pendingBatchPipelines: readonly PipelineState[],
 ): void {
   const run = ctx.store.require(runId);
   // Opening a workspace awaits the daemon; an abort during that call must not resurrect the run.
   if (!["planning", "running"].includes(run.status)) throw new ToolError(`Cannot define a pipeline while run is '${run.status}'.`);
+  const allKnownPipelines = [...Object.values(run.pipelines), ...pendingBatchPipelines];
   const requestedKey = pipelineKey(definition.name, definition.version);
-  const duplicate = Object.values(run.pipelines).find(
+  const duplicate = allKnownPipelines.find(
     (pipeline) => pipelineKey(pipeline.name, pipeline.version) === requestedKey,
   );
   if (duplicate) throw new ToolError(`Pipeline '${definition.name}' version '${definition.version}' already exists.`);
-  const worktreeCollision = Object.values(run.pipelines).find(
+  const worktreeCollision = allKnownPipelines.find(
     (pipeline) => !["integrated", "failed"].includes(pipeline.status)
       && (pipeline.worktree === workspace.cwd || pipeline.branch === workspace.branch),
   );
@@ -82,97 +134,133 @@ function recheckWorkspaceAndIdentity(
 export async function definePipeline(
   ctx: PipelineContext,
   runId: string,
-  rawDefinition: PipelineDefinition,
+  rawInput: PipelineEnvelope | PipelineInputDefinition,
 ): Promise<string> {
-  if (definingRuns.has(runId)) throw new ToolError("Another pipeline definition is already being prepared for this run.");
-  definingRuns.add(runId);
-  try {
+  return withRunDefineLock(runId, async () => {
     const run = ctx.store.require(runId);
     if (!["planning", "running"].includes(run.status)) {
       throw new ToolError(`Cannot define a pipeline while run is '${run.status}'.`);
     }
-    const definition = PipelineDefinitionSchema.parse(rawDefinition);
-    validateUniqueNames(ctx, runId, definition);
-    validatePeerRoles(ctx, runId, definition);
+    const definitions = normalizeInputDefinitions(rawInput);
+    validateUniqueNames(ctx, runId, definitions);
+    validatePeerRoles(ctx, runId, definitions);
 
-    // Worktree validation resolves relative paths, repository ownership and the current branch
-    // before any pipeline record can claim the checkout.
-    const workspace = await openPipelineWorktree(ctx, run, definition.worktree);
-    const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd);
-    recheckWorkspaceAndIdentity(ctx, runId, sanitizedDefinition, workspace);
-    const pipelineId = randomUUID();
-    const createdAt = new Date().toISOString();
-    const pipeline = PipelineStateSchema.parse({
-      ...sanitizedDefinition,
-      id: pipelineId,
-      status: "queued",
-      currentStageIndex: 0,
-      workspaceId: workspace.workspaceId,
-      branch: workspace.branch,
-      baseCommit: workspace.baseCommit,
-      stages: sanitizedDefinition.stages.map((stage) => ({
-        ...stage,
-        id: randomUUID(),
-        status: "pending",
-        forkedLeadAgentId: null,
-        peerAgentIds: [],
-        reports: [],
-        messages: [],
-        result: null,
-        startedAt: null,
-        completedAt: null,
-      })),
-      pausedReason: null,
-      createdAt,
-      updatedAt: createdAt,
-      finalReport: null,
-      gate: null,
-      mergedCommit: null,
-      integratedAt: null,
-    });
-    ctx.store.mutate(runId, (mutableRun) => {
-      // External worktrees are never treated as plugin-owned cleanup targets; a previously
-      // created slp worktree retains its ownership record from slp_create_worktree.
-      if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
-        mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
+    const preparedPipelines: Array<{
+      pipeline: PipelineState;
+      workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
+    }> = [];
+
+    for (const definition of definitions) {
+      // Automatically provision a dedicated Git worktree when the Master Lead omits worktree during task decomposition.
+      let requestedWorktreePath = definition.worktree?.trim() ?? "";
+      if (!requestedWorktreePath) {
+        const autoCreatedPayload = JSON.parse(
+          await createPipelineWorktree(ctx, runId, definition.name),
+        ) as { cwd: string };
+        requestedWorktreePath = autoCreatedPayload.cwd;
       }
-      mutableRun.pipelines[pipelineId] = pipeline;
+      const latestRun = ctx.store.require(runId);
+      const workspace = await openPipelineWorktree(ctx, latestRun, requestedWorktreePath);
+      const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd);
+      recheckWorkspaceAndIdentity(
+        ctx,
+        runId,
+        sanitizedDefinition,
+        workspace,
+        preparedPipelines.map((entry) => entry.pipeline),
+      );
+      const pipelineId = randomUUID();
+      const createdAt = new Date().toISOString();
+      const pipeline = PipelineStateSchema.parse({
+        ...sanitizedDefinition,
+        id: pipelineId,
+        status: "queued",
+        currentStageIndex: 0,
+        workspaceId: workspace.workspaceId,
+        branch: workspace.branch,
+        baseCommit: workspace.baseCommit,
+        stages: sanitizedDefinition.stages.map((stage) => ({
+          ...stage,
+          id: randomUUID(),
+          status: "pending",
+          forkedLeadAgentId: null,
+          peerAgentIds: [],
+          reports: [],
+          messages: [],
+          result: null,
+          startedAt: null,
+          completedAt: null,
+        })),
+        pausedReason: null,
+        createdAt,
+        updatedAt: createdAt,
+        finalReport: null,
+        gate: null,
+        mergedCommit: null,
+        integratedAt: null,
+      });
+      preparedPipelines.push({ pipeline, workspace });
+    }
+
+    ctx.store.mutate(runId, (mutableRun) => {
+      for (const { pipeline, workspace } of preparedPipelines) {
+        // External worktrees are never treated as plugin-owned cleanup targets; a previously
+        // created slp worktree retains its ownership record from slp_create_worktree.
+        if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
+          mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
+        }
+        mutableRun.pipelines[pipeline.id] = pipeline;
+      }
       mutableRun.status = "running";
       const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
-      if (masterLeadRecord?.awaitingTool === "slp_define_pipeline") {
+      // Clear either initial planning (slp_define_pipeline) or post-integration (slp_report) obligation when spawning new or UAT pipelines.
+      if (masterLeadRecord?.awaitingTool === "slp_define_pipeline" || masterLeadRecord?.awaitingTool === "slp_report") {
         masterLeadRecord.awaitingTool = null;
         masterLeadRecord.awaitingSince = null;
         masterLeadRecord.nudges = 0;
       }
-      // Drop any undelivered delegation or reminder mail still demanding slp_define_pipeline once a pipeline exists.
+      // Drop any undelivered delegation, integration handover or reminder mail once new pipelines are running.
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) =>
-          !(queuedMessage.toAgentId === mutableRun.masterLeadAgentId && queuedMessage.awaitTool === "slp_define_pipeline"),
+          !(
+            queuedMessage.toAgentId === mutableRun.masterLeadAgentId
+            && (queuedMessage.awaitTool === "slp_define_pipeline" || queuedMessage.awaitTool === "slp_report")
+          ),
       );
     });
-    ctx.logEvent(runId, {
-      taskId: null,
-      from: "master_lead",
-      to: "pipeline",
-      kind: "pipeline.defined",
-      summary: `${pipeline.name} v${pipeline.version} (${pipeline.stages.length} stages)`,
-      outcome: "delivered",
-    });
-    // The definition tool returns before native forks and peer sessions are allocated.
+
+    for (const { pipeline } of preparedPipelines) {
+      ctx.logEvent(runId, {
+        taskId: null,
+        from: "master_lead",
+        to: "pipeline",
+        kind: "pipeline.defined",
+        summary: `${pipeline.name} v${pipeline.version} (${pipeline.stages.length} stages)`,
+        outcome: "delivered",
+      });
+    }
+    // Spawn a dedicated Forked Lead for each defined pipeline and run all pipelines concurrently.
     void recoverPipelines(ctx, runId).catch((recoveryError) => {
-      console.error(`[slp] pipeline ${pipelineId} startup failed`, recoveryError);
+      console.error(`[slp] pipeline startup failed for run ${runId}`, recoveryError);
     });
-    return JSON.stringify({
-      pipelineId,
+
+    const createdSummaries = preparedPipelines.map(({ pipeline }) => ({
+      pipelineId: pipeline.id,
       name: pipeline.name,
       version: pipeline.version,
       worktree: pipeline.worktree,
       branch: pipeline.branch,
       workspaceId: pipeline.workspaceId,
       status: pipeline.status,
-      message: "Pipeline saved. Define any further independent pipelines, then end your turn so stage coordinators can start.",
+    }));
+    const firstSummary = createdSummaries[0];
+    return JSON.stringify({
+      ...firstSummary,
+      pipelineIds: createdSummaries.map((summary) => summary.pipelineId),
+      pipelines: createdSummaries,
+      message: createdSummaries.length === 1
+        ? "Pipeline saved. Define any further independent pipelines, then end your turn so stage coordinators can start."
+        : `${createdSummaries.length} parallel task pipelines saved. End your turn so each Forked Lead can start its assigned task concurrently.`,
     });
-  } finally {
-    definingRuns.delete(runId);
-  }
+  });
 }

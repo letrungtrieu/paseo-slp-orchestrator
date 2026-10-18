@@ -19,6 +19,8 @@ export const AgentRecordSchema = z.object({
   pipelineId: z.string().nullable().default(null),
   stageId: z.string().nullable().default(null),
   stagePeerId: z.string().nullable().default(null),
+  // Explicit parent agent reference enables recursive bottom-up archival across separate Paseo worktrees.
+  parentAgentId: z.string().nullable().default(null),
   archivedAt: z.string().nullable().default(null),
   projectRole: z.string().nullable().default(null),
   // Only additional peers use this explicit grant; primary agents derive access from their pipeline assignment.

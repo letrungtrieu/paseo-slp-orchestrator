@@ -4,13 +4,13 @@ export function supervisorBriefing(): string {
 }
 
 export function delegationMessage(acceptanceCriteria: string): string {
-  // The Lead creates worktrees explicitly and passes their actual returned paths into pipeline definitions.
-  return `The Supervisor delegated this project.\nAcceptance criteria:\n${acceptanceCriteria}\nSurvey the project and available .slp peer roles. Design the stage sequence needed for each work package. Use slp_create_worktree, then call slp_define_pipeline with {pipeline:{name,version,worktree,description,stages:[{name,goal,peers:[{role,task}]}]}}. Use any stage names and project roles the work needs. Peers in a stage are equal participants; its Forked Lead decides completion. Define further independent pipelines if useful, then end your turn. Store all plans and reports through tools, without runtime files.`;
+  // The Master Lead decomposes the spec into one or more parallel task pipelines; each pipeline forks a dedicated Forked Lead.
+  return `The Supervisor delegated this project.\nAcceptance criteria:\n${acceptanceCriteria}\nSurvey the project and available .slp peer roles. Decompose the specification into independent parallel tasks/workstreams whenever possible. Call slp_define_pipeline with {pipelines:[{name,version,worktree?,description,stages:[{name,goal,peers:[{role,task}]}]}]} (or call slp_create_worktree + slp_define_pipeline for each task; if 'worktree' is omitted, an isolated worktree is created automatically). Each defined pipeline forks you into a dedicated Forked Lead that coordinates its assigned task's stages in parallel, resolves conflicts, and merges its branch into integration. Once defined, end your turn. Store all plans and reports through tools, without runtime files.`;
 }
 
 export function reportForSupervisor(summary: string, baseBranch: string, integrationBranch: string): string {
-  // The Supervisor verifies evidence from every integrated pipeline before offering the final human approval.
-  return `The Lead reports the defined pipelines integrated into ${integrationBranch}:\n${summary}\nRead slp_list_pipelines and slp_get_pipeline, inspect git diff ${baseBranch}...${integrationBranch}, and independently verify acceptance criteria. If satisfied call slp_present_to_manager; otherwise slp_request_rework. Only the human approves merging into ${baseBranch}.`;
+  // Calling slp_present_to_manager automatically merges integrationBranch into baseBranch when the base checkout is clean.
+  return `The Lead reports the defined pipelines integrated into ${integrationBranch}:\n${summary}\nRead slp_list_pipelines and slp_get_pipeline, inspect git diff ${baseBranch}...${integrationBranch}, and independently verify acceptance criteria. If satisfied call slp_present_to_manager (which automatically merges ${integrationBranch} into ${baseBranch} and completes the run); otherwise call slp_request_rework.`;
 }
 
 export function reworkNotice(feedback: string): string {
@@ -21,8 +21,8 @@ export function reworkNotice(feedback: string): string {
 const TOP_LEVEL_NUDGE_GUIDANCE: Readonly<Record<string, string>> = {
   slp_define_pipeline: "Inspect slp_get_run, create a pipeline worktree with slp_create_worktree if needed, and call slp_define_pipeline.",
   slp_resume_pipeline: "Inspect slp_get_pipeline for the paused pipeline and call slp_resume_pipeline with your recovery decision.",
-  slp_finalize_pipeline: "Inspect slp_get_pipeline for the completed pipeline, verify its worktree, and call slp_finalize_pipeline.",
-  slp_report: "Inspect slp_list_pipelines, verify the integrated branch, and call slp_report to hand the result to the Supervisor.",
+  slp_finalize_pipeline: "Inspect slp_get_pipeline for the completed pipeline, verify its worktree (resolving any conflicts by consulting Peers or sibling Forked Leads via slp_send_peer_message), and call slp_finalize_pipeline.",
+  slp_report: "Inspect slp_list_pipelines, verify the integrated branch (or spawn a final End-User UAT pipeline with slp_create_worktree + slp_define_pipeline if needed), and call slp_report to hand the result to the Supervisor.",
   slp_present_to_manager: "Inspect slp_list_pipelines, slp_get_pipeline and git diff, then call slp_present_to_manager if accepted or slp_request_rework if changes are needed.",
 };
 

@@ -7,11 +7,10 @@ import { PipelineEnvelopeSchema, StageReportSubmissionSchema } from "../../share
 const pipelineIdField = z.string().trim().min(1).describe("Id of the target pipeline");
 
 export const BUS_TOOL_DEFINITIONS = {
-  // The Lead submits the complete ordered graph in one call so stages stay model-authored and
-  // the daemon never silently inserts a fixed role sequence.
+  // The Master Lead can submit one pipeline or an array of parallel task pipelines (each spawning its own Forked Lead).
   slp_define_pipeline: {
     roles: ["master_lead"],
-    description: "Define an ordered pipeline with one or more peers per stage. Role workflows are loaded from the project's .slp files.",
+    description: "Define one or more parallel task pipelines (via 'pipeline' or 'pipelines'). Each pipeline spawns a dedicated Forked Lead and auto-creates a worktree if 'worktree' is omitted.",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -29,10 +28,11 @@ export const BUS_TOOL_DEFINITIONS = {
     description: "Create a worktree for the current run or pipeline and return its path and branch.",
     input: z.object({ name: z.string().trim().min(1) }),
   },
+  // Either the pipeline's Forked Lead or the Master Lead can finalize and merge the completed pipeline branch.
   slp_finalize_pipeline: {
-    roles: ["master_lead"],
-    description: "Finalize a completed pipeline after verifying and integrating its worktree.",
-    input: z.object({ pipelineId: pipelineIdField, summary: z.string().trim().min(1) }),
+    roles: ["forked_lead", "master_lead"],
+    description: "Finalize a completed pipeline after verifying and merging its worktree branch into the integration branch.",
+    input: z.object({ pipelineId: pipelineIdField.optional(), summary: z.string().trim().min(1) }),
   },
   slp_resume_pipeline: {
     roles: ["master_lead"],
@@ -41,7 +41,7 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   slp_send_peer_message: {
     roles: ["forked_lead", "peer"],
-    description: "Send a direct message to a peer in the same stage; the message is recorded in stage history.",
+    description: "Send a direct message to a peer in the pipeline or another Forked Lead to clarify implementation or merge conflicts.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       message: z.string().trim().min(1),
