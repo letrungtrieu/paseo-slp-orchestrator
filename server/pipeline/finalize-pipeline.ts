@@ -238,7 +238,7 @@ export async function finalizePipeline(
       mutablePipeline.pausedReason = null;
       mutablePipeline.gate = null;
       mutablePipeline.updatedAt = integratedAt;
-      // Clear any remaining obligation on this pipeline's agents now that integration succeeded.
+      // Clear any remaining obligation and queued mail on this pipeline's agents now that integration succeeded.
       for (const agentRecord of Object.values(mutableRun.agents)) {
         if (agentRecord.pipelineId !== pipelineId) continue;
         agentRecord.awaitingTool = null;
@@ -247,6 +247,9 @@ export async function finalizePipeline(
         agentRecord.waitingForAgentId = null;
         agentRecord.deferredTool = null;
       }
+      mutableRun.mailbox = mutableRun.mailbox.filter(
+        (queuedMessage) => mutableRun.agents[queuedMessage.toAgentId]?.pipelineId !== pipelineId,
+      );
       allIntegrated = Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
       if (mutableRun.status === "running" && allIntegrated) {
         if (caller.role === "forked_lead") {
@@ -255,11 +258,11 @@ export async function finalizePipeline(
             stageMail(mutableRun.masterLeadAgentId, masterLeadIntegrationHandover(mutableRun), "slp_report"),
           );
         } else {
-          // Stamp slp_report directly on the calling Master Lead instead of sending a self-mail that wastes an extra turn.
+          // Stamp slp_report directly on the calling Master Lead while keeping its active turn timestamp so turn_ended nudges if omitted.
           const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
           if (masterLeadRecord) {
             masterLeadRecord.awaitingTool = "slp_report";
-            masterLeadRecord.awaitingSince = integratedAt;
+            masterLeadRecord.awaitingSince = masterLeadRecord.awaitingSince ?? integratedAt;
             masterLeadRecord.nudges = 0;
           }
         }

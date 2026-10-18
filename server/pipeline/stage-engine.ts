@@ -57,7 +57,38 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
   if (advancingPipelines.has(operationKey)) return;
   advancingPipelines.add(operationKey);
   try {
-    const pipeline = requirePipeline(ctx.store.require(runId), pipelineId);
+    const initialRun = ctx.store.require(runId);
+    const pipeline = requirePipeline(initialRun, pipelineId);
+    if (pipeline.status === "completed" && !pipeline.gate && initialRun.status === "running") {
+      const finalCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId ?? null;
+      const liveStatuses = await ctx.gateway.liveStatuses(runId);
+      const isFinalCoordinatorDead = !finalCoordinatorId
+        || Boolean(ctx.store.require(runId).agents[finalCoordinatorId]?.archivedAt)
+        || Boolean(liveStatuses.get(finalCoordinatorId)?.archived);
+      // If a completed pipeline's Forked Lead was archived before merging, hand its slp_finalize_pipeline duty to Master Lead.
+      if (isFinalCoordinatorDead) {
+        ctx.store.mutate(runId, (mutableRun) => {
+          const mutablePipeline = requirePipeline(mutableRun, pipelineId);
+          if (mutablePipeline.status !== "completed" || mutablePipeline.gate) return;
+          if (finalCoordinatorId && mutableRun.agents[finalCoordinatorId]) {
+            mutableRun.agents[finalCoordinatorId].archivedAt ??= new Date().toISOString();
+          }
+          mutableRun.mailbox = mutableRun.mailbox.filter(
+            (queuedMessage) => !(queuedMessage.toAgentId === finalCoordinatorId && queuedMessage.awaitTool === "slp_finalize_pipeline"),
+          );
+          const masterLeadId = mutableRun.masterLeadAgentId;
+          const masterLeadRecord = mutableRun.agents[masterLeadId];
+          const masterLeadAlreadyFinalizing = masterLeadRecord?.awaitingTool === "slp_finalize_pipeline"
+            || mutableRun.mailbox.some((queuedMessage) => queuedMessage.toAgentId === masterLeadId && queuedMessage.awaitTool === "slp_finalize_pipeline");
+          if (masterLeadId && !masterLeadAlreadyFinalizing) {
+            mutableRun.mailbox.push(
+              stageMail(masterLeadId, pipelineFinalizationBriefing(mutableRun, mutablePipeline), "slp_finalize_pipeline"),
+            );
+          }
+        });
+      }
+      return;
+    }
     if (["paused", "completed", "integrated", "failed"].includes(pipeline.status)) return;
     const stage = pipeline.stages[pipeline.currentStageIndex];
     if (!stage) throw new Error("Pipeline has no current stage.");

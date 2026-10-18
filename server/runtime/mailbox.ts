@@ -30,11 +30,26 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   if (!agentRecord.pipelineId && !agentRecord.stageId) return true;
   if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
-  const currentStage = pipeline?.stages[pipeline.currentStageIndex];
+  if (!pipeline || run.status !== "running") return false;
+  // A completed pipeline's Forked Lead and Peers stay active to run slp_finalize_pipeline and answer merge-conflict questions.
+  if (pipeline.status === "completed" && !pipeline.gate) {
+    return true;
+  }
+  // An integrated pipeline's Forked Lead stays active while sibling pipelines are still running so it can answer cross-pipeline conflict questions.
+  if (pipeline.status === "integrated" && agentRecord.role === "forked_lead") {
+    return true;
+  }
+  const currentStage = pipeline.stages[pipeline.currentStageIndex];
   // Closed or paused cohorts must not receive late reports or direct messages.
-  return pipeline?.status === "running"
-    && currentStage?.id === agentRecord.stageId
-    && currentStage.status === "running";
+  if (pipeline.status !== "running" || currentStage?.status !== "running") return false;
+  if (currentStage.id === agentRecord.stageId) return true;
+  // Prior-stage peers remain alive across stages in a running pipeline so active stage participants can consult them via slp_send_peer_message.
+  if (agentRecord.role === "peer") {
+    return pipeline.stages
+      .slice(0, pipeline.currentStageIndex)
+      .some((priorStage) => priorStage.id === agentRecord.stageId && priorStage.peerAgentIds.includes(recipientId));
+  }
+  return false;
 }
 
 export class Mailbox {

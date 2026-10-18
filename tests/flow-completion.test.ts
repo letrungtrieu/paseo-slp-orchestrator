@@ -36,6 +36,10 @@ describe("pipeline completion and integration", () => {
       expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
     }
     expect(flow.mailTo(runId, finalForkedLeadId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
+    // Flushing the mailbox must deliver slp_finalize_pipeline to the Forked Lead while pipeline.status is 'completed'.
+    const deliveredFinalizeCount = await flow.deliverMail(runId);
+    expect(deliveredFinalizeCount).toBeGreaterThanOrEqual(1);
+    expect(flow.run(runId).agents[finalForkedLeadId].awaitingTool).toBe("slp_finalize_pipeline");
 
     const finalization = await flow.callAs(finalForkedLeadId, "slp_finalize_pipeline", {
       summary: "Forked Lead verified and merged the completed pipeline.",
@@ -145,12 +149,14 @@ describe("pipeline completion and integration", () => {
       waitForReply: true,
     });
     expect(askOwnPeer.isError).toBe(false);
+    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
     const peerReply = await flow.callAs(secondDeveloperPeerId, "slp_send_peer_message", {
       toAgentId: secondForkedLeadId,
       message: "Billing needs billing enabled; we can combine it as mode=auth+billing.",
       waitForReply: false,
     });
     expect(peerReply.isError).toBe(false);
+    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
 
     const askSiblingLead = await flow.callAs(secondForkedLeadId, "slp_send_peer_message", {
       toAgentId: firstForkedLeadId,
@@ -158,12 +164,14 @@ describe("pipeline completion and integration", () => {
       waitForReply: true,
     });
     expect(askSiblingLead.isError).toBe(false);
+    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
     const siblingLeadReply = await flow.callAs(firstForkedLeadId, "slp_send_peer_message", {
       toAgentId: secondForkedLeadId,
       message: "Confirmed, mode=auth+billing preserves auth behavior.",
       waitForReply: false,
     });
     expect(siblingLeadReply.isError).toBe(false);
+    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
 
     // Second Forked Lead resolves the conflict in its worktree by merging integrationBranch and committing the combined config.
     const integrationBranch = flow.run(runId).integrationBranch;
