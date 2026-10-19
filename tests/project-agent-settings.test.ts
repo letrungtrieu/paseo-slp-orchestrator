@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
+import { buildModelSelectOptions, filterSelectOptions } from "../client/models/provider-selection";
+import type { ProviderModelChoice } from "../client/use-provider-catalog";
 import { defaultProjectPrompts } from "../server/project-prompts/defaults";
 import { parseRoleMarkdown } from "../server/project-prompts/markdown";
 import { resolveAgentSettings } from "../server/project-prompts/agent-settings";
@@ -67,3 +69,45 @@ describe("project model and thinking overrides", () => {
       .toThrow(/\.slp\/peers\/QA_ENGINEER.md: model switches/);
   });
 });
+
+describe("model picker options and search", () => {
+  const sampleCatalogChoices: ProviderModelChoice[] = [
+    {
+      value: "claude/claude-opus-5-5",
+      label: "Opus 5.5",
+      detail: "Claude · claude/claude-opus-5-5",
+      model: { provider: "claude", id: "claude-opus-5-5", label: "Opus 5.5" },
+    },
+    {
+      value: "codex/gpt-6-luna",
+      label: "GPT-6-Luna",
+      detail: "Codex · codex/gpt-6-luna",
+      model: { provider: "codex", id: "gpt-6-luna", label: "GPT-6-Luna", aliases: ["luna-latest"] },
+    },
+  ];
+
+  // Showing the `Provider · provider/model` subtitle lets operators distinguish models that share a short display name.
+  it("includes provider and full provider/model code in each model option", () => {
+    const selectOptions = buildModelSelectOptions(sampleCatalogChoices);
+    expect(selectOptions[1]).toEqual({
+      value: "codex/gpt-6-luna",
+      label: "GPT-6-Luna",
+      detail: "Codex · codex/gpt-6-luna",
+      keywords: ["codex", "gpt-6-luna", "luna-latest"],
+    });
+  });
+
+  // Operators search by full `provider/model` code, raw model ID, provider name, or multi-word combinations.
+  it.each([
+    ["codex/gpt-6-luna", ["codex/gpt-6-luna"]],
+    ["gpt-6-luna", ["codex/gpt-6-luna"]],
+    ["codex", ["codex/gpt-6-luna"]],
+    ["codex luna", ["codex/gpt-6-luna"]],
+    ["luna-latest", ["codex/gpt-6-luna"]],
+    ["claude opus 5.5", ["claude/claude-opus-5-5"]],
+  ])("matches model options for search query %j", (searchQuery, expectedValues) => {
+    const selectOptions = buildModelSelectOptions(sampleCatalogChoices);
+    expect(filterSelectOptions(selectOptions, searchQuery).map((option) => option.value)).toEqual(expectedValues);
+  });
+});
+

@@ -3,6 +3,7 @@ import type { BusCaller } from "../bus/http-mcp";
 import type { PipelineState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import { currentBranchName, runGit } from "../git/git";
+import { retireIntegratedPipelineWorkspace } from "./agent-hierarchy";
 import type { PipelineContext } from "./context";
 import { requirePipeline } from "./stage-context";
 import { stageMail } from "./stage-mail";
@@ -227,6 +228,8 @@ export async function finalizePipeline(
         await ctx.gateway.archive(coordinatorRecord.agentId).catch(() => undefined);
       }
     }
+    // Clean up the merged pipeline's owned worktree and delete its local slp/* branch immediately so temporary branches never persist or get pushed.
+    await retireIntegratedPipelineWorkspace(ctx, runId, pipelineId, willAllPipelinesBeIntegrated);
     const integratedAt = new Date().toISOString();
     let allIntegrated = false;
     ctx.store.mutate(runId, (mutableRun) => {

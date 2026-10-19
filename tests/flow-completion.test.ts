@@ -49,10 +49,17 @@ describe("pipeline completion and integration", () => {
     expect(flow.gateway.archivedAgentIds).toContain(finalForkedLeadId);
   });
 
-  it("accepts and integrates a completed Lead-authored pipeline", async () => {
+  it("accepts and integrates a completed Lead-authored pipeline and deletes its local slp/* branch after merge", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const definition: PipelineDefinition = { ...DEFAULT_PIPELINE, name: "integrated-pipeline" };
     const { runId, pipelineId } = await startedRunWithPipeline(flow, definition);
+    const activePipelineBranch = flow.pipeline(runId, pipelineId)!.branch!;
+    // While the pipeline is running, its slp/* branch is bound to a non-pushable local remote so it cannot be pushed to origin.
+    const configuredPushRemote = execFileSync("git", ["config", `branch.${activePipelineBranch}.pushRemote`], {
+      cwd: flow.repoPath,
+      encoding: "utf8",
+    }).trim();
+    expect(configuredPushRemote).toBe("slp-local-only");
     commitPipelineWork(flow, runId, pipelineId);
     await completePipeline(flow, runId, pipelineId);
 
@@ -64,6 +71,12 @@ describe("pipeline completion and integration", () => {
     expect(flow.pipeline(runId, pipelineId)).toMatchObject({ status: "integrated", finalReport: "All declared stages were approved and integrated." });
     expect(flow.run(runId).agents[flow.run(runId).masterLeadAgentId].awaitingTool).toBe("slp_report");
     expect(flow.mailTo(runId, flow.run(runId).masterLeadAgentId)).toEqual([]);
+    // Once finalized, the temporary local slp/* branch and worktree are removed so only the merged base branch remains.
+    const remainingSlpBranches = execFileSync("git", ["branch", "--list", "slp/*"], {
+      cwd: flow.repoPath,
+      encoding: "utf8",
+    }).trim();
+    expect(remainingSlpBranches).toBe("");
   });
 
   it("rejects integration until every declared stage is approved", async () => {
@@ -313,6 +326,9 @@ describe("pipeline completion and integration", () => {
     await completePipeline(flow, runId, apiPipelineId);
     await completePipeline(flow, runId, uiPipelineId);
 
+    // Simulate an extra local slp/<runId8>/* helper branch created during the run to verify full cleanup after merge.
+    execFileSync("git", ["branch", `slp/${runId.slice(0, 8)}/temporary-helper`], { cwd: flow.repoPath });
+
     const [apiMergeResult, uiMergeResult] = await Promise.all([
       flow.callAs(apiStage1LeadId, "slp_finalize_pipeline", { summary: "API task verified and merged." }),
       flow.callAs(uiStage1LeadId, "slp_finalize_pipeline", { summary: "UI task verified and merged." }),
@@ -321,5 +337,10 @@ describe("pipeline completion and integration", () => {
     expect(uiMergeResult.isError).toBe(false);
     expect(flow.pipeline(runId, apiPipelineId)?.status).toBe("integrated");
     expect(flow.pipeline(runId, uiPipelineId)?.status).toBe("integrated");
+    const remainingLocalSlpBranches = execFileSync("git", ["branch", "--list", "slp/*"], {
+      cwd: flow.repoPath,
+      encoding: "utf8",
+    }).trim();
+    expect(remainingLocalSlpBranches).toBe("");
   });
 });

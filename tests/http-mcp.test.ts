@@ -276,9 +276,11 @@ describe("Antigravity stdio MCP bridge", () => {
       });
       const updatedConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
       expect(updatedConfig.mcpServers.codegraph).toEqual({ command: "codegraph", args: ["serve", "--mcp"] });
+      // Wrapping with /usr/bin/env guarantees ELECTRON_RUN_AS_NODE=1 when Paseo's execPath is an Electron binary.
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME]).toMatchObject({
-        command: "/usr/local/bin/node",
-        args: [bridgeScriptPath],
+        command: "/usr/bin/env",
+        args: ["ELECTRON_RUN_AS_NODE=1", "/usr/local/bin/node", bridgeScriptPath],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
       });
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_delegate).toEqual({ eager: true });
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_stage_report).toEqual({ eager: true });

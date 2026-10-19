@@ -114,8 +114,8 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
   if (DAEMON_BYPASS.test(shellCommand)) {
     return { behavior: "deny", message: "Do not drive the Paseo daemon or CLI; use the slp_ bus tools." };
   }
-  // The pipeline merges locally; a push would publish unreviewed work outside the human gate.
-  if (/\bgit\s+push\b/.test(shellCommand)) {
+  // The pipeline merges locally and deletes temporary slp/* branches after merge; pushing from an agent is never allowed.
+  if (/\bgit\b(?:\s+-\S+(?:\s+\S+)?)*\s+push\b/.test(shellCommand)) {
     return { behavior: "deny", message: "Pushing is not part of the pipeline." };
   }
   const peerMayMutate = context.role === "peer"

@@ -94,3 +94,49 @@ export function materializeRoleDefaults(
   }
   return completedSelections;
 }
+
+export interface SelectOption {
+  value: string;
+  label: string;
+  detail?: string;
+  keywords?: readonly string[];
+}
+
+// Keep provider label, `provider/model` code, raw model ID and aliases attached to each option
+// so the modal displays the exact model code (e.g. `codex/gpt-6-luna`) and search matches any part of it.
+export function buildModelSelectOptions(
+  modelChoices: readonly ProviderModelChoice[],
+): SelectOption[] {
+  return modelChoices.map((modelChoice) => ({
+    value: modelChoice.value,
+    label: modelChoice.label,
+    detail: modelChoice.detail,
+    keywords: [
+      modelChoice.model.provider,
+      modelChoice.model.id,
+      ...(modelChoice.model.aliases ?? []),
+    ],
+  }));
+}
+
+// Match every whitespace-separated search term against the combined label, `provider/model` code,
+// detail line and aliases so queries like `codex/gpt-6-luna`, `gpt-6-luna` or `codex luna` all succeed.
+export function filterSelectOptions(
+  availableOptions: readonly SelectOption[],
+  rawSearchQuery: string,
+): readonly SelectOption[] {
+  const searchTerms = rawSearchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (searchTerms.length === 0) return availableOptions;
+  return availableOptions.filter((candidateOption) => {
+    const searchableOptionText = [
+      candidateOption.label,
+      candidateOption.value,
+      candidateOption.detail ?? "",
+      ...(candidateOption.keywords ?? []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return searchTerms.every((searchTerm) => searchableOptionText.includes(searchTerm));
+  });
+}
+

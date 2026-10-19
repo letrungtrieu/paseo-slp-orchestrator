@@ -87,3 +87,82 @@ export async function mergeIntegrationIntoBase(
   }
   return (await runGit(repoPath, ["rev-parse", "HEAD"])).trim();
 }
+
+const LOCAL_ONLY_PIPELINE_REMOTE = "slp-local-only";
+const LOCAL_ONLY_PIPELINE_REMOTE_URL = "/dev/null/slp-temporary-branch-do-not-push";
+
+// Bind a pipeline branch to a non-pushable pseudo-remote so accidental `git push` calls fail locally instead of publishing temporary branches.
+export async function configureLocalOnlyPipelineBranch(
+  repoPath: string,
+  pipelineBranchName: string,
+): Promise<void> {
+  await runGit(repoPath, ["config", `remote.${LOCAL_ONLY_PIPELINE_REMOTE}.url`, LOCAL_ONLY_PIPELINE_REMOTE_URL]).catch(() => undefined);
+  await runGit(repoPath, ["config", `remote.${LOCAL_ONLY_PIPELINE_REMOTE}.pushurl`, LOCAL_ONLY_PIPELINE_REMOTE_URL]).catch(() => undefined);
+  await runGit(repoPath, ["config", `branch.${pipelineBranchName}.pushRemote`, LOCAL_ONLY_PIPELINE_REMOTE]).catch(() => undefined);
+}
+
+export interface WorktreeAndBranchCleanupOptions {
+  worktreePath?: string | null;
+  branchName?: string | null;
+  protectedWorktrees?: readonly string[];
+  protectedBranches?: readonly string[];
+}
+
+// Unregister a temporary pipeline worktree before deleting its local branch because Git refuses to delete a branch checked out in an active worktree.
+export async function removeWorktreeAndDeleteBranch(
+  repoPath: string,
+  cleanupOptions: WorktreeAndBranchCleanupOptions,
+): Promise<void> {
+  const protectedWorktreeSet = new Set(
+    [repoPath, ...(cleanupOptions.protectedWorktrees ?? [])].filter((candidatePath): candidatePath is string => Boolean(candidatePath)),
+  );
+  const targetWorktreePath = cleanupOptions.worktreePath?.trim() || null;
+  if (targetWorktreePath && !protectedWorktreeSet.has(targetWorktreePath)) {
+    // Force-remove the worktree checkout if Paseo has not already removed it, then prune stale git worktree administrative entries.
+    await runGit(repoPath, ["worktree", "remove", "--force", targetWorktreePath]).catch(() => undefined);
+    await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+  }
+  const protectedBranchSet = new Set(
+    (cleanupOptions.protectedBranches ?? []).filter((candidateBranch): candidateBranch is string => Boolean(candidateBranch)),
+  );
+  const targetBranchName = cleanupOptions.branchName?.trim() || null;
+  if (targetBranchName && !protectedBranchSet.has(targetBranchName)) {
+    // Delete the merged local pipeline branch so temporary slp/* branches never accumulate locally or get pushed to remote.
+    await runGit(repoPath, ["branch", "-D", targetBranchName]).catch(() => undefined);
+  }
+}
+
+// Sweep all local `slp/<runId8>/*` branches belonging to a run unless explicitly preserved for a still-active pipeline or base branch.
+export async function deleteRunLocalPipelineBranches(
+  repoPath: string,
+  runId: string,
+  sweepOptions?: { preservedBranches?: readonly string[] },
+): Promise<string[]> {
+  const runBranchPrefix = `slp/${runId.slice(0, 8)}/`;
+  const preservedBranchSet = new Set(
+    (sweepOptions?.preservedBranches ?? []).filter((candidateBranch): candidateBranch is string => Boolean(candidateBranch)),
+  );
+  const rawBranchListOutput = await runGit(repoPath, [
+    "for-each-ref",
+    "--format=%(refname:strip=2)",
+    `refs/heads/${runBranchPrefix}`,
+  ]).catch(() => "");
+  const matchingRunBranches = rawBranchListOutput
+    .split("\n")
+    .map((branchLine) => branchLine.trim())
+    .filter((branchName) => branchName.startsWith(runBranchPrefix) && !preservedBranchSet.has(branchName));
+  if (matchingRunBranches.length === 0) return [];
+  // Prune stale worktree registrations first so Git allows deleting branches whose directories were already removed.
+  await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+  const deletedBranchNames: string[] = [];
+  for (const stalePipelineBranch of matchingRunBranches) {
+    const deletedSuccessfully = await runGit(repoPath, ["branch", "-D", stalePipelineBranch])
+      .then(() => true)
+      .catch(() => false);
+    if (deletedSuccessfully) {
+      deletedBranchNames.push(stalePipelineBranch);
+    }
+  }
+  return deletedBranchNames;
+}
+

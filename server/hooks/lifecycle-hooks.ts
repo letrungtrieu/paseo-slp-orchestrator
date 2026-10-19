@@ -256,6 +256,8 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
           ...sessionOpenRequest,
           env: {
             ...sessionOpenRequest.env,
+            // Ensure Antigravity child MCP processes inherit ELECTRON_RUN_AS_NODE=1 when invoking Paseo.bin.
+            ELECTRON_RUN_AS_NODE: "1",
             SLP_AGENT_ID: sessionOpenRequest.agentId,
             SLP_AGENT_TOKEN: callerLookup.agentRecord.token,
             ...(agentBusUrl ? { SLP_BUS_URL: agentBusUrl } : {}),

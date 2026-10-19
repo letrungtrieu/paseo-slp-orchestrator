@@ -5,7 +5,12 @@ import type { UiStyles } from "../styles";
 import type { ProviderModelChoice, ProviderPermissionCatalog } from "../use-provider-catalog";
 import { SelectField, type SelectOption } from "./select-field";
 import { PROVIDER_ROLES, type ProviderRole, type RoleProviderSelection, type RoleProviderSelections } from "../../shared/settings";
-import { resolvePermissionModeId, resolveProviderModel, resolveThinkingOptionId } from "../models/provider-selection";
+import {
+  buildModelSelectOptions,
+  resolvePermissionModeId,
+  resolveProviderModel,
+  resolveThinkingOptionId,
+} from "../models/provider-selection";
 
 const ROLE_LABELS: Record<ProviderRole, string> = {
   supervisor: "Supervisor",
@@ -78,12 +83,8 @@ function RoleProviderField({
   const providerPermissionOptions = selectedModel
     ? permissionModesByProvider[selectedModel.model.provider]?.options ?? []
     : [];
-  // Keep provider/model IDs searchable even though the compact menu hides explanatory text.
-  const modelSelectOptions: SelectOption[] = modelChoices.map((modelChoice) => ({
-    value: modelChoice.value,
-    label: modelChoice.label,
-    detail: modelChoice.detail,
-  }));
+  // Expose provider ID, model ID and aliases as search keywords and render the `Provider · provider/model` subtitle.
+  const modelSelectOptions = buildModelSelectOptions(modelChoices);
   // Use Paseo's option labels so saved thinking IDs match the chat model's supported settings.
   const thinkingSelectOptions: SelectOption[] = thinkingOptions.map((thinkingOption: AgentSelectOption) => ({
     value: thinkingOption.id,
@@ -107,13 +108,13 @@ function RoleProviderField({
             styles={styles}
             theme={theme}
             dense
-            showDetails={false}
+            showDetails
             label="Model"
             value={selectedModel?.value ?? null}
             options={modelSelectOptions}
             placeholder={isLoading ? "Loading Paseo models…" : "No models available"}
             searchable
-            searchPlaceholder="Search model name or provider…"
+            searchPlaceholder="Search model, provider, or ID (e.g. codex/gpt-6-luna)…"
             disabled={isLoading}
             onValueChange={(providerModel) =>
               // Model changes invalidate reasoning IDs; permission mode survives only within the same provider.

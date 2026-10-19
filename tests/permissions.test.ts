@@ -129,8 +129,9 @@ describe("shell boundaries", () => {
     expect(isAllowed(decidePermission(shellRequest(command), contextFor("peer")))).toBe(false);
   });
 
-  it("denies git push even to the integration owner", () => {
+  it("denies git push even to the integration owner or with global git flags", () => {
     expect(isAllowed(decidePermission(shellRequest("git push origin main"), contextFor("master_lead")))).toBe(false);
+    expect(isAllowed(decidePermission(shellRequest("git -C /tmp/worktree push origin slp/12345678/task"), contextFor("peer")))).toBe(false);
   });
 
   it.each(["rm -rf src", "touch a.txt", "echo hi > out.txt", "sed -i s/a/b/ f", "git commit -am x", "npm install left-pad", "ls | tee log.txt"])(

@@ -262,9 +262,12 @@ export function ensureAntigravityMcpBridge(
       ? (existingConfigRoot.mcpServers as Record<string, unknown>)
       : {};
 
+  // Paseo's process.execPath is an Electron binary (/opt/Paseo/Paseo.bin); wrapping via /usr/bin/env
+  // guarantees ELECTRON_RUN_AS_NODE=1 even if the MCP host ignores per-server env blocks in mcp_config.json.
   const desiredBusServerEntry = {
-    command: nodeExecutablePath,
-    args: [bridgeScriptPath],
+    command: "/usr/bin/env",
+    args: ["ELECTRON_RUN_AS_NODE=1", nodeExecutablePath, bridgeScriptPath],
+    env: { ELECTRON_RUN_AS_NODE: "1" },
     tools: buildEagerToolMap(),
   };
 

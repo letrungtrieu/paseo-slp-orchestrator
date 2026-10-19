@@ -3,12 +3,9 @@ import { Pressable, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Modal } from "@getpaseo/plugin/client/react-native";
 import type { UiStyles } from "../styles";
+import { filterSelectOptions, type SelectOption } from "../models/provider-selection";
 
-export interface SelectOption {
-  value: string;
-  label: string;
-  detail?: string;
-}
+export { filterSelectOptions, type SelectOption };
 
 interface SelectFieldProps {
   styles: UiStyles;
@@ -46,15 +43,8 @@ export function SelectField({
   const selectedOption = options.find((option) => option.value === value);
   // An empty catalog cannot produce a useful menu, so it is also treated as disabled.
   const isDisabled = disabled || options.length === 0;
-  // Provider IDs are searchable too, which helps distinguish models with repeated display names.
-  const normalizedSearchText = searchText.trim().toLowerCase();
-  const visibleOptions = searchable
-    ? options.filter((option) =>
-        [option.label, option.value, option.detail ?? ""].some((searchableText) =>
-          searchableText.toLowerCase().includes(normalizedSearchText),
-        ),
-      )
-    : options;
+  // Provider IDs and full `provider/model` codes are searchable alongside display labels.
+  const visibleOptions = searchable ? filterSelectOptions(options, searchText) : options;
   // Clear stale terms on close so reopening always starts with the full Paseo catalog.
   const changeMenuOpen = (nextMenuOpen: boolean) => {
     setMenuOpen(nextMenuOpen);
@@ -122,8 +112,8 @@ export function SelectField({
               >
                 <View style={{ flex: 1, gap: 4 }}>
                   <Text style={styles.selectOptionText}>{option.label}</Text>
-                  {/* Search still includes hidden details, so provider IDs remain discoverable in concise menus. */}
-                  {showDetails && option.detail ? <Text style={styles.mutedText}>{option.detail}</Text> : null}
+                  {/* Always show the detail line inside the modal so provider names and `provider/model` codes stay visible while choosing. */}
+                  {option.detail ? <Text style={styles.mutedText}>{option.detail}</Text> : null}
                 </View>
                 {isSelected ? (
                   <Text style={{ color: theme.colors.accent, fontWeight: "700" }}>✓</Text>

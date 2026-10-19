@@ -69,7 +69,11 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     return { runs: newestFirst.map(summarizeRun) };
   });
 
-  server.handle(getRunRpc, ({ runId }) => ({ run: ctx.store.find(runId) ?? null }));
+  server.handle(getRunRpc, ({ runId }, { paseo }) => {
+    // Capture the SDK handle on active-run polls so bus tools work immediately after a plugin reload.
+    ctx.holder.capture(paseo);
+    return { run: ctx.store.find(runId) ?? null };
+  });
 
   server.handle(startRunRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
@@ -102,7 +106,8 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   });
 
   // Mode is read at each gate decision, so switching it applies to the next hand-over without restarting agents.
-  server.handle(setRunModeRpc, ({ runId, mode }) => {
+  server.handle(setRunModeRpc, ({ runId, mode }, { paseo }) => {
+    ctx.holder.capture(paseo);
     ctx.store.mutate(runId, (run) => {
       run.mode = mode;
     });
@@ -139,7 +144,8 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   });
 
   // SQLite supplies a bounded tail without scanning the repository or loading its entire history.
-  server.handle(tailLogRpc, async ({ runId, limit }) => {
+  server.handle(tailLogRpc, async ({ runId, limit }, { paseo }) => {
+    ctx.holder.capture(paseo);
     const run = ctx.store.find(runId);
     return { entries: run ? ctx.store.tailLog(runId, limit) : [] };
   });

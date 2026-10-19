@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { PaseoApi } from "../runtime/paseo-holder";
 import type { PipelineContext } from "./context";
 import type { PipelineWorkspace, Run } from "../../shared/state";
-import { currentBranchName, runGit } from "../git/git";
+import { configureLocalOnlyPipelineBranch, currentBranchName, removeWorktreeAndDeleteBranch, runGit } from "../git/git";
 import { ToolError } from "./tool-error";
 
 type WorkspaceHandle = Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
@@ -105,14 +105,16 @@ async function archiveCreatedWorkspace(
   ctx: PipelineContext,
   runId: string,
   workspace: WorkspaceHandle,
+  branchName: string,
   reason: string,
 ): Promise<void> {
+  const existingRun = ctx.store.find(runId);
   try {
     const archiveResult = await workspace.archive();
     if (archiveResult.error) throw new Error(archiveResult.error);
   } catch (archiveError) {
     // Cleanup is best effort, but recording failure makes a leaked SDK workspace actionable after an abort.
-    if (ctx.store.find(runId)) {
+    if (existingRun) {
       ctx.logEvent(runId, {
         taskId: null,
         from: "pipeline",
@@ -123,6 +125,15 @@ async function archiveCreatedWorkspace(
         reason: archiveError instanceof Error ? archiveError.message : String(archiveError),
       });
     }
+  }
+  if (existingRun) {
+    // Paseo's workspace archive removes the worktree directory but leaves the local Git branch in refs/heads/.
+    await removeWorktreeAndDeleteBranch(existingRun.repoPath, {
+      worktreePath: workspace.directory,
+      branchName,
+      protectedWorktrees: [existingRun.repoPath, existingRun.devCwd],
+      protectedBranches: [existingRun.baseBranch, existingRun.integrationBranch],
+    });
   }
 }
 
@@ -154,9 +165,10 @@ async function recoverRegisteredWorktree(
   const checkout = await validateCheckout(run, directory, branch);
   // A branch discovered after an SDK error belongs to this generated request; remove it if abort won the race.
   if (ctx.store.require(runId).status !== "planning" && ctx.store.require(runId).status !== "running") {
-    await archiveCreatedWorkspace(ctx, runId, workspace, "recovered worktree belongs to an aborted run");
+    await archiveCreatedWorkspace(ctx, runId, workspace, checkout.branch, "recovered worktree belongs to an aborted run");
     throw new ToolError("Run stopped while the worktree was being recovered.");
   }
+  await configureLocalOnlyPipelineBranch(run.repoPath, checkout.branch);
   const recoveredWorkspace: PipelineWorkspace = {
     workspaceId: workspace.id,
     cwd: checkout.cwd,
@@ -205,6 +217,7 @@ async function createPipelineWorktreeLocked(
     if (ctx.store.require(runId).status !== "planning" && ctx.store.require(runId).status !== "running") {
       throw new ToolError("Run stopped while the worktree was being created.");
     }
+    await configureLocalOnlyPipelineBranch(run.repoPath, checkout.branch);
     const ownedWorkspace: PipelineWorkspace = {
       workspaceId: createdWorkspace.id,
       cwd: checkout.cwd,
@@ -217,7 +230,7 @@ async function createPipelineWorktreeLocked(
   } finally {
     // Only this invocation may archive the SDK-created handle; recovered or user-supplied worktrees are never deleted here.
     if (createdWorkspace && !persisted) {
-      await archiveCreatedWorkspace(ctx, runId, createdWorkspace, "worktree creation did not complete");
+      await archiveCreatedWorkspace(ctx, runId, createdWorkspace, branch, "worktree creation did not complete");
     }
   }
 }

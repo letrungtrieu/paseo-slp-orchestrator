@@ -1,5 +1,6 @@
 // Recursive parent-child agent hierarchy traversal and bottom-up cascade archival across Paseo worktrees.
 import type { AgentRecord, Run } from "../../shared/state";
+import { deleteRunLocalPipelineBranches, removeWorktreeAndDeleteBranch } from "../git/git";
 import { archiveAgentLogged, type PipelineContext } from "./context";
 
 // Prevent overlapping agent.archived events and sweeper ticks from running duplicate cascade archives for the same subtree.
@@ -134,31 +135,130 @@ export function collectDescendantAgentIds(run: Run, rootAgentId: string): string
     .map((descendantEntry) => descendantEntry.agentRecord.agentId);
 }
 
-export async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Promise<void> {
-  // Unit fixtures that stub only the gateway may not initialize a live Paseo SDK handle.
-  if (typeof ctx.holder?.get !== "function" || (typeof ctx.holder.isReady === "function" && !ctx.holder.isReady())) {
-    return;
+// Immediately archive an integrated pipeline's owned Paseo workspace, remove its git worktree, and delete its local pipeline branch.
+export async function retireIntegratedPipelineWorkspace(
+  ctx: PipelineContext,
+  runId: string,
+  pipelineId: string,
+  willAllPipelinesBeIntegrated: boolean,
+): Promise<void> {
+  const currentRun = ctx.store.require(runId);
+  const integratedPipeline = currentRun.pipelines[pipelineId];
+  if (!integratedPipeline) return;
+  const runBranchPrefix = `slp/${runId.slice(0, 8)}/`;
+  const matchingWorkspaceRecord = (integratedPipeline.workspaceId
+    ? currentRun.pipelineWorkspaces[integratedPipeline.workspaceId]
+    : undefined)
+    ?? Object.values(currentRun.pipelineWorkspaces).find(
+      (candidateWorkspace) =>
+        candidateWorkspace.cwd === integratedPipeline.worktree
+        || (integratedPipeline.branch !== null && candidateWorkspace.branch === integratedPipeline.branch),
+    );
+  const isOwnedPipelineCheckout = Boolean(
+    matchingWorkspaceRecord?.owned
+    || integratedPipeline.branch?.startsWith(runBranchPrefix),
+  );
+  if (!isOwnedPipelineCheckout) return;
+
+  const targetWorkspaceId = matchingWorkspaceRecord?.workspaceId ?? integratedPipeline.workspaceId;
+  const canUsePaseoSdk = typeof ctx.holder?.get === "function"
+    && (typeof ctx.holder.isReady !== "function" || ctx.holder.isReady());
+  if (
+    canUsePaseoSdk
+    && targetWorkspaceId
+    && targetWorkspaceId !== currentRun.supervisorWorkspaceId
+    && targetWorkspaceId !== currentRun.devWorkspaceId
+  ) {
+    const paseo = await ctx.holder.get();
+    await paseo.workspaces.archive(targetWorkspaceId).catch(() => undefined);
   }
-  const paseo = await ctx.holder.get();
+  // Remove the worktree registration before deleting the local branch because Git blocks deleting a checked-out branch.
+  await removeWorktreeAndDeleteBranch(currentRun.repoPath, {
+    worktreePath: integratedPipeline.worktree,
+    branchName: integratedPipeline.branch,
+    protectedWorktrees: [currentRun.repoPath, currentRun.devCwd],
+    protectedBranches: [currentRun.baseBranch, currentRun.integrationBranch],
+  });
+  if (targetWorkspaceId && ctx.store.find(runId)) {
+    try {
+      ctx.store.mutate(runId, (mutableRun) => {
+        delete mutableRun.pipelineWorkspaces[targetWorkspaceId];
+      });
+    } catch {
+      // Ignore mutations that arrive after the SQLite store is closed during plugin or test teardown.
+    }
+  }
+  if (willAllPipelinesBeIntegrated) {
+    // Once all pipelines are integrated, sweep any remaining slp/<runId8>/* local branches that are not bound to an active pipeline.
+    const latestRun = ctx.store.find(runId);
+    const activePipelineBranches = latestRun
+      ? Object.values(latestRun.pipelines)
+          .filter((candidatePipeline) => candidatePipeline.id !== pipelineId && !["integrated", "failed"].includes(candidatePipeline.status))
+          .map((candidatePipeline) => candidatePipeline.branch)
+          .filter((branchName): branchName is string => Boolean(branchName))
+      : [];
+    await deleteRunLocalPipelineBranches(currentRun.repoPath, runId, {
+      preservedBranches: [currentRun.baseBranch, currentRun.integrationBranch, ...activePipelineBranches],
+    });
+  }
+}
+
+export async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Promise<void> {
   const ownedWorkspaceIds = new Set<string>();
+  const ownedWorktreeCheckouts: Array<{ worktreePath: string; branchName: string | null }> = [];
+  const runBranchPrefix = `slp/${run.id.slice(0, 8)}/`;
   // Never archive the user's primary repository workspace when Master Lead and Supervisor share the same workspace.
   if (run.devWorkspaceId && run.devWorkspaceId !== run.supervisorWorkspaceId) {
     ownedWorkspaceIds.add(run.devWorkspaceId);
+    ownedWorktreeCheckouts.push({ worktreePath: run.devCwd, branchName: run.integrationBranch });
   }
   for (const pipelineWorkspace of Object.values(run.pipelineWorkspaces)) {
-    if (pipelineWorkspace.owned) ownedWorkspaceIds.add(pipelineWorkspace.workspaceId);
+    if (pipelineWorkspace.owned) {
+      ownedWorkspaceIds.add(pipelineWorkspace.workspaceId);
+      ownedWorktreeCheckouts.push({ worktreePath: pipelineWorkspace.cwd, branchName: pipelineWorkspace.branch });
+    }
   }
-  for (const workspaceId of ownedWorkspaceIds) {
-    // Workspace cleanup is best effort because a user can close an external Paseo workspace first.
-    await paseo.workspaces.archive(workspaceId).catch(() => undefined);
+  for (const pipelineRecord of Object.values(run.pipelines)) {
+    if (pipelineRecord.branch?.startsWith(runBranchPrefix)) {
+      ownedWorktreeCheckouts.push({ worktreePath: pipelineRecord.worktree, branchName: pipelineRecord.branch });
+    }
   }
+  // Unit fixtures that stub only the gateway and have no owned checkouts do not initialize a live Paseo SDK handle or git repo.
+  const canUsePaseoSdk = typeof ctx.holder?.get === "function"
+    && (typeof ctx.holder.isReady !== "function" || ctx.holder.isReady());
+  if (!canUsePaseoSdk && ownedWorktreeCheckouts.length === 0) {
+    return;
+  }
+  if (canUsePaseoSdk) {
+    const paseo = await ctx.holder.get();
+    for (const workspaceId of ownedWorkspaceIds) {
+      // Workspace cleanup is best effort because a user can close an external Paseo workspace first.
+      await paseo.workspaces.archive(workspaceId).catch(() => undefined);
+    }
+  }
+  // Paseo's workspace archive removes the worktree directory but leaves local branches in refs/heads/; delete both here.
+  for (const ownedCheckout of ownedWorktreeCheckouts) {
+    await removeWorktreeAndDeleteBranch(run.repoPath, {
+      worktreePath: ownedCheckout.worktreePath,
+      branchName: ownedCheckout.branchName,
+      protectedWorktrees: [run.repoPath],
+      protectedBranches: [run.baseBranch],
+    });
+  }
+  await deleteRunLocalPipelineBranches(run.repoPath, run.id, {
+    preservedBranches: [run.baseBranch],
+  });
   // Remove retired pipeline workspaces from the persisted map so follow-up pipelines never reuse an archived handle.
   if (ownedWorkspaceIds.size > 0 && ctx.store.find(run.id)) {
-    ctx.store.mutate(run.id, (mutableRun) => {
-      for (const archivedWorkspaceId of ownedWorkspaceIds) {
-        delete mutableRun.pipelineWorkspaces[archivedWorkspaceId];
-      }
-    });
+    try {
+      ctx.store.mutate(run.id, (mutableRun) => {
+        for (const archivedWorkspaceId of ownedWorkspaceIds) {
+          delete mutableRun.pipelineWorkspaces[archivedWorkspaceId];
+        }
+      });
+    } catch {
+      // Ignore mutations that arrive after the SQLite store is closed during plugin or test teardown.
+    }
   }
 }
 
