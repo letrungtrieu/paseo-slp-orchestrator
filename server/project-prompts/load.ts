@@ -1,4 +1,4 @@
-// Discover project-authored Markdown recursively; no runtime task or report data is written into this configuration folder.
+// Discover only the three root role files and .slp/peers Markdown; ignore arbitrary docs or other .slp subdirectories.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import type { ProjectPromptConfig, ProjectRole } from "../../shared/project-prompts";
@@ -8,25 +8,48 @@ import { parseRoleMarkdown } from "./markdown";
 // UI discovery and Start run can race; neither should observe a half-written default catalog.
 const initializingDirectories = new Map<string, Promise<void>>();
 
-async function markdownFiles(directory: string, rootDirectory = directory): Promise<string[]> {
+// Restrict root-level discovery to the three coordinator role files so unrelated .slp/*.md files are ignored.
+const ROOT_ROLE_FILENAMES = new Set(["SUPERVISOR.MD", "LEAD.MD", "FORKED_LEAD.MD"]);
+
+async function rootRoleMarkdownFiles(configurationDirectory: string): Promise<string[]> {
   let directoryEntries;
-  try { directoryEntries = await readdir(directory, { withFileTypes: true }); }
+  try { directoryEntries = await readdir(configurationDirectory, { withFileTypes: true }); }
   catch (readError) {
     if ((readError as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw readError;
   }
-  const discoveredFiles: string[] = [];
-  for (const entry of directoryEntries.sort((first, second) => first.name.localeCompare(second.name))) {
-    const entryPath = join(directory, entry.name);
-    // Do not follow directory symlinks: recursive discovery must terminate and remain project-local.
-    if (entry.isDirectory()) discoveredFiles.push(...await markdownFiles(entryPath, rootDirectory));
-    else if (entry.isFile() && /\.md$/i.test(entry.name)) {
-      // These two old generated artifacts are data migrated to SQLite, not role configuration.
-      const relativePath = relative(rootDirectory, entryPath).replace(/\\/g, "/");
-      if (!["MASTER_SPEC.md", "ACCEPTANCE_DOC.md"].includes(relativePath)) discoveredFiles.push(entryPath);
+  const discoveredRootRoleFiles: string[] = [];
+  for (const directoryEntry of directoryEntries.sort((firstEntry, secondEntry) => firstEntry.name.localeCompare(secondEntry.name))) {
+    // Ignore non-role files and non-peers directories (such as .slp/architecture) that do not contain role prompts.
+    if (directoryEntry.isFile() && ROOT_ROLE_FILENAMES.has(directoryEntry.name.toUpperCase())) {
+      discoveredRootRoleFiles.push(join(configurationDirectory, directoryEntry.name));
     }
   }
-  return discoveredFiles;
+  return discoveredRootRoleFiles;
+}
+
+async function peerMarkdownFiles(peersDirectory: string): Promise<string[]> {
+  let directoryEntries;
+  try { directoryEntries = await readdir(peersDirectory, { withFileTypes: true }); }
+  catch (readError) {
+    if ((readError as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw readError;
+  }
+  const discoveredPeerFiles: string[] = [];
+  for (const directoryEntry of directoryEntries.sort((firstEntry, secondEntry) => firstEntry.name.localeCompare(secondEntry.name))) {
+    const entryPath = join(peersDirectory, directoryEntry.name);
+    // Do not follow directory symlinks: recursive discovery inside .slp/peers must terminate and remain project-local.
+    if (directoryEntry.isDirectory()) discoveredPeerFiles.push(...await peerMarkdownFiles(entryPath));
+    else if (directoryEntry.isFile() && /\.md$/i.test(directoryEntry.name)) discoveredPeerFiles.push(entryPath);
+  }
+  return discoveredPeerFiles;
+}
+
+async function roleMarkdownFiles(configurationDirectory: string): Promise<string[]> {
+  // Combine only the 3 root role files and .slp/peers Markdown so other .slp folders never trigger YAML errors.
+  const rootFiles = await rootRoleMarkdownFiles(configurationDirectory);
+  const peerFiles = await peerMarkdownFiles(join(configurationDirectory, "peers"));
+  return [...rootFiles, ...peerFiles];
 }
 
 async function writeMissingDefaultPromptFile(configurationDirectory: string, relativePath: string, markdown: string): Promise<void> {
@@ -41,15 +64,15 @@ async function writeMissingDefaultPromptFile(configurationDirectory: string, rel
 }
 
 async function initializeEmptyConfiguration(configurationDirectory: string): Promise<void> {
-  const discoveredMarkdownFiles = await markdownFiles(configurationDirectory);
-  if (discoveredMarkdownFiles.length === 0) {
+  const discoveredRoleFiles = await roleMarkdownFiles(configurationDirectory);
+  if (discoveredRoleFiles.length === 0) {
     for (const promptFile of defaultPromptFiles()) {
       await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
     }
     return;
   }
   // Upgrade pre-existing .slp folders that were created before FORKED_LEAD.md and END_USER_UAT.md existed on disk.
-  const hasForkedLeadFile = discoveredMarkdownFiles.some(
+  const hasForkedLeadFile = discoveredRoleFiles.some(
     (filePath) => relative(configurationDirectory, filePath).replace(/\\/g, "/").toUpperCase() === "FORKED_LEAD.MD",
   );
   if (!hasForkedLeadFile) {
@@ -63,7 +86,7 @@ async function initializeEmptyConfiguration(configurationDirectory: string): Pro
 
 export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromptConfig> {
   const configurationDirectory = resolve(repoPath, ".slp");
-  // A legacy .slp containing only logs needs the same first-time templates as a missing directory.
+  // A legacy .slp containing only logs or architecture docs needs the same first-time templates as a missing directory.
   let initialization = initializingDirectories.get(configurationDirectory);
   if (!initialization) {
     initialization = initializeEmptyConfiguration(configurationDirectory);
@@ -77,7 +100,7 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
   const configuration: ProjectPromptConfig = { ...defaults, peers: [] };
   const peerSourcePaths = new Map<string, string>();
   const rootSourcePaths = new Map<string, string>();
-  for (const markdownPath of await markdownFiles(configurationDirectory)) {
+  for (const markdownPath of await roleMarkdownFiles(configurationDirectory)) {
     const sourcePath = relative(repoPath, markdownPath).replace(/\\/g, "/");
     const markdownText = await readFile(markdownPath, "utf8");
     // Every .slp Markdown file defines its own front-matter summary and role agent prompt directly.

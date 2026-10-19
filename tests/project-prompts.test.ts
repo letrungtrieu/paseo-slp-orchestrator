@@ -69,6 +69,28 @@ describe("Markdown role discovery", () => {
     expect(role?.frontMatter).toContain("features: [invoices, taxes]");
   });
 
+  // Ignore non-role subdirectories (such as .slp/architecture/) and non-role root files so project docs never fail YAML parsing.
+  it("ignores Markdown files outside .slp/peers and the 3 default root role files", async () => {
+    const repoPath = await createDirectory("project-prompts");
+    await mkdir(join(repoPath, ".slp/architecture"), { recursive: true });
+    await writeFile(join(repoPath, ".slp/architecture/ecs-dod.md"), "# ECS Data-Oriented Design\nNo YAML front matter here.");
+    await writeFile(join(repoPath, ".slp/NOTES.md"), "# Project Notes\nAlso no YAML front matter.");
+
+    // First load should still seed the default role files when only non-role docs exist in .slp.
+    const configuration = await loadProjectPrompts(repoPath);
+    expect(configuration.supervisor.role).toBe("supervisor");
+    expect(configuration.lead.role).toBe("master-lead");
+    expect(configuration.forkedLead?.role).toBe("forked-lead");
+    expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "developer",
+      "end-user",
+      "qa-engineer",
+      "reviewer",
+      "security-reviewer",
+    ]);
+    expect(await readFile(join(repoPath, ".slp/architecture/ecs-dod.md"), "utf8")).toContain("# ECS Data-Oriented Design");
+  });
+
   // Duplicate normalized IDs cannot silently select a workflow based on filesystem ordering.
   it("rejects duplicate roles and identifies both files", async () => {
     const repoPath = await createDirectory("project-prompts");

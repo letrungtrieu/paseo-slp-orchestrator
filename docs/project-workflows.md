@@ -6,14 +6,16 @@ Selecting a repository in SLP prepares `.slp` before any agents are created. A m
 .slp/
 ├── SUPERVISOR.md
 ├── LEAD.md
+├── FORKED_LEAD.md
 └── peers/
     ├── DEVELOPER.md
+    ├── END_USER_UAT.md
     ├── REVIEWER.md
     ├── QA_ENGINEER.md
     └── SECURITY_REVIEWER.md
 ```
 
-Existing custom prompt files are preserved. Markdown is discovered recursively, including additional subdirectories. Role IDs come from YAML front matter, independently of filenames. Old root `MASTER_SPEC.md` and `ACCEPTANCE_DOC.md` artifacts are excluded from role discovery because their data was migrated to SQLite.
+Existing custom prompt files are preserved. Role discovery only reads the three root role files (`SUPERVISOR.md`, `LEAD.md`, `FORKED_LEAD.md`) and Markdown files inside `.slp/peers/`. Other files or subdirectories under `.slp/` (such as `.slp/architecture/` or legacy `MASTER_SPEC.md` and `ACCEPTANCE_DOC.md`) are ignored during role discovery. Role IDs come from YAML front matter, independently of filenames.
 
 ## File format
 
