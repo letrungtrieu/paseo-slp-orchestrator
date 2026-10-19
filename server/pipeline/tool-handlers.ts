@@ -12,6 +12,7 @@ import { delegate, presentToManager, report, requestRework } from "./run-lifecyc
 import { listPipelines, readPipeline, readRun } from "./read-tools";
 import { approveStage, resumePipeline } from "./stage-control";
 import { escalateStage, requestStageRework, sendPeerMessage, submitStageReport } from "./stage-messages";
+import { handlePeerShell } from "./shell-watchdog";
 import { ToolError } from "./tool-error";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
@@ -35,6 +36,7 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_present_to_manager: (ctx, caller, input) => presentToManager(ctx, caller.runId, input.report),
   slp_report: (ctx, caller, input) => report(ctx, caller.runId, input.summary),
   slp_revive_agent: (ctx, caller, input) => reviveAgentsOnDemand(ctx, caller, input),
+  slp_handle_peer_shell: (ctx, caller, input) => handlePeerShell(ctx, caller, input),
   slp_get_run: (ctx, caller) => readRun(ctx, caller),
 };
 

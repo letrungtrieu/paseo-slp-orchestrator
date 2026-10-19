@@ -1,5 +1,6 @@
 // Shared dependencies used by every pipeline module. Passing one context object keeps the
 // dynamic stage engine testable with fakes and avoids hidden daemon singletons.
+import type { SlpSettings } from "../../shared/settings";
 import type { ForkRegistry } from "../fork/session-forker";
 import type { AgentGateway } from "../runtime/agent-gateway";
 import type { Mailbox } from "../runtime/mailbox";
@@ -16,8 +17,11 @@ export interface PipelineContext {
   forks: ForkRegistry;
   holder: PaseoHolder;
   stateDirectory?: string;
+  // Optional host settings reader so background sweeps honor live shellWatchdog changes without restarting runs.
+  getSettings?: () => SlpSettings | Promise<SlpSettings>;
   logEvent(runId: string, entry: PipelineLogEntry): void;
 }
+
 
 // Retiring an agent must never stop the pipeline, but a silent failure leaves orphan agents
 // running, so the failure is written to the audit log instead of being swallowed.

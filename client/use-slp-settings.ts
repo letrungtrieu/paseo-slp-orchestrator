@@ -1,7 +1,14 @@
 import { useSettings } from "@getpaseo/plugin/client";
 import { useEffect, useRef } from "react";
 import type { RunMode } from "../shared/roles";
-import { DEFAULT_SLP_SETTINGS, slpSettings, type ProviderRole, type RoleProviderSelection, type SlpSettings } from "../shared/settings";
+import {
+  DEFAULT_SLP_SETTINGS,
+  slpSettings,
+  type ProviderRole,
+  type RoleProviderSelection,
+  type ShellWatchdogSettings,
+  type SlpSettings,
+} from "../shared/settings";
 import type { useProviderCatalog } from "./use-provider-catalog";
 import { materializeRoleDefaults, resolveRoleProviderSelection } from "./models/provider-selection";
 
@@ -41,5 +48,10 @@ export function useSlpSettings(catalog: ReturnType<typeof useProviderCatalog>) {
       const resolvedSelection = resolveRoleProviderSelection(selection, catalog.modelChoices, catalog.permissionModesByProvider);
       saveConfiguration({ ...configuration, roles: { ...configuration.roles, [role]: resolvedSelection } });
     },
+    changeShellWatchdog: (shellWatchdog: ShellWatchdogSettings) => {
+      // Persist the shell heartbeat timeout immediately so running sweepers pick up the updated threshold.
+      saveConfiguration({ ...configuration, shellWatchdog });
+    },
   };
 }
+

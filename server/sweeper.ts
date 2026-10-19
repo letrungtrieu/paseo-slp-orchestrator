@@ -6,6 +6,7 @@ import { sweepStageNudges } from "./hooks/lifecycle-hooks";
 import { collectDescendantAgentIds, handleAgentArchived, handleSupervisorArchived } from "./pipeline/agent-hierarchy";
 import { recoverMasterLead } from "./pipeline/agent-revival";
 import type { PipelineContext } from "./pipeline/context";
+import { sweepPeerShellWatchdog } from "./pipeline/shell-watchdog";
 import { recoverPipelines } from "./pipeline/stage-engine";
 
 // 3 s keeps permission prompts and mail feeling immediate without hammering the daemon's agent directory.
@@ -74,6 +75,10 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   // Active stage participants, a planning/running Master Lead, and a reporting Supervisor can owe workflow tools.
   if (hasDynamicPipeline || ["planning", "running", "reporting"].includes(activeRun.status)) {
     sweepStageNudges(ctx, activeRun.id, liveStatuses);
+  }
+  if (hasDynamicPipeline) {
+    // Inspect running peer shell outputs before mailbox flush so any newly queued Forked Lead alert delivers on this tick.
+    await sweepPeerShellWatchdog(ctx, activeRun, liveStatuses);
   }
   // Respawn a vanished or archived Master Lead before flushing so its transferred or inferred mail delivers immediately.
   await recoverMasterLead(ctx, activeRun.id, liveStatuses);

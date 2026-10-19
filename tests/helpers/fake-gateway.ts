@@ -1,6 +1,6 @@
 // In-memory AgentGateway. It registers AgentRecords in the store exactly like the real gateway
 // (the bus authenticates callers through them) and records every call for assertions.
-import type { AgentLiveStatus, CreateAgentSpec, TurnResult } from "../../server/runtime/agent-gateway";
+import type { ActiveShellCall, AgentLiveStatus, CreateAgentSpec, TurnResult } from "../../server/runtime/agent-gateway";
 import type { RunStore } from "../../server/store/run-store";
 import type { AgentRecord } from "../../shared/state";
 import { resolveAgentSettings } from "../../server/project-prompts/agent-settings";
@@ -33,6 +33,7 @@ export class FakeAgentGateway {
   private readonly pendingPermissionsByAgentId = new Map<string, unknown[]>();
   private readonly scriptedTurnReplies = new Map<string, string[]>();
   private readonly sessionIdByAgentId = new Map<string, string | null>();
+  private readonly activeShellByAgentId = new Map<string, ActiveShellCall | null>();
   private agentCounter = 0;
 
   constructor(private readonly store: RunStore) {}
@@ -52,6 +53,10 @@ export class FakeAgentGateway {
 
   setPendingPermissions(agentId: string, requests: unknown[]): void {
     this.pendingPermissionsByAgentId.set(agentId, requests);
+  }
+
+  setActiveShellCall(agentId: string, shellCall: ActiveShellCall | null): void {
+    this.activeShellByAgentId.set(agentId, shellCall);
   }
 
   markEveryAgentIdle(): void {
@@ -107,6 +112,8 @@ export class FakeAgentGateway {
       throw new Error("simulated send failure");
     }
     this.prompts.push({ agentId, text });
+    // Sending a prompt to a mid-turn agent in Paseo interrupts its active shell tool call and starts a new turn.
+    this.activeShellByAgentId.delete(agentId);
     // a delivered prompt starts a turn; the test decides when it ends
     this.statusByAgentId.set(agentId, "running");
   }
@@ -126,6 +133,11 @@ export class FakeAgentGateway {
     // An explicit null models a Master Lead without a session (degraded fork); unset means a normal fork source.
     return this.sessionIdByAgentId.has(agentId) ? (this.sessionIdByAgentId.get(agentId) ?? null) : `session-of-${agentId}`;
   }
+
+  async activeShellCall(agentId: string): Promise<ActiveShellCall | null> {
+    return this.activeShellByAgentId.get(agentId) ?? null;
+  }
+
 
   async liveStatuses(runId: string): Promise<Map<string, AgentLiveStatus>> {
     const liveStatuses = new Map<string, AgentLiveStatus>();

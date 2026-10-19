@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetPeerShellWatchdogState } from "../server/pipeline/shell-watchdog";
 import { startSweeper } from "../server/sweeper";
+import { DEFAULT_SLP_SETTINGS } from "../shared/settings";
 import type { FakePaseoHolder } from "./helpers/fake-paseo";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { DEFAULT_PIPELINE, delegateToLead, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
@@ -12,11 +14,14 @@ let stopSweeper: () => void = () => undefined;
 beforeEach(() => {
   // only the interval is faked: git, fs and vi.waitFor must keep running on real timers
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  resetPeerShellWatchdogState();
 });
 
 afterEach(() => {
   stopSweeper();
   stopSweeper = () => undefined;
+  resetPeerShellWatchdogState();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -256,4 +261,152 @@ describe("sweeper", () => {
     expect(updatedRun.agents[coordinatorId].archivedAt).toBeTruthy();
     expect(updatedRun.agents[supervisorId].archivedAt).toBeNull();
   });
+
+  // Changing stdout/stderr resets the heartbeat clock; only when output stalls past idleTimeoutSeconds does the watchdog wake Forked Lead.
+  it("resets the shell heartbeat while stdout changes and alerts Forked Lead only after output stalls past idleTimeoutSeconds", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const runningPeerId = firstStage.peerAgentIds[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+
+    flow.ctx.getSettings = () => ({
+      ...DEFAULT_SLP_SETTINGS,
+      shellWatchdog: { enabled: true, idleTimeoutSeconds: 60 },
+    });
+    flow.gateway.setStatus(runningPeerId, "running");
+
+    let simulatedTimeMs = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => simulatedTimeMs);
+
+    // First sweep observes the shell command starting.
+    flow.gateway.setActiveShellCall(runningPeerId, {
+      callId: "shell-watch-1",
+      command: "npm test -- --watch",
+      cwd: activePipeline.worktree,
+      output: "PASS tests/unit.test.ts\nWaiting for file changes...",
+      startedAt: new Date(simulatedTimeMs).toISOString(),
+    });
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toEqual([]);
+
+    // 45s later: new stdout appears, which must reset the idle timer so another 45s does not trigger an alert.
+    simulatedTimeMs += 45_000;
+    flow.gateway.setActiveShellCall(runningPeerId, {
+      callId: "shell-watch-1",
+      command: "npm test -- --watch",
+      cwd: activePipeline.worktree,
+      output: "PASS tests/unit.test.ts\nPASS tests/integration.test.ts\nWaiting for file changes...",
+      startedAt: new Date(1_000_000).toISOString(),
+    });
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toEqual([]);
+
+    // 45s after the last output change (90s total elapsed, 45s unchanged < 60s threshold): still no alert.
+    simulatedTimeMs += 45_000;
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toEqual([]);
+
+    // 20s later (65s unchanged >= 60s threshold): Forked Lead receives the watchdog alert with command and output tail.
+    simulatedTimeMs += 20_000;
+    await tick();
+    const coordinatorPrompts = flow.gateway.promptsTo(coordinatorId);
+    expect(coordinatorPrompts).toHaveLength(1);
+    expect(coordinatorPrompts[0]).toContain("Shell Watchdog Alert");
+    expect(coordinatorPrompts[0]).toContain("npm test -- --watch");
+    expect(coordinatorPrompts[0]).toContain("Waiting for file changes...");
+    expect(coordinatorPrompts[0]).toContain("slp_handle_peer_shell");
+  });
+
+  // Forked Lead can either extend the timer for legitimate heavy builds (action: "wait") or interrupt a hung shell with guidance (action: "cancel").
+  it("allows Forked Lead to snooze legitimate long-running shells with action=wait or interrupt hung shells with action=cancel", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const runningPeerId = firstStage.peerAgentIds[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+
+    flow.ctx.getSettings = () => ({
+      ...DEFAULT_SLP_SETTINGS,
+      shellWatchdog: { enabled: true, idleTimeoutSeconds: 30 },
+    });
+    flow.gateway.setStatus(runningPeerId, "running");
+
+    let simulatedTimeMs = 2_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => simulatedTimeMs);
+
+    flow.gateway.setActiveShellCall(runningPeerId, {
+      callId: "shell-hang-1",
+      command: "npx prisma migrate dev",
+      cwd: activePipeline.worktree,
+      output: "Enter a name for the new migration:",
+      startedAt: new Date(simulatedTimeMs).toISOString(),
+    });
+    await tick();
+
+    // Advance past the 30s idle threshold so the initial alert is delivered to Forked Lead.
+    simulatedTimeMs += 35_000;
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toHaveLength(1);
+
+    // Forked Lead first extends the watchdog by 120s via slp_handle_peer_shell(action: "wait").
+    await flow.callAs(coordinatorId, "slp_handle_peer_shell", {
+      peerAgentId: runningPeerId,
+      action: "wait",
+      waitSeconds: 120,
+    });
+
+    // 60s later (still inside the 120s snooze window): no second alert is sent.
+    simulatedTimeMs += 60_000;
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toHaveLength(1);
+
+    // Forked Lead then decides to cancel the interactive shell and provide non-interactive guidance.
+    flow.gateway.prompts.length = 0;
+    await flow.callAs(coordinatorId, "slp_handle_peer_shell", {
+      peerAgentId: runningPeerId,
+      action: "cancel",
+      guidance: "Pass --name init --skip-generate so Prisma does not block on interactive stdin.",
+    });
+
+    const peerInterruptPrompts = flow.gateway.promptsTo(runningPeerId);
+    expect(peerInterruptPrompts).toHaveLength(1);
+    expect(peerInterruptPrompts[0]).toContain("Shell Command Canceled by Forked Lead");
+    expect(peerInterruptPrompts[0]).toContain("npx prisma migrate dev");
+    expect(peerInterruptPrompts[0]).toContain("--name init --skip-generate");
+    expect(flow.run(runId).agents[runningPeerId].awaitingTool).toBe("slp_stage_report");
+    expect(flow.run(runId).agents[runningPeerId].nudges).toBe(0);
+    expect(flow.store.tailLog(runId, 50).some((logEntry) => logEntry.kind === "peer.shell_canceled")).toBe(true);
+  });
+
+  // Disabling shellWatchdog in SLP settings suppresses all shell heartbeat checks and alerts.
+  it("does not alert when shellWatchdog.enabled is false in SLP settings", async () => {
+    const { flow, runId } = await sweptRun(true);
+    const activePipeline = flow.pipeline(runId)!;
+    const firstStage = activePipeline.stages[0];
+    const runningPeerId = firstStage.peerAgentIds[0];
+    const coordinatorId = firstStage.forkedLeadAgentId!;
+
+    flow.ctx.getSettings = () => ({
+      ...DEFAULT_SLP_SETTINGS,
+      shellWatchdog: { enabled: false, idleTimeoutSeconds: 30 },
+    });
+    flow.gateway.setStatus(runningPeerId, "running");
+
+    let simulatedTimeMs = 3_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => simulatedTimeMs);
+
+    flow.gateway.setActiveShellCall(runningPeerId, {
+      callId: "shell-disabled-1",
+      command: "tail -f app.log",
+      cwd: activePipeline.worktree,
+      output: "listening...",
+      startedAt: new Date(simulatedTimeMs).toISOString(),
+    });
+    await tick();
+    simulatedTimeMs += 120_000;
+    await tick();
+    expect(flow.gateway.promptsTo(coordinatorId)).toEqual([]);
+  });
 });
+

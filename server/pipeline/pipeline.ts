@@ -1,5 +1,6 @@
 // Assemble the shared runtime context. Dynamic stage progression lives in stage-engine and
 // stage-control; this module only owns durable logging and ordered mailbox delivery.
+import type { SlpSettings } from "../../shared/settings";
 import type { ForkRegistry } from "../fork/session-forker";
 import type { AgentGateway } from "../runtime/agent-gateway";
 import { Mailbox } from "../runtime/mailbox";
@@ -13,7 +14,9 @@ export interface PipelineDependencies {
   forks: ForkRegistry;
   holder: PaseoHolder;
   stateDirectory?: string;
+  getSettings?: () => SlpSettings | Promise<SlpSettings>;
 }
+
 
 export function createPipeline(dependencies: PipelineDependencies): PipelineContext {
   // Audit failures must not undo a successful state transition, but missing runs are ignored

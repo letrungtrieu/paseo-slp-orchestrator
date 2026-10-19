@@ -281,6 +281,14 @@ export function ensureAntigravityMcpBridge(
         [BUS_SERVER_NAME]: desiredBusServerEntry,
       },
     };
+    // Restore owner-write permission first in case an external tool marked mcp_config.json read-only (0444).
+    if (existsSync(mcpConfigPath)) {
+      try {
+        chmodSync(mcpConfigPath, 0o644);
+      } catch {
+        // Proceed to writeFileSync so any underlying filesystem error is surfaced normally.
+      }
+    }
     writeFileSync(mcpConfigPath, `${JSON.stringify(updatedConfigRoot, null, 2)}\n`, "utf8");
   }
   return bridgeScriptPath;

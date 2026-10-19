@@ -15,6 +15,14 @@ const RoleProviderSelectionSchema = z.object({
 export type RoleProviderSelection = z.infer<typeof RoleProviderSelectionSchema>;
 export type RoleProviderSelections = Record<ProviderRole, RoleProviderSelection>;
 
+export const ShellWatchdogSettingsSchema = z.object({
+  // Enabled by default so hung peer shell commands are surfaced to their Forked Lead automatically.
+  enabled: z.boolean().default(true),
+  // Seconds a running peer shell tool call can produce zero new output before alerting the Forked Lead.
+  idleTimeoutSeconds: z.number().int().min(15).max(3600).default(90),
+});
+export type ShellWatchdogSettings = z.infer<typeof ShellWatchdogSettingsSchema>;
+
 export const SlpSettingsSchema = z.object({
   // New installations run autonomously; an explicit mode choice is remembered for later runs.
   mode: RunModeSchema.default("FULL_AUTO"),
@@ -23,6 +31,8 @@ export const SlpSettingsSchema = z.object({
     lead: RoleProviderSelectionSchema.prefault({}),
     peer: RoleProviderSelectionSchema.prefault({}),
   }).prefault({}),
+  // Heartbeat watchdog configuration for detecting silent/hung peer shell commands without burning model tokens.
+  shellWatchdog: ShellWatchdogSettingsSchema.prefault({}),
 });
 export type SlpSettings = z.infer<typeof SlpSettingsSchema>;
 
@@ -34,3 +44,4 @@ export const slpSettings = defineSettings({
   schema: SlpSettingsSchema,
 });
 export const DEFAULT_SLP_SETTINGS = SlpSettingsSchema.parse({});
+

@@ -104,6 +104,17 @@ export const BUS_TOOL_DEFINITIONS = {
       reason: z.string().trim().min(1).optional(),
     }),
   },
+  // Allows a Forked Lead or Master Lead to either cancel a hung peer shell command with guidance or extend its watchdog timer.
+  slp_handle_peer_shell: {
+    roles: ["forked_lead", "master_lead"],
+    description: "Cancel a hung peer shell command and deliver corrective guidance, or extend its idle-output watchdog timer.",
+    input: z.object({
+      peerAgentId: z.string().trim().min(1),
+      action: z.enum(["cancel", "wait"]),
+      guidance: z.string().trim().min(1).optional(),
+      waitSeconds: z.number().int().min(15).max(1800).optional(),
+    }),
+  },
   // This read-only summary remains useful to all agents without exposing database paths or tokens.
   slp_get_run: {
     roles: SLP_ROLES,

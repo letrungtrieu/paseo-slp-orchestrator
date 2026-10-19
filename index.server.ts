@@ -15,7 +15,7 @@ import { AgentGateway } from "./server/runtime/agent-gateway";
 import { PaseoHolder } from "./server/runtime/paseo-holder";
 import { RunStore } from "./server/store/run-store";
 import { startSweeper } from "./server/sweeper";
-import { slpSettings } from "./shared/settings";
+import { DEFAULT_SLP_SETTINGS, slpSettings } from "./shared/settings";
 
 // A plain directory under the home folder (not the workspace) so run state survives reinstalling the plugin and is shared by every repo.
 const DEFAULT_STATE_DIRECTORY = join(homedir(), ".slp-orchestrator");
@@ -62,7 +62,19 @@ export default function contribute(server: PluginServerContext) {
     resolveBusPort = resolvePort;
   });
   const gateway = new AgentGateway(holder, store, () => busPortReady);
-  const pipeline = createPipeline({ store, gateway, forks, holder, stateDirectory });
+  // Expose live host settings to the pipeline context so the sweeper's shell watchdog reflects UI changes immediately.
+  const pipeline = createPipeline({
+    store,
+    gateway,
+    forks,
+    holder,
+    stateDirectory,
+    getSettings: async () => {
+      const savedSettings = await globalSettings.read();
+      return savedSettings.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
+    },
+  });
+
 
   // Not awaited: the entry must return its cleanup function synchronously, so the socket opens in the background.
   startBus(createBusDispatcher(pipeline), readSavedBusPort(portFilePath))

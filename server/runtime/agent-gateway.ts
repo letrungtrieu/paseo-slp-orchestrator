@@ -18,6 +18,15 @@ export interface AgentLiveStatus {
   archived: boolean;
 }
 
+export interface ActiveShellCall {
+  callId: string;
+  command: string;
+  cwd: string | null;
+  output: string;
+  startedAt: string | null;
+}
+
+
 export interface CreateAgentSpec {
   runId: string;
   role: SlpRole;
@@ -308,6 +317,55 @@ export class AgentGateway {
     await agentHandle.refresh();
     return agentHandle.runtimeInfo?.sessionId ?? null;
   }
+
+  // Reads the tail of an agent's timeline so the shell watchdog can track stdout/stderr progress without model tokens.
+  async activeShellCall(agentId: string): Promise<ActiveShellCall | null> {
+    const paseo = await this.holder.get();
+    try {
+      const timelinePage = await paseo.agents.ref(agentId).timeline.refetch({
+        direction: "tail",
+        limit: 15,
+      });
+      for (let entryIndex = timelinePage.entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
+        const timelineEntry = timelinePage.entries[entryIndex];
+        const timelineItem = timelineEntry?.item;
+        if (!timelineItem || timelineItem.type !== "tool_call" || timelineItem.status !== "running") continue;
+        if (timelineItem.detail.type === "shell") {
+          return {
+            callId: timelineItem.callId,
+            command: timelineItem.detail.command,
+            cwd: timelineItem.detail.cwd ?? null,
+            output: timelineItem.detail.output ?? "",
+            startedAt: timelineEntry.timestamp ?? null,
+          };
+        }
+        // Fallback for custom or ACP providers that surface shell tool calls under 'unknown' detail with a command input string.
+        if (timelineItem.detail.type === "unknown" && /^(bash|sh|shell|exec_command|run_command|terminal)$/i.test(timelineItem.name)) {
+          const rawInput = timelineItem.detail.input;
+          const commandFromInput =
+            rawInput && typeof rawInput === "object" && "command" in rawInput && typeof rawInput.command === "string"
+              ? rawInput.command
+              : null;
+          if (commandFromInput) {
+            return {
+              callId: timelineItem.callId,
+              command: commandFromInput,
+              cwd: rawInput && typeof rawInput === "object" && "cwd" in rawInput && typeof rawInput.cwd === "string"
+                ? rawInput.cwd
+                : null,
+              output: typeof timelineItem.detail.output === "string" ? timelineItem.detail.output : "",
+              startedAt: timelineEntry.timestamp ?? null,
+            };
+          }
+        }
+      }
+      return null;
+    } catch {
+      // Transient timeline read errors must not fail the sweeper tick; the next sweep will re-check.
+      return null;
+    }
+  }
+
 
   // Events are best effort, so truth comes from a directory poll; this is what the mailbox and sweeper trust to decide an agent is idle.
   async liveStatuses(runId: string): Promise<Map<string, AgentLiveStatus>> {
