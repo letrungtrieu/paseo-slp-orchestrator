@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { eventually } from "./helpers/flow-steps";
+import { delegateToLead, eventually } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -9,7 +9,11 @@ const ENQUEUE_NO_REPLY = { taskId: null, awaitTool: null, from: "test", summary:
 async function runWithTwoAgents() {
   const flow = await createFlow({ mode: "FULL_AUTO" });
   const runId = await flow.startRun();
-  // These scenarios begin after the Supervisor's greeting has completed, before any mailbox traffic.
+  // Delegate once so the Master Lead is lazily spawned alongside the Supervisor, then clear initial mail for isolated mailbox tests.
+  await delegateToLead(flow, runId);
+  flow.store.mutate(runId, (mutableRun) => {
+    mutableRun.mailbox = [];
+  });
   flow.gateway.markEveryAgentIdle();
   flow.gateway.prompts.length = 0;
   const { masterLeadAgentId, supervisorAgentId } = flow.run(runId);

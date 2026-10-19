@@ -227,14 +227,29 @@ describe("pipeline completion and integration", () => {
       summary: "All features and End-User UAT passed.",
     });
     expect(leadReport.isError).toBe(false);
+    const firstCycleMasterLeadId = flow.run(runId).masterLeadAgentId;
     const supervisorAccept = await flow.callAsRole(runId, "supervisor", null, "slp_present_to_manager", {
       report: "Đã kiểm thử UAT và tự động merge vào nhánh gốc.",
     });
     expect(supervisorAccept.isError).toBe(false);
     expect(flow.run(runId).status).toBe("completed");
+    // Only the Supervisor remains alive after completion; the first cycle's Master Lead, Forked Leads and Peers are all archived.
+    expect(flow.gateway.archivedAgentIds).not.toContain(flow.run(runId).supervisorAgentId);
+    expect(flow.gateway.archivedAgentIds).toContain(firstCycleMasterLeadId);
     // Only owned pipeline peer worktree workspaces are archived; the shared Supervisor/Master Lead workspace stays open.
     expect(flow.paseo.archivedWorkspaceIds).not.toContain(flow.run(runId).supervisorWorkspaceId);
     expect(flow.paseo.archivedWorkspaceIds.length).toBeGreaterThanOrEqual(3);
+
+    // Follow-up requirements in the same session automatically spawn a fresh Master Lead.
+    const followUpDelegate = await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
+      acceptanceCriteria: "Add audit logging for combined auth and billing actions.",
+    });
+    expect(followUpDelegate.isError).toBe(false);
+    const secondCycleMasterLeadId = flow.run(runId).masterLeadAgentId;
+    expect(secondCycleMasterLeadId).not.toBe(firstCycleMasterLeadId);
+    expect(flow.gateway.archivedAgentIds).not.toContain(secondCycleMasterLeadId);
+    expect(flow.run(runId).status).toBe("planning");
+    expect(flow.mailTo(runId, secondCycleMasterLeadId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
   });
 
   it("lets Master Lead split a spec into parallel tasks, forks one dedicated Forked Lead per task reused across stages, and serializes concurrent merges", async () => {

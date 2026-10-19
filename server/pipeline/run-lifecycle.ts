@@ -102,7 +102,7 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     createdAt: now,
     updatedAt: now,
   });
-  // Create both run-level agents before prompting either one, so delegation cannot target a missing Lead.
+  // Only spawn the Supervisor at session startup; Master Lead is created lazily when the Supervisor delegates work.
   const supervisor = await ctx.gateway.createAgent({
     runId,
     role: "supervisor",
@@ -114,40 +114,58 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     title: `[${ROLE_LABELS.supervisor}] [${runMetadata.title}]`,
     awaitTool: null,
   });
-  const masterLead = await ctx.gateway.createAgent({
-    runId,
-    role: "master_lead",
-    taskId: null,
-    provider: providers.lead,
-    thinkingOptionId: providers.leadThinkingOptionId ?? undefined,
-    permissionModeId: providers.leadPermissionModeId ?? undefined,
-    parentAgentId: supervisor.agentId,
-    workspaceId: supervisorWorkspace.workspaceId,
-    title: `[${ROLE_LABELS.master_lead}] [${runMetadata.title}]`,
-    awaitTool: null,
-  });
   ctx.store.mutate(runId, (mutableRun) => {
-    mutableRun.masterLeadAgentId = masterLead.agentId;
     mutableRun.supervisorAgentId = supervisor.agentId;
     mutableRun.status = "delegating";
   });
-  // The Supervisor's real delegation starts planning; there is no READY-only Lead warmup turn.
+  // Prompt only the Supervisor at startup so no idle Master Lead session clutters the workspace before delegation.
   await ctx.gateway.prompt(supervisor.agentId, supervisorBriefing());
   ctx.logEvent(runId, { taskId: null, from: "manager", to: supervisor.agentId, kind: "run.started", summary: `${runMetadata.title} (${input.mode})`, outcome: "info" });
   return { runId, supervisorAgentId: supervisor.agentId, supervisorWorkspaceId: supervisorWorkspace.workspaceId };
 }
 
-export function delegate(ctx: PipelineContext, runId: string, acceptanceCriteria: string): string {
+// Reuse an unarchived Master Lead when available, or spawn a fresh Master Lead in the shared base workspace when starting or resuming delegation.
+async function ensureActiveMasterLead(ctx: PipelineContext, runId: string): Promise<string> {
+  const initialRun = ctx.store.require(runId);
+  const existingMasterLeadRecord = initialRun.masterLeadAgentId
+    ? initialRun.agents[initialRun.masterLeadAgentId]
+    : undefined;
+  if (existingMasterLeadRecord && !existingMasterLeadRecord.archivedAt) {
+    return existingMasterLeadRecord.agentId;
+  }
+  const spawnedMasterLead = await ctx.gateway.createAgent({
+    runId,
+    role: "master_lead",
+    taskId: null,
+    provider: initialRun.providers.lead,
+    thinkingOptionId: initialRun.providers.leadThinkingOptionId ?? undefined,
+    permissionModeId: initialRun.providers.leadPermissionModeId ?? undefined,
+    parentAgentId: initialRun.supervisorAgentId || undefined,
+    workspaceId: initialRun.devWorkspaceId,
+    title: `[${ROLE_LABELS.master_lead}] [${initialRun.title}]`,
+    awaitTool: null,
+  });
+  const latestRun = ctx.store.require(runId);
+  if (latestRun.status === "aborted") {
+    await ctx.gateway.archive(spawnedMasterLead.agentId).catch(() => undefined);
+    throw new ToolError("This run has finished.");
+  }
+  return spawnedMasterLead.agentId;
+}
+
+export async function delegate(ctx: PipelineContext, runId: string, acceptanceCriteria: string): Promise<string> {
   const run = ctx.store.require(runId);
-  // Delegating twice would reset the Master Lead mid-plan; rework uses a fresh pipeline instead.
-  if (run.criteria !== null && run.status !== "delegating") {
+  // Delegating twice during an active cycle would reset the Master Lead mid-plan; allow fresh delegation once a prior cycle completed.
+  if (run.criteria !== null && run.status !== "delegating" && run.status !== "completed") {
     throw new ToolError("The project was already delegated. Use slp_request_rework for changes.");
   }
+  const activeMasterLeadId = await ensureActiveMasterLead(ctx, runId);
   ctx.store.mutate(runId, (mutableRun) => {
+    mutableRun.masterLeadAgentId = activeMasterLeadId;
     mutableRun.criteria = acceptanceCriteria;
     mutableRun.status = "planning";
     // Delegation and its assignment must survive reload together; a saved plan state alone cannot wake the Lead.
-    mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId, delegationMessage(acceptanceCriteria), "slp_define_pipeline"));
+    mutableRun.mailbox.push(stageMail(activeMasterLeadId, delegationMessage(acceptanceCriteria), "slp_define_pipeline"));
   });
   return "Delegated to the Master Lead. Tell the Supreme Manager in Vietnamese that work has started, then end your turn.";
 }
@@ -174,14 +192,16 @@ export function report(ctx: PipelineContext, runId: string, summary: string): st
   return "Report sent to the Supervisor. End your turn.";
 }
 
-export function requestRework(ctx: PipelineContext, runId: string, feedback: string): string {
+export async function requestRework(ctx: PipelineContext, runId: string, feedback: string): Promise<string> {
   const run = ctx.store.require(runId);
-  // Allow rework both during initial reporting and when the human requests changes at the final approval gate.
-  if (run.status !== "reporting" && run.status !== "awaiting_user") {
+  // Allow rework during initial reporting, at the final approval gate, or when follow-up changes are requested after completion.
+  if (run.status !== "reporting" && run.status !== "awaiting_user" && run.status !== "completed") {
     throw new ToolError(`Cannot request rework while run is '${run.status}'.`);
   }
+  const activeMasterLeadId = await ensureActiveMasterLead(ctx, runId);
   // Integrated pipelines are immutable history; rework starts a new Lead-authored pipeline instead of reopening a closed stage.
   ctx.store.mutate(runId, (mutableRun) => {
+    mutableRun.masterLeadAgentId = activeMasterLeadId;
     mutableRun.status = "planning";
     mutableRun.gate = null;
     const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
@@ -194,7 +214,7 @@ export function requestRework(ctx: PipelineContext, runId: string, feedback: str
       (queuedMessage) => !(queuedMessage.toAgentId === mutableRun.supervisorAgentId && queuedMessage.awaitTool === "slp_present_to_manager"),
     );
     // A rework request is a new pipeline assignment, so its message belongs to the same durable transition.
-    mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId,
+    mutableRun.mailbox.push(stageMail(activeMasterLeadId,
       `${reworkNotice(feedback)}\nDefine a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
   });
   return "Sent back to the Master Lead. End your turn while it defines a fresh pipeline.";
@@ -237,7 +257,7 @@ export async function presentToManager(ctx: PipelineContext, runId: string, asse
 
 async function retireRunResources(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
-  // The Supervisor remains available for the Supreme Manager; every Lead and stage peer is retired recursively in bottom-up order.
+  // The Supervisor remains available for the Supreme Manager; Master Lead, Forked Leads and stage peers are retired bottom-up.
   await archiveAgentSubtree(ctx, runId, run.supervisorAgentId);
   await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
 }

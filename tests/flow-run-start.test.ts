@@ -5,25 +5,29 @@ import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, definePipeline, delegateToLead, st
 const createFlow = useFlowFixture();
 
 describe("dynamic pipeline startup", () => {
-  it("starts only orchestration roles in the Supervisor workspace on baseBranch, then delegates acceptance criteria to the Lead", async () => {
+  it("starts only the Supervisor in the base workspace on baseBranch, then lazily spawns Master Lead on delegation", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
     const run = flow.run(runId);
 
     expect(run.status).toBe("delegating");
     expect(run.tasks).toEqual({});
-    // Master Lead shares the Supervisor's checkout on baseBranch so finalized pipeline branches merge straight into baseBranch.
+    // Only the Supervisor exists at startup; Master Lead is created lazily when the Supervisor delegates.
     expect(run.devWorkspaceId).toBe(run.supervisorWorkspaceId);
     expect(run.devCwd).toBe(flow.repoPath);
     expect(run.integrationBranch).toBe(run.baseBranch);
     expect(flow.paseo.createdWorkspaces).toHaveLength(0);
-    expect(Object.values(run.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "supervisor"]);
-    expect(flow.gateway.createdAgents.every(({ spec }) => spec.workspaceId === run.supervisorWorkspaceId)).toBe(true);
-    expect(flow.gateway.createdAgents.every(({ spec }) => spec.pipelineId == null && spec.stageId == null)).toBe(true);
+    expect(run.masterLeadAgentId).toBe("");
+    expect(Object.values(run.agents).map((agent) => agent.role)).toEqual(["supervisor"]);
 
     await delegateToLead(flow, runId);
-    expect(flow.run(runId).status).toBe("planning");
-    expect(flow.mailTo(runId, run.masterLeadAgentId).at(-1)?.text).toContain("slp_define_pipeline");
+    const delegatedRun = flow.run(runId);
+    expect(delegatedRun.status).toBe("planning");
+    expect(delegatedRun.masterLeadAgentId).toBeTruthy();
+    expect(Object.values(delegatedRun.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "supervisor"]);
+    expect(flow.gateway.createdAgents.every(({ spec }) => spec.workspaceId === delegatedRun.supervisorWorkspaceId)).toBe(true);
+    expect(flow.gateway.createdAgents.every(({ spec }) => spec.pipelineId == null && spec.stageId == null)).toBe(true);
+    expect(flow.mailTo(runId, delegatedRun.masterLeadAgentId).at(-1)?.text).toContain("slp_define_pipeline");
   });
 
   it("accepts the Lead's complete JSON and creates one Forked Lead in the base workspace plus equal peers in the pipeline worktree", async () => {

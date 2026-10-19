@@ -63,7 +63,8 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
           throw new ToolError("Agent is no longer authorized for this run.");
         }
         if (lookup.run.engineVersion !== "dynamic-stages-v1") throw new ToolError("This historical run uses a retired engine. Start a new run.");
-        if (["completed", "aborted"].includes(lookup.run.status)) throw new ToolError("This run has finished.");
+        // Only aborted runs are permanently closed; completed runs keep Supervisor and Master Lead alive for follow-up pipelines.
+        if (lookup.run.status === "aborted") throw new ToolError("This run has finished.");
         if (!isBusToolName(toolName)) throw new ToolError(`Unknown tool '${toolName}'.`);
         const definition = BUS_TOOL_DEFINITIONS[toolName];
         if (!(definition.roles as readonly SlpRole[]).includes(caller.role)) throw new ToolError(`Tool '${toolName}' is not available to ${caller.role}.`);

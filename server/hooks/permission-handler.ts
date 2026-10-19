@@ -19,9 +19,9 @@ function isFinalizingForkedLead(run: Run, agentRecord: AgentRecord): boolean {
 }
 
 function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
-  // Archived agents and legacy or finished runs must never receive new write or shell permissions.
-  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
-  if (run.status === "completed" || run.status === "aborted") return false;
+  // Archived agents and legacy or aborted runs must never receive new write or shell permissions.
+  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
+  if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
   if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     if (isFinalizingForkedLead(run, agentRecord)) return true;
@@ -38,8 +38,9 @@ function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
 
 // Completed-stage peers and sibling Forked Leads remain alive until integration finishes so they can answer conflict questions read-only.
 function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean {
-  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1") return false;
-  if (run.status === "completed" || run.status === "aborted") return false;
+  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
+  // Supervisor and Master Lead stay alive after a cycle completes so the user can issue follow-up requests in the same session.
+  if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
   if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];

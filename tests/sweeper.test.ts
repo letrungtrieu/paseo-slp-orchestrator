@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { startSweeper } from "../server/sweeper";
 import type { FakePaseoHolder } from "./helpers/fake-paseo";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, delegateToLead, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
 import { permissionRequest } from "./helpers/permission-request";
 
 const createFlow = useFlowFixture();
@@ -24,7 +24,18 @@ const tick = () => vi.advanceTimersByTimeAsync(SWEEP_INTERVAL_MS);
 
 async function sweptRun(withPipeline = false) {
   const flow = await createFlow({ mode: "FULL_AUTO" });
-  const runId = withPipeline ? (await startedRunWithPipeline(flow, DEFAULT_PIPELINE)).runId : await flow.startRun();
+  let runId: string;
+  if (withPipeline) {
+    runId = (await startedRunWithPipeline(flow, DEFAULT_PIPELINE)).runId;
+  } else {
+    runId = await flow.startRun();
+    // Delegate once so the Master Lead is lazily spawned, then clear initial delegation mail before sweeper assertions.
+    await delegateToLead(flow, runId);
+    flow.store.mutate(runId, (mutableRun) => {
+      mutableRun.status = "delegating";
+      mutableRun.mailbox = [];
+    });
+  }
   // Isolate sweep delivery from the separate bootstrap greeting turn.
   flow.gateway.markEveryAgentIdle();
   flow.gateway.prompts.length = 0;

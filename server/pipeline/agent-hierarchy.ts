@@ -152,6 +152,14 @@ export async function archiveOwnedWorkspaces(ctx: PipelineContext, run: Run): Pr
     // Workspace cleanup is best effort because a user can close an external Paseo workspace first.
     await paseo.workspaces.archive(workspaceId).catch(() => undefined);
   }
+  // Remove retired pipeline workspaces from the persisted map so follow-up pipelines never reuse an archived handle.
+  if (ownedWorkspaceIds.size > 0 && ctx.store.find(run.id)) {
+    ctx.store.mutate(run.id, (mutableRun) => {
+      for (const archivedWorkspaceId of ownedWorkspaceIds) {
+        delete mutableRun.pipelineWorkspaces[archivedWorkspaceId];
+      }
+    });
+  }
 }
 
 // Archive all unarchived descendants of rootAgentId in bottom-up order, including late in-flight creations.
