@@ -1,15 +1,21 @@
 // Pipeline creation is the boundary where Lead-authored JSON becomes durable orchestration state.
 import { randomUUID } from "node:crypto";
 import {
+  PEER_UNDERSTAND_STAGE_ID,
   PipelineInputDefinitionSchema,
   PipelineStateSchema,
   type PipelineDefinition,
   type PipelineEnvelope,
   type PipelineInputDefinition,
+  type PipelineStageDefinition,
   type PipelineState,
+  type StageState,
 } from "../../shared/pipeline";
+import type { Run } from "../../shared/state";
+import type { BusCaller } from "../bus/http-mcp";
 import { peerRole } from "../project-prompts/defaults";
 import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
+import { requirePipeline } from "./stage-context";
 import { recoverPipelines } from "./stage-engine";
 import type { PipelineContext } from "./context";
 import { ToolError } from "./tool-error";
@@ -32,6 +38,46 @@ async function withRunDefineLock<ResultType>(runId: string, operation: () => Pro
 
 function pipelineKey(name: string, version: string): string {
   return `${name.trim().toLocaleLowerCase()}\u0000${version.trim()}`;
+}
+
+// Validates stage names and .slp/peers role references, then builds fresh pending StageState records.
+export function materializePipelineStages(
+  run: Run,
+  stageDefinitions: readonly PipelineStageDefinition[],
+): StageState[] {
+  if (stageDefinitions.length === 0) {
+    throw new ToolError("Provide at least one stage when creating the pipeline.");
+  }
+  const seenStageNames = new Set<string>();
+  return stageDefinitions.map((stageDefinition) => {
+    const normalizedStageName = stageDefinition.name.trim().toLocaleLowerCase();
+    if (seenStageNames.has(normalizedStageName)) {
+      throw new ToolError(`Stage name '${stageDefinition.name}' is duplicated.`);
+    }
+    seenStageNames.add(normalizedStageName);
+    for (const peerAssignment of stageDefinition.peers) {
+      try {
+        // The snapshot is authoritative: arbitrary JSON cannot smuggle an unconfigured workflow.
+        peerRole(run.promptConfig, peerAssignment.role);
+      } catch (roleError) {
+        throw new ToolError(roleError instanceof Error ? roleError.message : String(roleError));
+      }
+    }
+    return {
+      name: stageDefinition.name,
+      goal: stageDefinition.goal,
+      peers: stageDefinition.peers.map(({ role, task }) => ({ role, task })),
+      id: randomUUID(),
+      status: "pending",
+      forkedLeadAgentId: null,
+      peerAgentIds: [],
+      reports: [],
+      messages: [],
+      result: null,
+      startedAt: null,
+      completedAt: null,
+    };
+  });
 }
 
 function normalizeInputDefinitions(rawInput: PipelineEnvelope | PipelineInputDefinition): PipelineInputDefinition[] {
@@ -98,8 +144,10 @@ function validatePeerRoles(
 
 function sanitizeDefinition(definition: PipelineInputDefinition, canonicalWorktree: string): PipelineDefinition {
   return {
-    ...definition,
+    name: definition.name,
+    version: definition.version,
     worktree: canonicalWorktree,
+    description: definition.description,
     // systemPrompt is deliberately discarded; only the project role Markdown can define it.
     stages: definition.stages.map((stage) => ({
       ...stage,
@@ -131,12 +179,100 @@ function recheckWorkspaceAndIdentity(
   if (worktreeCollision) throw new ToolError(`Worktree or branch is already assigned to pipeline '${worktreeCollision.name}'.`);
 }
 
+// Handles Forked Lead creating the pipeline stages after confirming mutual understanding with Base Peer in peer_understand.
+function definePipelineStagesFromForkedLead(
+  ctx: PipelineContext,
+  caller: BusCaller,
+  rawInput: PipelineEnvelope | PipelineInputDefinition,
+): string {
+  const currentRun = ctx.store.require(caller.runId);
+  const callerRecord = currentRun.agents[caller.agentId];
+  if (!callerRecord || callerRecord.archivedAt || !callerRecord.pipelineId) {
+    throw new ToolError("Forked Lead has no active pipeline assignment.");
+  }
+  const targetPipelineId =
+    ("pipelineId" in rawInput && rawInput.pipelineId) ? rawInput.pipelineId : callerRecord.pipelineId;
+  const targetPipeline = requirePipeline(currentRun, targetPipelineId);
+  if (
+    currentRun.status !== "running"
+    || targetPipeline.status !== "peer_understand"
+    || targetPipeline.peerUnderstand.status !== "running"
+    || targetPipeline.peerUnderstand.forkedLeadAgentId !== caller.agentId
+  ) {
+    throw new ToolError("Forked Lead can only create pipeline stages while its peer_understand phase is running.");
+  }
+  // Enforce that Forked Lead and Base Peer have completed discovery and confirmed understanding before creating stages.
+  if (targetPipeline.peerUnderstand.reports.length === 0) {
+    throw new ToolError(
+      "Confirm mutual understanding with Base Peer first: set the investigation goal via slp_send_peer_message and wait for Base Peer's slp_stage_report before creating the pipeline stages.",
+    );
+  }
+  const requestedStages =
+    ("stages" in rawInput && rawInput.stages)
+    || ("pipeline" in rawInput && rawInput.pipeline?.stages)
+    || ("pipelines" in rawInput && rawInput.pipelines?.[0]?.stages)
+    || [];
+  const materializedStages = materializePipelineStages(currentRun, requestedStages);
+  const confirmationSummary =
+    ("summary" in rawInput && rawInput.summary)
+    || ("pipeline" in rawInput && rawInput.pipeline?.description)
+    || `Confirmed mutual understanding with Base Peer and created ${materializedStages.length} pipeline stage(s).`;
+  const confirmedAt = new Date().toISOString();
+
+  ctx.store.mutate(caller.runId, (mutableRun) => {
+    const mutablePipeline = requirePipeline(mutableRun, targetPipelineId);
+    mutablePipeline.stages = materializedStages;
+    mutablePipeline.peerUnderstand.result = {
+      summary: confirmationSummary,
+      approvedBy: caller.agentId,
+      approvedAt: confirmedAt,
+    };
+    mutablePipeline.peerUnderstand.status = "completing";
+    mutablePipeline.updatedAt = confirmedAt;
+    const mutableCaller = mutableRun.agents[caller.agentId];
+    if (mutableCaller) {
+      mutableCaller.awaitingTool = null;
+      mutableCaller.awaitingSince = null;
+      mutableCaller.nudges = 0;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) =>
+        !(
+          queuedMessage.toAgentId === caller.agentId
+          && (queuedMessage.awaitTool === "slp_define_pipeline" || queuedMessage.awaitTool === "slp_approve_stage")
+        ),
+    );
+  });
+
+  ctx.logEvent(caller.runId, {
+    taskId: null,
+    from: caller.agentId,
+    to: "pipeline",
+    kind: "stage.approved",
+    summary: `${targetPipeline.name}/${PEER_UNDERSTAND_STAGE_ID}: ${confirmationSummary} (${materializedStages.length} stages defined)`,
+    outcome: "delivered",
+  });
+  void recoverPipelines(ctx, caller.runId).catch((recoveryError) => {
+    console.error(`[slp] stage startup failed after Forked Lead defined pipeline ${targetPipelineId}`, recoveryError);
+  });
+  return JSON.stringify({
+    pipelineId: targetPipeline.id,
+    name: targetPipeline.name,
+    stagesDefined: materializedStages.length,
+    message: "Mutual understanding confirmed and pipeline stages created. End your turn while Base Peer's session is checkpointed and Stage 1 starts.",
+  });
+}
+
 export async function definePipeline(
   ctx: PipelineContext,
   runId: string,
   rawInput: PipelineEnvelope | PipelineInputDefinition,
+  caller?: BusCaller,
 ): Promise<string> {
   return withRunDefineLock(runId, async () => {
+    if (caller?.role === "forked_lead") {
+      return definePipelineStagesFromForkedLead(ctx, caller, rawInput);
+    }
     const run = ctx.store.require(runId);
     if (!["planning", "running"].includes(run.status)) {
       throw new ToolError(`Cannot define a pipeline while run is '${run.status}'.`);
@@ -175,6 +311,20 @@ export async function definePipeline(
         ...sanitizedDefinition,
         id: pipelineId,
         status: "queued",
+        // Every newly defined pipeline runs peer_understand first so Forked Lead sets the investigation goal,
+        // Base Peer investigates and aligns with Forked Lead, and the stages are confirmed before Stage 1 forks.
+        peerUnderstand: {
+          status: "pending",
+          investigationGoal: definition.investigationGoal ?? null,
+          forkedLeadAgentId: null,
+          basePeerAgentId: null,
+          basePeerSessionId: null,
+          reports: [],
+          messages: [],
+          result: null,
+          startedAt: null,
+          completedAt: null,
+        },
         currentStageIndex: 0,
         workspaceId: workspace.workspaceId,
         branch: workspace.branch,

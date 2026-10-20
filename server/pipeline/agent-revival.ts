@@ -1,5 +1,6 @@
 // Detects and respawns dead, archived or wedged Master Lead, Forked Lead and Peer sessions
 // while preserving healthy sibling peers and re-queueing the exact pending workflow obligation.
+import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
@@ -272,8 +273,32 @@ export async function markStageParticipantForRevival(
     mutableParticipant.waitingForAgentId = null;
     mutableParticipant.deferredTool = null;
     const targetPipeline = mutableRun.pipelines[mutableParticipant.pipelineId];
-    const currentStage = targetPipeline?.stages[targetPipeline.currentStageIndex];
-    if (!targetPipeline || !currentStage || currentStage.id !== mutableParticipant.stageId) return;
+    if (!targetPipeline) return;
+    // Support reviving Forked Lead or Base Peer when peer_understand is the active phase.
+    if (
+      mutableParticipant.stageId === PEER_UNDERSTAND_STAGE_ID
+      && targetPipeline.peerUnderstand.status !== "completed"
+    ) {
+      if (targetPipeline.peerUnderstand.forkedLeadAgentId === targetAgentId) {
+        targetPipeline.peerUnderstand.forkedLeadAgentId = null;
+        const basePeerId = targetPipeline.peerUnderstand.basePeerAgentId;
+        if (basePeerId && mutableRun.agents[basePeerId]?.parentAgentId === targetAgentId) {
+          mutableRun.agents[basePeerId].parentAgentId = null;
+        }
+      }
+      if (targetPipeline.peerUnderstand.basePeerAgentId === targetAgentId) {
+        targetPipeline.peerUnderstand.basePeerAgentId = null;
+      }
+      targetPipeline.peerUnderstand.status = "starting";
+      if (targetPipeline.status === "paused" && !targetPipeline.gate) {
+        targetPipeline.status = "peer_understand";
+        targetPipeline.pausedReason = null;
+      }
+      affectedPipelineId = targetPipeline.id;
+      return;
+    }
+    const currentStage = targetPipeline.stages[targetPipeline.currentStageIndex];
+    if (!currentStage || currentStage.id !== mutableParticipant.stageId) return;
     if (currentStage.forkedLeadAgentId === targetAgentId) {
       currentStage.forkedLeadAgentId = null;
       // Detach surviving stage peers before archiving a wedged coordinator so they can be re-parented to its replacement.
@@ -310,6 +335,26 @@ function selectStageTargetsForCohortRevival(
   liveStatuses: Map<string, AgentLiveStatus>,
 ): string[] {
   const targetPipeline = requirePipeline(run, pipelineId);
+  if (targetPipeline.peerUnderstand.status !== "completed") {
+    const peerUnderstandParticipants = [
+      targetPipeline.peerUnderstand.forkedLeadAgentId,
+      targetPipeline.peerUnderstand.basePeerAgentId,
+    ].filter((agentId): agentId is string => Boolean(agentId));
+    const brokenPeerUnderstandParticipants = peerUnderstandParticipants.filter((agentId) => {
+      const liveStatus = liveStatuses.get(agentId);
+      const persistedRecord = run.agents[agentId];
+      return !persistedRecord || Boolean(persistedRecord.archivedAt) || !liveStatus || liveStatus.archived || liveStatus.status === "error";
+    });
+    if (brokenPeerUnderstandParticipants.length > 0) return brokenPeerUnderstandParticipants;
+    const stalledPeerUnderstandParticipants = peerUnderstandParticipants.filter((agentId) => Boolean(run.agents[agentId]?.awaitingTool));
+    if (stalledPeerUnderstandParticipants.length > 0) return stalledPeerUnderstandParticipants;
+    if (targetPipeline.peerUnderstand.reports.length === 0 && targetPipeline.peerUnderstand.basePeerAgentId) {
+      return [targetPipeline.peerUnderstand.basePeerAgentId];
+    }
+    return targetPipeline.peerUnderstand.forkedLeadAgentId
+      ? [targetPipeline.peerUnderstand.forkedLeadAgentId]
+      : peerUnderstandParticipants;
+  }
   const currentStage = targetPipeline.stages[targetPipeline.currentStageIndex];
   if (!currentStage) throw new ToolError(`Pipeline '${targetPipeline.name}' has no active stage to revive.`);
   const stageParticipants = [currentStage.forkedLeadAgentId, ...currentStage.peerAgentIds].filter(

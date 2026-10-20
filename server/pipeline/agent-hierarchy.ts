@@ -9,6 +9,7 @@ const archivingSubtreeKeys = new Set<string>();
 // Role depth ensures leaf peers close before stage coordinators and stage coordinators close before Master Lead.
 const ROLE_ARCHIVE_PRIORITY: Readonly<Record<string, number>> = {
   peer: 0,
+  base_peer: 0,
   forked_lead: 1,
   master_lead: 2,
   supervisor: 3,
@@ -368,7 +369,7 @@ export async function handleAgentArchived(
       if (targetRecord.role === "master_lead") {
         // Pause active pipelines without queueing a resume prompt so the sweeper does not respawn archived stage cohorts.
         for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
-          if (["queued", "starting", "running"].includes(mutablePipeline.status)) {
+          if (["queued", "peer_understand", "starting", "running"].includes(mutablePipeline.status)) {
             mutablePipeline.status = "paused";
             mutablePipeline.pausedReason ??= "Master Lead was archived; dependent stage leads and peers were archived.";
             mutablePipeline.updatedAt = effectiveArchivedAt;
@@ -377,13 +378,19 @@ export async function handleAgentArchived(
       } else if (targetRecord.role === "forked_lead" && targetRecord.pipelineId) {
         const mutablePipeline = mutableRun.pipelines[targetRecord.pipelineId];
         const currentStage = mutablePipeline?.stages[mutablePipeline.currentStageIndex];
-        // Pause only when the archived Forked Lead owns the currently running stage, leaving completed prior stages untouched.
-        if (
+        // Pause when the archived Forked Lead owns either the active peer_understand phase or the currently running stage.
+        const ownsActivePeerUnderstand = Boolean(
+          mutablePipeline?.status === "peer_understand"
+          && mutablePipeline.peerUnderstand.forkedLeadAgentId === archivedAgentId
+          && ["pending", "starting", "running"].includes(mutablePipeline.peerUnderstand.status),
+        );
+        const ownsActiveStage = Boolean(
           mutablePipeline
           && ["queued", "starting", "running"].includes(mutablePipeline.status)
           && currentStage?.id === targetRecord.stageId
-          && ["pending", "starting", "running"].includes(currentStage.status)
-        ) {
+          && ["pending", "starting", "running"].includes(currentStage.status),
+        );
+        if (mutablePipeline && (ownsActivePeerUnderstand || ownsActiveStage)) {
           mutablePipeline.status = "paused";
           mutablePipeline.pausedReason ??= `Stage Lead (${archivedAgentId}) was archived; child peers were archived.`;
           mutablePipeline.updatedAt = effectiveArchivedAt;

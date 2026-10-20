@@ -28,6 +28,8 @@ function projectDefinition(
   if (role === "master_lead") return projectPrompts.lead;
   // Forked Lead uses its dedicated .slp/FORKED_LEAD.md file, falling back to LEAD.md only for older SQLite snapshots.
   if (role === "forked_lead") return projectPrompts.forkedLead ?? projectPrompts.lead;
+  // Base Peer uses its dedicated .slp/BASE_PEER.md file, falling back to the seeded Base Peer definition for older snapshots.
+  if (role === "base_peer") return projectPrompts.basePeer ?? defaultProjectPrompts().basePeer!;
   return peerRole(projectPrompts, projectRoleId ?? "");
 }
 

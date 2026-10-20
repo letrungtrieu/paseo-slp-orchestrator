@@ -208,8 +208,10 @@ export async function finalizePipeline(
     const remainingPipelineAgents = Object.values(preArchiveRun.agents).filter(
       (agentRecord) => agentRecord.pipelineId === pipelineId && !agentRecord.archivedAt,
     );
-    // Close all peers of this integrated pipeline first so parent archival never cascades to active children.
-    for (const peerRecord of remainingPipelineAgents.filter((agentRecord) => agentRecord.role === "peer")) {
+    // Close all peers (including Base Peer) of this integrated pipeline first so parent archival never cascades to active children.
+    for (const peerRecord of remainingPipelineAgents.filter(
+      (agentRecord) => agentRecord.role === "peer" || agentRecord.role === "base_peer",
+    )) {
       await ctx.gateway.archive(peerRecord.agentId).catch(() => undefined);
     }
     if (willAllPipelinesBeIntegrated) {

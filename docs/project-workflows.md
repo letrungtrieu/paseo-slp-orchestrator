@@ -7,6 +7,7 @@ Selecting a repository in SLP prepares `.slp` before any agents are created. A m
 ├── SUPERVISOR.md
 ├── LEAD.md
 ├── FORKED_LEAD.md
+├── BASE_PEER.md
 └── peers/
     ├── DEVELOPER.md
     ├── END_USER_UAT.md
@@ -15,7 +16,7 @@ Selecting a repository in SLP prepares `.slp` before any agents are created. A m
     └── SECURITY_REVIEWER.md
 ```
 
-Existing custom prompt files are preserved. Role discovery only reads the three root role files (`SUPERVISOR.md`, `LEAD.md`, `FORKED_LEAD.md`) and Markdown files inside `.slp/peers/`. Other files or subdirectories under `.slp/` (such as `.slp/architecture/` or legacy `MASTER_SPEC.md` and `ACCEPTANCE_DOC.md`) are ignored during role discovery. Role IDs come from YAML front matter, independently of filenames.
+Existing custom prompt files are preserved. Role discovery only reads the four root role files (`SUPERVISOR.md`, `LEAD.md`, `FORKED_LEAD.md`, `BASE_PEER.md`) and Markdown files inside `.slp/peers/`. Other files or subdirectories under `.slp/` (such as `.slp/architecture/` or legacy `MASTER_SPEC.md` and `ACCEPTANCE_DOC.md`) are ignored during role discovery. Role IDs come from YAML front matter, independently of filenames.
 
 ## File format
 
@@ -43,7 +44,7 @@ features:
 
 `role` and `description` are required. Role names are normalized to lowercase IDs, with spaces or underscores converted to hyphens: `Invoice Specialist` becomes `invoice-specialist`. Duplicate IDs and malformed YAML stop initialization with the affected path.
 
-`model` and `thinking` are optional, independently inherited from the corresponding Supervisor, Lead or Peer selections in the SLP form. Omitted, empty or null fields inherit. A full `provider/model-id` selects a model and provider; a short model ID keeps the provider selected in the form. `thinking` uses the selected model's Paseo thinking option ID. `LEAD.md` model settings also apply to temporary Forked Leads, so native forks use the actual Lead provider.
+`model` and `thinking` are optional, independently inherited from the corresponding Supervisor, Lead or Peer selections in the SLP form. Omitted, empty or null fields inherit. Root role files (`SUPERVISOR.md`, `LEAD.md`, `FORKED_LEAD.md`, `BASE_PEER.md`) can select a full `provider/model-id` or a short model ID. Before a pipeline runs its declared stages, it runs the `peer_understand` phase in the pipeline worktree using a `base_peer` (`.slp/BASE_PEER.md`) alongside the pipeline's `forked_lead`. Once `forked_lead` approves `peer_understand`, every subsequent stage peer in that pipeline is forked from `base_peer`'s session so it retains the full task investigation context without re-investigating from scratch. Because stage peers fork from `base_peer`, model definitions in `.slp/peers/*.md` depend on `base_peer`'s provider and automatically fall back to the global SLP config (`run.providers.peer`) if a peer file specifies a model that does not match or exist under `base_peer`'s provider.
 
 Run modes apply to the dynamic pipeline generically: `FULL_AUTO` leaves human gates closed, `STEP_BY_STEP_DEBUG` opens a gate after each approved stage, and `SEMI_AUTO` opens one before integration. Forked Lead approval is still required for each stage in every mode.
 

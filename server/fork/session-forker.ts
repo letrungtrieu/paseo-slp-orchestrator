@@ -36,11 +36,19 @@ export class ForkRegistry {
   constructor(private readonly forkers: readonly SessionForker[]) {}
 
   async resolve(source: ForkSource | null, provider: string): Promise<ForkBinding> {
-    // Without a session id there is nothing to resume, so the Forked Lead falls back to reading the stored spec through tools.
+    // Without a session id there is nothing to resume, so the forked agent falls back to reading the stored spec through tools.
     if (!source) {
       return { mode: "stored-spec", reason: "master lead has no provider session id yet" };
     }
     const family = providerFamily(provider);
+    const sourceFamily = providerFamily(source.provider);
+    // A peer that fell back to global config on a different provider family cannot resume a foreign provider's session ID.
+    if (sourceFamily !== family) {
+      return {
+        mode: "stored-spec",
+        reason: `target provider '${family}' does not match source session provider '${sourceFamily}'`,
+      };
+    }
     // Matched on the provider family, so any Claude model reuses the same adapter without being listed.
     const matchingForker = this.forkers.find((forker) => forker.family === family);
     if (!matchingForker) {

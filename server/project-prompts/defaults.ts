@@ -27,6 +27,13 @@ const DEFAULT_ROLES = [
     workflow: DEFAULT_WORKFLOWS.forked_lead.trim(),
   },
   {
+    role: "base-peer",
+    name: "Base Peer",
+    description: "Investigate the repository and align with the Forked Lead during peer_understand so all subsequent stage peers fork from a shared understanding of the task.",
+    file: "BASE_PEER.md",
+    workflow: DEFAULT_WORKFLOWS.base_peer.trim(),
+  },
+  {
     role: "developer",
     name: "Developer",
     description: "Implement scoped features and fixes with concrete input/logic/output metrics, step-by-step methodological arguments, and verifiable evidence in the shared pipeline worktree.",
@@ -108,8 +115,8 @@ export function defaultProjectPrompts(): ProjectPromptConfig {
     parseRoleMarkdown(definition.markdown, `.slp/${definition.relativePath}`),
   );
   // Root files have a fixed purpose; peer names are discovered solely from their front matter.
-  const [supervisor, lead, forkedLead, ...peers] = roles;
-  return { supervisor, lead, forkedLead, peers };
+  const [supervisor, lead, forkedLead, basePeer, ...peers] = roles;
+  return { supervisor, lead, forkedLead, basePeer, peers };
 }
 
 // Common UAT role aliases map to the project's configured .slp/peers/END_USER_UAT.md role when present.

@@ -11,40 +11,192 @@ export interface AgentModelSettings {
   permissionModeId?: string;
 }
 
+export interface ProviderModelCatalogEntry {
+  id: string;
+  provider?: string;
+  aliases?: readonly string[];
+}
+
 // Built-in plugin providers such as Antigravity declare unattended modes in their live catalog
 // rather than @getpaseo/protocol's static manifest, so include their native full-access mode here.
 export function unattendedModeForProvider(providerId: string): string | undefined {
   return getUnattendedModeId(providerId) ?? (providerId === "antigravity" ? "full-access" : undefined);
 }
 
+// Well-known model-id prefixes identify when a short model name in .slp/peers belongs to a foreign
+// provider family (for example `gpt-5.4` under a `claude` base_peer) even before querying a live catalog.
+function inferModelProviderFamily(shortModelId: string): string | null {
+  const normalizedModelId = shortModelId.trim().toLowerCase();
+  if (/^(?:claude(?:[-_.]|$)|sonnet(?:[-_.]|$)|opus(?:[-_.]|$)|haiku(?:[-_.]|$))/.test(normalizedModelId)) {
+    return "claude";
+  }
+  if (/^(?:gpt[-_.]|o[134](?:[-_.]|$)|codex(?:[-_.]|$)|chatgpt[-_.])/.test(normalizedModelId)) {
+    return "codex";
+  }
+  if (/^(?:gemini(?:[-_.]|$)|antigravity(?:[-_.]|$))/.test(normalizedModelId)) {
+    return "antigravity";
+  }
+  return null;
+}
+
+// Stage peers fork from base_peer, so a peer model override is valid only when it belongs to
+// base_peer's provider family and (when a provider model catalog is supplied) exists in that catalog.
+function isModelSupportedByBaseProvider(
+  candidateModelId: string,
+  basePeerProviderId: string,
+  availableProviderModels?: readonly ProviderModelCatalogEntry[],
+): boolean {
+  const normalizedCandidateId = candidateModelId.trim();
+  if (!normalizedCandidateId) return false;
+  if (normalizedCandidateId === "default") return true;
+
+  const inferredProviderFamily = inferModelProviderFamily(normalizedCandidateId);
+  if (inferredProviderFamily && inferredProviderFamily !== basePeerProviderId) {
+    return false;
+  }
+
+  if (!availableProviderModels || availableProviderModels.length === 0) {
+    return true;
+  }
+
+  // Filter to catalog entries that either omit provider (already scoped) or match basePeerProviderId.
+  const matchingProviderCatalog = availableProviderModels.filter(
+    (catalogEntry) => !catalogEntry.provider || catalogEntry.provider === basePeerProviderId,
+  );
+  if (matchingProviderCatalog.length === 0) {
+    return true;
+  }
+
+  const normalizedLookup = normalizedCandidateId.toLowerCase();
+  const qualifiedLookup = `${basePeerProviderId}/${normalizedCandidateId}`.toLowerCase();
+  return matchingProviderCatalog.some((catalogEntry) => {
+    const entryIdLower = catalogEntry.id.toLowerCase();
+    if (entryIdLower === normalizedLookup || entryIdLower === qualifiedLookup) return true;
+    return Boolean(
+      catalogEntry.aliases?.some((aliasName) => aliasName.toLowerCase() === normalizedLookup),
+    );
+  });
+}
+
+// Resolves a .slp/peers/*.md model string against base_peer's provider, returning null when the
+// requested model belongs to another provider or cannot be found for base_peer's provider.
+export function resolvePeerModelForBasePeerProvider(
+  configuredPeerModel: string,
+  basePeerProviderId: string,
+  availableProviderModels?: readonly ProviderModelCatalogEntry[],
+): string | null {
+  const trimmedPeerModel = configuredPeerModel.trim();
+  if (!trimmedPeerModel) return null;
+
+  if (trimmedPeerModel.includes("/")) {
+    const [explicitProviderId, ...remainingModelParts] = trimmedPeerModel.split("/");
+    const explicitModelId = remainingModelParts.join("/").trim();
+    // A peer file that names a different provider than base_peer cannot fork base_peer's session on that provider.
+    if (explicitProviderId !== basePeerProviderId || !explicitModelId) {
+      return null;
+    }
+    if (!isModelSupportedByBaseProvider(explicitModelId, basePeerProviderId, availableProviderModels)) {
+      return null;
+    }
+    return `${basePeerProviderId}/${explicitModelId}`;
+  }
+
+  if (!isModelSupportedByBaseProvider(trimmedPeerModel, basePeerProviderId, availableProviderModels)) {
+    return null;
+  }
+  return `${basePeerProviderId}/${trimmedPeerModel}`;
+}
+
 export function resolveAgentSettings(
-  configuration: ProjectPromptConfig | null | undefined, role: SlpRole,
-  projectRoleId: string | undefined, defaults: AgentModelSettings,
+  configuration: ProjectPromptConfig | null | undefined,
+  role: SlpRole,
+  projectRoleId: string | undefined,
+  defaults: AgentModelSettings,
+  availableProviderModels?: readonly ProviderModelCatalogEntry[],
 ): AgentModelSettings {
   const projectPrompts = configuration ?? defaultProjectPrompts();
-  // Forked Lead reads FORKED_LEAD.md when present, inheriting unset model/thinking fields from LEAD.md.
-  const definition = role === "supervisor" ? projectPrompts.supervisor
-    : role === "master_lead" ? projectPrompts.lead
-    : role === "forked_lead" ? (projectPrompts.forkedLead ?? projectPrompts.lead)
-    : projectRoleId ? peerRole(projectPrompts, projectRoleId) : projectPrompts.peers[0];
-  if (!definition) throw new Error("No project peer workflow is configured under .slp/peers");
-  const effectiveModel = role === "forked_lead"
-    ? (projectPrompts.forkedLead?.model ?? projectPrompts.lead.model)
-    : definition.model;
-  const effectiveThinking = role === "forked_lead"
-    ? (projectPrompts.forkedLead?.thinking ?? projectPrompts.lead.thinking)
-    : definition.thinking;
-  const modelSourcePath = role === "forked_lead" && !projectPrompts.forkedLead?.model
-    ? projectPrompts.lead.sourcePath
-    : definition.sourcePath;
   const defaultProviderId = defaults.provider.split("/", 1)[0];
-  // Full provider/model IDs can switch providers; a short model ID keeps the provider selected in the form.
+  const defaultPermissionModeId = defaults.permissionModeId ?? unattendedModeForProvider(defaultProviderId);
+
+  // Stage peers are forked from base_peer, so their .slp/peers model definitions depend on base_peer's
+  // provider and fall back to the global SLP configuration when no matching model exists for that provider.
+  if (role === "peer") {
+    const peerDefinition = projectRoleId ? peerRole(projectPrompts, projectRoleId) : projectPrompts.peers[0];
+    if (!peerDefinition) throw new Error("No project peer workflow is configured under .slp/peers");
+
+    const basePeerSettings = resolveAgentSettings(
+      projectPrompts,
+      "base_peer",
+      undefined,
+      defaults,
+      availableProviderModels,
+    );
+    const basePeerProviderId = basePeerSettings.provider.split("/", 1)[0];
+    const globalFallbackSettings: AgentModelSettings = {
+      provider: defaults.provider,
+      permissionModeId: defaultPermissionModeId,
+      thinkingOptionId: peerDefinition.thinking ?? defaults.thinkingOptionId,
+    };
+
+    if (!peerDefinition.model) {
+      // When no model is set in .slp/peers/*.md, stay on base_peer's provider if BASE_PEER.md switched providers;
+      // otherwise use the global config model directly.
+      if (basePeerProviderId !== defaultProviderId) {
+        return {
+          provider: basePeerSettings.provider,
+          permissionModeId: basePeerSettings.permissionModeId,
+          thinkingOptionId: peerDefinition.thinking ?? basePeerSettings.thinkingOptionId,
+        };
+      }
+      return globalFallbackSettings;
+    }
+
+    const matchedProviderModel = resolvePeerModelForBasePeerProvider(
+      peerDefinition.model,
+      basePeerProviderId,
+      availableProviderModels,
+    );
+    if (!matchedProviderModel) {
+      // Fallback to global config when the peer's model does not match or exist under base_peer's provider.
+      return globalFallbackSettings;
+    }
+
+    return {
+      provider: matchedProviderModel,
+      permissionModeId: basePeerSettings.permissionModeId,
+      thinkingOptionId: peerDefinition.thinking ?? defaults.thinkingOptionId,
+    };
+  }
+
+  // Root orchestration roles (supervisor, master_lead, forked_lead, base_peer) resolve directly against global defaults.
+  const fallbackBasePeerRole = defaultProjectPrompts().basePeer!;
+  const definition =
+    role === "supervisor"
+      ? projectPrompts.supervisor
+      : role === "master_lead"
+        ? projectPrompts.lead
+        : role === "forked_lead"
+          ? (projectPrompts.forkedLead ?? projectPrompts.lead)
+          : (projectPrompts.basePeer ?? fallbackBasePeerRole);
+  const effectiveModel =
+    role === "forked_lead"
+      ? (projectPrompts.forkedLead?.model ?? projectPrompts.lead.model)
+      : definition.model;
+  const effectiveThinking =
+    role === "forked_lead"
+      ? (projectPrompts.forkedLead?.thinking ?? projectPrompts.lead.thinking)
+      : definition.thinking;
+  const modelSourcePath =
+    role === "forked_lead" && !projectPrompts.forkedLead?.model
+      ? projectPrompts.lead.sourcePath
+      : definition.sourcePath;
+  // Full provider/model IDs can switch providers for root roles; a short model ID keeps the provider selected in the form.
   const provider = effectiveModel
     ? effectiveModel.includes("/") ? effectiveModel : `${defaultProviderId}/${effectiveModel}`
     : defaults.provider;
   const selectedProviderId = provider.split("/", 1)[0];
   // Missing legacy settings mean Full Access, matching the SLP global default.
-  let permissionModeId = defaults.permissionModeId ?? unattendedModeForProvider(defaultProviderId);
+  let permissionModeId = defaultPermissionModeId;
   if (selectedProviderId !== defaultProviderId) {
     // Native permission IDs differ by provider. Preserve Full Access intent without passing another provider's ID.
     if (permissionModeId && permissionModeId !== unattendedModeForProvider(defaultProviderId)) {
@@ -52,9 +204,12 @@ export function resolveAgentSettings(
     }
     permissionModeId = unattendedModeForProvider(selectedProviderId);
   }
-  return { provider, permissionModeId,
+  return {
+    provider,
+    permissionModeId,
     // Resolve independently: setting just thinking must not replace the chosen model, and vice versa.
-    thinkingOptionId: effectiveThinking ?? defaults.thinkingOptionId };
+    thinkingOptionId: effectiveThinking ?? defaults.thinkingOptionId,
+  };
 }
 
 export function validateProjectAgentSettings(configuration: ProjectPromptConfig, providers: ProviderChoices): void {
@@ -68,5 +223,6 @@ export function validateProjectAgentSettings(configuration: ProjectPromptConfig,
   resolveAgentSettings(configuration, "supervisor", undefined, supervisorDefaults);
   resolveAgentSettings(configuration, "master_lead", undefined, leadDefaults);
   resolveAgentSettings(configuration, "forked_lead", undefined, leadDefaults);
+  resolveAgentSettings(configuration, "base_peer", undefined, peerDefaults);
   for (const peer of configuration.peers) resolveAgentSettings(configuration, "peer", peer.role, peerDefaults);
 }

@@ -21,6 +21,7 @@ describe("project prompt initialization", () => {
     ]);
     expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toContain("# Workflow");
     expect(await readFile(join(repoPath, ".slp/FORKED_LEAD.md"), "utf8")).toContain("role: forked-lead");
+    expect(await readFile(join(repoPath, ".slp/BASE_PEER.md"), "utf8")).toContain("role: base-peer");
     expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
     expect(await readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).toContain("role: end-user");
     // Business-role metadata must not prescribe a permanent pipeline kind.

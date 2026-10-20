@@ -4,10 +4,13 @@ import { z } from "zod";
 
 // This list deliberately contains orchestration roles only; a Lead-created pipeline can use any
 // project role without requiring a source change or turning that role into a capability enum.
+// base_peer is the pipeline-level discovery peer spawned during peer_understand whose session is
+// later forked into every stage peer in that pipeline.
 export const SLP_ROLES = [
   "supervisor",
   "master_lead",
   "forked_lead",
+  "base_peer",
   "peer",
 ] as const;
 export const SlpRoleSchema = z.enum(SLP_ROLES);
@@ -35,5 +38,6 @@ export const ROLE_LABELS: Record<SlpRole, string> = {
   supervisor: "Supervisor",
   master_lead: "Master Lead",
   forked_lead: "Forked Lead",
+  base_peer: "Base Peer",
   peer: "Peer",
 };

@@ -1,6 +1,7 @@
 // Answers permission prompts of SLP agents so no human has to (single point of contact).
 // Called both from the lifecycle event (low latency) and from the sweeper (catches missed events).
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
+import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import type { AgentRecord, Run } from "../../shared/state";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
@@ -22,10 +23,18 @@ function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
   // Archived agents and legacy or aborted runs must never receive new write or shell permissions.
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
   if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
-  if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
+  if (agentRecord.role === "peer" || agentRecord.role === "base_peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     if (isFinalizingForkedLead(run, agentRecord)) return true;
     const pipeline = run.pipelines[agentRecord.pipelineId];
+    if (
+      run.status === "running"
+      && pipeline?.status === "peer_understand"
+      && agentRecord.stageId === PEER_UNDERSTAND_STAGE_ID
+      && pipeline.peerUnderstand.status === "running"
+    ) {
+      return true;
+    }
     const stage = pipeline?.stages[pipeline.currentStageIndex];
     // Only the running stage (or a finalizing Forked Lead) may receive write permissions; completed prior-stage peers become read-only.
     return Boolean(run.status === "running"
@@ -41,12 +50,13 @@ function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean 
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
   // Supervisor and Master Lead stay alive after a cycle completes so the user can issue follow-up requests in the same session.
   if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
-  if (agentRecord.role === "peer" || agentRecord.role === "forked_lead") {
+  if (agentRecord.role === "peer" || agentRecord.role === "base_peer" || agentRecord.role === "forked_lead") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];
     return Boolean(
       run.status === "running"
-      && (pipeline?.status === "running"
+      && (pipeline?.status === "peer_understand"
+        || pipeline?.status === "running"
         || pipeline?.status === "completed"
         || (agentRecord.role === "forked_lead" && pipeline?.status === "integrated")),
     );

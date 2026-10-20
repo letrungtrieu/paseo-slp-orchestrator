@@ -1,6 +1,7 @@
 // Lifecycle hooks (events are best effort, so nothing here is load bearing for correctness):
 // capture the SDK handle, answer permissions quickly, and nudge agents that forgot their tool.
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import { NUDGE_LIMIT } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
@@ -26,6 +27,17 @@ function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
     || !agentRecord.pipelineId || !agentRecord.stageId || agentRecord.archivedAt) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline) return false;
+  // During the pre-stage peer_understand phase, Forked Lead and Base Peer own the active discovery obligations.
+  if (
+    pipeline.status === "peer_understand"
+    && agentRecord.stageId === PEER_UNDERSTAND_STAGE_ID
+    && pipeline.peerUnderstand.status === "running"
+  ) {
+    return (
+      agentRecord.agentId === pipeline.peerUnderstand.forkedLeadAgentId
+      || agentRecord.agentId === pipeline.peerUnderstand.basePeerAgentId
+    );
+  }
   // The final stage's Forked Lead continues to own the pipeline while merging its branch via slp_finalize_pipeline.
   if (pipeline.status === "completed" && agentRecord.role === "forked_lead") {
     return pipeline.stages.at(-1)?.forkedLeadAgentId === agentRecord.agentId;
@@ -62,9 +74,12 @@ function agentOwnsSupervisorObligation(run: Run, agentRecord: AgentRecord): bool
 
 function stageObligationFor(run: Run, agentRecord: AgentRecord): string | null {
   if (agentRecord.deferredTool) return agentRecord.deferredTool;
-  if (agentRecord.role === "peer") return "slp_stage_report";
+  if (agentRecord.role === "peer" || agentRecord.role === "base_peer") return "slp_stage_report";
   if (agentRecord.role === "forked_lead") {
     const pipeline = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId] : undefined;
+    if (pipeline?.status === "peer_understand" && pipeline.stages.length === 0) {
+      return "slp_define_pipeline";
+    }
     return pipeline?.status === "completed" ? "slp_finalize_pipeline" : "slp_approve_stage";
   }
   return null;
@@ -85,8 +100,11 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
       || !agentOwnsCurrentStage(mutableRun, mutableAgent)) return;
     const refreshedStartedAtMs = Date.parse(mutableAgent.awaitingSince);
     if (!Number.isFinite(refreshedStartedAtMs) || Date.now() - refreshedStartedAtMs < DIRECT_REPLY_TIMEOUT_MS) return;
-    const stage = mutableRun.pipelines[mutableAgent.pipelineId!]?.stages.find((candidate) => candidate.id === mutableAgent.stageId);
-    if (!stage) return;
+    const owningPipeline = mutableRun.pipelines[mutableAgent.pipelineId!];
+    const stageName = mutableAgent.stageId === PEER_UNDERSTAND_STAGE_ID
+      ? PEER_UNDERSTAND_STAGE_ID
+      : owningPipeline?.stages.find((candidate) => candidate.id === mutableAgent.stageId)?.name;
+    if (!stageName) return;
     restoredTool = stageObligationFor(mutableRun, mutableAgent);
     if (!restoredTool) return;
     mutableAgent.waitingForAgentId = null;
@@ -95,7 +113,7 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
     mutableAgent.awaitingSince = null;
     mutableAgent.nudges = 0;
     mutableRun.mailbox.push(stageMail(agentId,
-      `No reply was received from peer ${recipientAgentId} within ${DIRECT_REPLY_TIMEOUT_MS / 1000} seconds. Continue stage '${stage.name}' and call ${restoredTool}; use slp_escalate if the missing response blocks the goal.`,
+      `No reply was received from peer ${recipientAgentId} within ${DIRECT_REPLY_TIMEOUT_MS / 1000} seconds. Continue stage '${stageName}' and call ${restoredTool}; use slp_escalate if the missing response blocks the goal.`,
       restoredTool));
     queued = true;
   });

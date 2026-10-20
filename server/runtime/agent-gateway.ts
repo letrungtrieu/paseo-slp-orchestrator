@@ -4,6 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
+import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import type { AgentRecord, Run } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
 import { systemPromptFor, type StagePromptContext } from "../prompts/system-prompts";
@@ -89,6 +90,12 @@ function isUnsupportedToolPolicyError(error: unknown): boolean {
   return /permission\.tool_policy|tool_policy_unsupported|cannot preapprove exact mcp tools/i.test(errorMessage);
 }
 
+function isUnsupportedPeerModelError(error: unknown): boolean {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  // Providers reject unknown or unavailable models during session creation with a model-related error message.
+  return /\bmodel\b.*\b(?:not found|unknown|invalid|unsupported|unavailable|does not exist)\b/i.test(errorMessage);
+}
+
 // Older saved runs have no selected mode, so use each supported provider's native unattended mode.
 export function permissionModeFor(providerModel: string): string | undefined {
   const providerId = providerModel.split("/", 1)[0];
@@ -109,11 +116,19 @@ function statusFromSnapshot(agentSnapshot: AgentSnapshotPayload, persistedRecord
 function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
   if (run.status !== "running" || agentRecord.archivedAt || !agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
-  const currentStage = pipeline?.stages[pipeline.currentStageIndex];
+  if (!pipeline) return false;
+  // During the pre-stage peer_understand phase, base_peer and forked_lead carry PEER_UNDERSTAND_STAGE_ID.
+  if (
+    pipeline.status === "peer_understand"
+    && agentRecord.stageId === PEER_UNDERSTAND_STAGE_ID
+    && ["starting", "running", "completing"].includes(pipeline.peerUnderstand.status)
+  ) {
+    return true;
+  }
+  const currentStage = pipeline.stages[pipeline.currentStageIndex];
   // Only refresh the cohort that can still receive work; archived prior stages should not be revived.
   return Boolean(
-    pipeline
-    && ["starting", "running", "paused"].includes(pipeline.status)
+    ["starting", "running", "paused"].includes(pipeline.status)
     && currentStage
     && ["starting", "running", "completing"].includes(currentStage.status)
     && currentStage.id === agentRecord.stageId,
@@ -223,7 +238,6 @@ export class AgentGateway {
       // creation as an SDK rejection, and must not leave an authenticated orphan in SQLite.
       const workspace = paseo.workspaces.ref(spec.workspaceId);
       await workspace.refresh();
-      const selectedProviderId = modelSettings.provider.split("/", 1)[0];
       const baseAgentCreation = {
         agentId,
         title: spec.title,
@@ -245,33 +259,36 @@ export class AgentGateway {
         // Parentage is separate from workspace placement, so a Lead can live in its own integration worktree.
         ...(spec.parentAgentId ? { parent: spec.parentAgentId } : {}),
       };
-      const baseSessionConfig = {
-        provider: modelSettings.provider,
-        modeId: modelSettings.permissionModeId ?? permissionModeFor(modelSettings.provider),
-        ...(modelSettings.thinkingOptionId ? { thinkingOptionId: modelSettings.thinkingOptionId } : {}),
-        systemPrompt: systemPromptFor(
-          spec.role,
-          this.store.require(spec.runId).promptConfig,
-          spec.projectRole,
-          spec.stageContext,
-        ),
-        mcpServers: {
-          [BUS_SERVER_NAME]: {
-            type: "http" as const,
-            // load tool schemas up front; deferred tools made agents call slp_ tools with empty arguments
-            alwaysLoad: true,
-            url: `http://127.0.0.1:${busPort}/mcp/${agentRecord.token}`,
-          },
-        },
-        ...(spec.extraOptions ? { options: spec.extraOptions } : {}),
-      };
       const preapprovedToolPolicy = {
         // Pre-approving the role's own bus tools avoids a permission round trip per call when supported.
         preapproved: busToolNames.map((tool) => ({ kind: "mcp" as const, server: BUS_SERVER_NAME, tool })),
       };
-      if (this.providersWithoutToolPolicy.has(selectedProviderId)) {
-        await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
-      } else {
+      const openAgentWithSettings = async (activeModelSettings: typeof modelSettings): Promise<void> => {
+        const selectedProviderId = activeModelSettings.provider.split("/", 1)[0];
+        const baseSessionConfig = {
+          provider: activeModelSettings.provider,
+          modeId: activeModelSettings.permissionModeId ?? permissionModeFor(activeModelSettings.provider),
+          ...(activeModelSettings.thinkingOptionId ? { thinkingOptionId: activeModelSettings.thinkingOptionId } : {}),
+          systemPrompt: systemPromptFor(
+            spec.role,
+            this.store.require(spec.runId).promptConfig,
+            spec.projectRole,
+            spec.stageContext,
+          ),
+          mcpServers: {
+            [BUS_SERVER_NAME]: {
+              type: "http" as const,
+              // load tool schemas up front; deferred tools made agents call slp_ tools with empty arguments
+              alwaysLoad: true,
+              url: `http://127.0.0.1:${busPort}/mcp/${agentRecord.token}`,
+            },
+          },
+          ...(spec.extraOptions ? { options: spec.extraOptions } : {}),
+        };
+        if (this.providersWithoutToolPolicy.has(selectedProviderId)) {
+          await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+          return;
+        }
         try {
           await workspace.agents.create({
             ...baseAgentCreation,
@@ -282,6 +299,25 @@ export class AgentGateway {
           // Custom or plugin providers without permission.tool_policy still authorize bus tools via decidePermission.
           this.providersWithoutToolPolicy.add(selectedProviderId);
           await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+        }
+      };
+
+      try {
+        await openAgentWithSettings(modelSettings);
+      } catch (sessionCreateError) {
+        // When a .slp/peers model override is rejected by the provider at runtime, fall back to the global config.
+        if (
+          spec.role === "peer"
+          && modelSettings.provider !== spec.provider
+          && isUnsupportedPeerModelError(sessionCreateError)
+        ) {
+          await openAgentWithSettings({
+            provider: spec.provider,
+            permissionModeId: spec.permissionModeId ?? permissionModeFor(spec.provider),
+            thinkingOptionId: modelSettings.thinkingOptionId ?? spec.thinkingOptionId,
+          });
+        } else {
+          throw sessionCreateError;
         }
       }
     } catch (createError) {

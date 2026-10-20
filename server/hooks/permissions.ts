@@ -79,7 +79,8 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
       // Forked Lead stays read-only during stage review, but may write when finalizing its pipeline and resolving conflicts.
       return Boolean(context.finalizingPipeline);
     case "supervisor":
-      // Supervisor coordinates and reviews; production edits stay with peers or Leads.
+    case "base_peer":
+      // Supervisor and Base Peer (peer_understand discovery) stay read-only; production edits stay with stage peers or Leads.
       return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;

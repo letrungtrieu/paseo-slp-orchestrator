@@ -2,9 +2,13 @@
 import { randomUUID } from "node:crypto";
 import type { PipelineState, StageState } from "../../shared/pipeline";
 import type { MailboxMessage } from "../../shared/state";
-import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import { peerRole } from "../project-prompts/defaults";
 import type { PipelineContext } from "./context";
+import {
+  advancePeerUnderstandPhase,
+  forkBasePeerSessionOptions,
+  forkLeadSessionOptions,
+} from "./peer-understand";
 import {
   coordinatorRevivalBriefing,
   peerRosterUpdateNotice,
@@ -90,7 +94,12 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
       return;
     }
     if (["paused", "completed", "integrated", "failed"].includes(pipeline.status)) return;
-    const stage = pipeline.stages[pipeline.currentStageIndex];
+    // Complete the pre-stage peer_understand phase before opening Stage 1 so stage peers can fork from Base Peer.
+    const isPeerUnderstandCompleted = await advancePeerUnderstandPhase(ctx, runId, pipelineId);
+    if (!isPeerUnderstandCompleted) return;
+    const postUnderstandPipeline = requirePipeline(ctx.store.require(runId), pipelineId);
+    if (["paused", "completed", "integrated", "failed"].includes(postUnderstandPipeline.status)) return;
+    const stage = postUnderstandPipeline.stages[postUnderstandPipeline.currentStageIndex];
     if (!stage) throw new Error("Pipeline has no current stage.");
     if (stage.status === "running") {
       const live = await ctx.gateway.liveStatuses(runId);
@@ -124,29 +133,6 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
   }
 }
 
-async function forkOptions(ctx: PipelineContext, runId: string) {
-  const run = ctx.store.require(runId);
-  // Native providers save their session at turn end; the tool that defines this pipeline must return first.
-  const leadTurn = await ctx.gateway.waitForIdle(run.masterLeadAgentId, 120_000);
-  const leadDefaults = {
-    provider: run.providers.lead,
-    thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
-    permissionModeId: run.providers.leadPermissionModeId ?? undefined,
-  };
-  const masterLeadSettings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, leadDefaults);
-  const forkedLeadSettings = resolveAgentSettings(run.promptConfig, "forked_lead", undefined, leadDefaults);
-  const sessionId = leadTurn.status === "idle" ? await ctx.gateway.sessionIdOf(run.masterLeadAgentId) : null;
-  const binding = await ctx.forks.resolve(
-    sessionId ? { provider: masterLeadSettings.provider, providerSessionId: sessionId } : null,
-    forkedLeadSettings.provider,
-  );
-  ctx.store.mutate(runId, (mutableRun) => {
-    // Unsupported native forks still receive the complete pipeline and accepted earlier results in their briefing.
-    mutableRun.forkDegradedReason = binding.mode === "stored-spec" ? binding.reason : null;
-  });
-  return binding.mode === "native" ? binding.providerOptions : undefined;
-}
-
 async function startStage(ctx: PipelineContext, runId: string, pipelineId: string): Promise<void> {
   const { run, pipeline, stage } = currentAssignment(ctx, runId, pipelineId);
   if (!pipeline.workspaceId) throw new Error("Pipeline has no registered worktree workspace.");
@@ -163,7 +149,7 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
   let coordinatorCreated = false;
   const createdPeerIndices = new Set<number>();
   if (!currentAssignment(ctx, runId, pipelineId).stage.forkedLeadAgentId) {
-    const extraOptions = await forkOptions(ctx, runId);
+    const extraOptions = await forkLeadSessionOptions(ctx, runId);
     const current = currentAssignment(ctx, runId, pipelineId);
     const coordinator = await ctx.gateway.createAgent({
       runId, role: "forked_lead", taskId: null, pipelineId, stageId: stage.id,
@@ -186,14 +172,18 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
     const current = currentAssignment(ctx, runId, pipelineId);
     if (current.stage.peerAgentIds[peerIndex]) continue;
     const definition = peerRole(run.promptConfig, assignment.role);
+    // Fork every stage peer from the pipeline's Base Peer session so it inherits the peer_understand context.
+    const peerForkExtraOptions = await forkBasePeerSessionOptions(ctx, runId, pipelineId, definition.role);
+    const refreshedCurrent = currentAssignment(ctx, runId, pipelineId);
     const createdPeer = await ctx.gateway.createAgent({
       runId, role: "peer", projectRole: definition.role, taskId: null, pipelineId, stageId: stage.id, stagePeerId: String(peerIndex),
       provider: run.providers.peer, thinkingOptionId: run.providers.peerThinkingOptionId ?? undefined,
       permissionModeId: run.providers.peerPermissionModeId ?? undefined,
-      workspaceId: pipeline.workspaceId, parentAgentId: current.stage.forkedLeadAgentId ?? undefined,
+      workspaceId: pipeline.workspaceId, parentAgentId: refreshedCurrent.stage.forkedLeadAgentId ?? undefined,
       peerWorktreePath: pipeline.worktree, writeScope: ["**"],
       title: `[${definition.name}] [${pipeline.name} · ${stage.name}]`, awaitTool: null,
-      stageContext: stagePromptContext(current.pipeline, current.stage, assignment.task),
+      stageContext: stagePromptContext(refreshedCurrent.pipeline, refreshedCurrent.stage, assignment.task),
+      extraOptions: peerForkExtraOptions,
     });
     await keepCreatedAgent(ctx, runId, pipelineId, stage.id, createdPeer.agentId);
     // Persist each identity before creating the next so recovery never allocates the whole cohort again.

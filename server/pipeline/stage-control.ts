@@ -1,6 +1,8 @@
 // Approval is the Forked Lead's decision; engine state only coordinates closure and subsequent stages.
 import type { BusCaller } from "../bus/http-mcp";
+import { PEER_UNDERSTAND_STAGE_ID, type PipelineStageDefinition } from "../../shared/pipeline";
 import type { PipelineContext } from "./context";
+import { materializePipelineStages } from "./define-pipeline";
 import { pipelineFinalizationBriefing } from "./stage-briefings";
 import { requirePipeline, requireStageLead } from "./stage-context";
 import { recoverPipelines } from "./stage-engine";
@@ -12,9 +14,55 @@ function scheduleRecovery(ctx: PipelineContext, runId: string): void {
   void recoverPipelines(ctx, runId).catch((failure) => console.error("[slp] stage recovery failed", failure));
 }
 
-export function approveStage(ctx: PipelineContext, caller: BusCaller, summary: string): string {
+export function approveStage(
+  ctx: PipelineContext,
+  caller: BusCaller,
+  summary: string,
+  definedStages?: readonly PipelineStageDefinition[],
+): string {
   const { run, pipeline, stage } = requireStageLead(ctx, caller);
   const approvedAt = new Date().toISOString();
+  if (stage.id === PEER_UNDERSTAND_STAGE_ID) {
+    if (pipeline.peerUnderstand.reports.length === 0) {
+      throw new ToolError(
+        "Cannot approve peer_understand before Base Peer investigates and submits slp_stage_report confirming mutual understanding.",
+      );
+    }
+    const materializedStages = definedStages ? materializePipelineStages(run, definedStages) : null;
+    if (!materializedStages && pipeline.stages.length === 0) {
+      throw new ToolError(
+        "Pipeline has no stages yet. After confirming mutual understanding with Base Peer, create the pipeline stages via slp_define_pipeline({ pipelineId, stages }) or pass 'stages' in slp_approve_stage({ summary, stages }).",
+      );
+    }
+    ctx.store.mutate(run.id, (mutableRun) => {
+      const mutablePipeline = requirePipeline(mutableRun, pipeline.id);
+      if (materializedStages) {
+        mutablePipeline.stages = materializedStages;
+      }
+      mutablePipeline.peerUnderstand.result = { summary, approvedBy: caller.agentId, approvedAt };
+      mutablePipeline.peerUnderstand.status = "completing";
+      mutablePipeline.updatedAt = approvedAt;
+      mutableRun.agents[caller.agentId].awaitingTool = null;
+      mutableRun.mailbox = mutableRun.mailbox.filter(
+        (queuedMessage) =>
+          !(
+            queuedMessage.toAgentId === caller.agentId
+            && (queuedMessage.awaitTool === "slp_approve_stage" || queuedMessage.awaitTool === "slp_define_pipeline")
+          ),
+      );
+    });
+    ctx.logEvent(run.id, {
+      taskId: null,
+      from: caller.agentId,
+      to: "pipeline",
+      kind: "stage.approved",
+      summary: `${pipeline.name}/${stage.name}: ${summary}`,
+      outcome: "delivered",
+    });
+    scheduleRecovery(ctx, run.id);
+    return "Stage approval saved. End your turn. The engine hands accepted results to the next stage (or assigns slp_finalize_pipeline to merge the completed pipeline branch).";
+  }
+
   ctx.store.mutate(run.id, () => {
     // Persist the decision before any archive call: recovery resumes closure rather than asking for approval twice.
     stage.result = { summary, approvedBy: caller.agentId, approvedAt };
@@ -33,6 +81,30 @@ export function resumePipeline(ctx: PipelineContext, runId: string, pipelineId: 
   const pipeline = requirePipeline(run, pipelineId);
   if (pipeline.status !== "paused") throw new ToolError("Only a paused pipeline can be resumed.");
   if (pipeline.gate) throw new ToolError("This pipeline is waiting for the human approval selected by its run mode.");
+  // If the pipeline paused during peer_understand before Stage 1 opened, resume peer_understand directly.
+  if (pipeline.peerUnderstand.status !== "completed") {
+    ctx.store.mutate(runId, () => {
+      pipeline.status = pipeline.peerUnderstand.status === "pending" ? "queued" : "peer_understand";
+      pipeline.pausedReason = null;
+      pipeline.updatedAt = new Date().toISOString();
+      pipeline.peerUnderstand.messages.push({
+        id: `decision-${pipeline.updatedAt}`,
+        fromAgentId: run.masterLeadAgentId,
+        toAgentId: pipeline.peerUnderstand.forkedLeadAgentId ?? "stage-coordinator",
+        message: feedback,
+        createdAt: pipeline.updatedAt,
+      });
+      if (pipeline.peerUnderstand.status === "running" && pipeline.peerUnderstand.forkedLeadAgentId) {
+        run.mailbox.push(stageMail(
+          pipeline.peerUnderstand.forkedLeadAgentId,
+          `Master Lead resumes phase '${PEER_UNDERSTAND_STAGE_ID}':\n${feedback}\nInspect slp_get_pipeline and direct Base Peer or approve against its goal.`,
+          "slp_approve_stage",
+        ));
+      }
+    });
+    scheduleRecovery(ctx, runId);
+    return "Pipeline resumed with your decision. End your turn while its stage coordinator continues.";
+  }
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (!stage) throw new ToolError("Pipeline has no stage to resume.");
   ctx.store.mutate(runId, () => {

@@ -54,18 +54,107 @@ export async function delegateToLead(flow: Flow, runId: string): Promise<void> {
   if (delegation.isError) throw new Error(delegation.text);
 }
 
-export async function definePipeline(flow: Flow, runId: string, definition: PipelineDefinition = DEFAULT_PIPELINE): Promise<string> {
+export async function completePeerUnderstand(
+  flow: Flow,
+  runId: string,
+  pipelineId: string,
+  summary = "Base peer investigated the project and aligned with Forked Lead on task expectations.",
+  definedStages?: PipelineDefinition["stages"],
+): Promise<void> {
+  await eventually(() => {
+    const pipeline = flow.pipeline(runId, pipelineId);
+    if (!pipeline) throw new Error("pipeline disappeared before peer_understand");
+    if (pipeline.peerUnderstand.status === "completed" || pipeline.status === "paused") return;
+    if (
+      pipeline.status !== "peer_understand"
+      || pipeline.peerUnderstand.status !== "running"
+      || !pipeline.peerUnderstand.basePeerAgentId
+      || !pipeline.peerUnderstand.forkedLeadAgentId
+    ) {
+      throw new Error("peer_understand is still starting");
+    }
+  });
+  const currentPipeline = flow.pipeline(runId, pipelineId)!;
+  if (currentPipeline.peerUnderstand.status === "completed" || currentPipeline.status === "paused") return;
+  const basePeerId = currentPipeline.peerUnderstand.basePeerAgentId!;
+  const coordinatorId = currentPipeline.peerUnderstand.forkedLeadAgentId!;
+  // Step 1: Forked Lead creates the investigation goal first when not yet set on peerUnderstand.
+  if (!currentPipeline.peerUnderstand.investigationGoal) {
+    const goalResponse = await flow.callAs(coordinatorId, "slp_send_peer_message", {
+      toAgentId: basePeerId,
+      message: `Investigate ${currentPipeline.name}: ${currentPipeline.description}`,
+      waitForReply: true,
+    });
+    if (goalResponse.isError) throw new Error(goalResponse.text);
+  }
+  // Step 2: Base Peer investigates and submits its understanding report to confirm mutual understanding.
+  const reportResponse = await flow.callAs(basePeerId, "slp_stage_report", {
+    summary,
+    findings: [summary],
+    status: "completed",
+  });
+  if (reportResponse.isError) throw new Error(reportResponse.text);
+  // Step 3: Once both confirm mutual understanding, Forked Lead creates the pipeline stages (or approves peer_understand).
+  const needsStageCreation = definedStages !== undefined || flow.pipeline(runId, pipelineId)!.stages.length === 0;
+  if (needsStageCreation) {
+    const createStagesResponse = await flow.callAs(coordinatorId, "slp_define_pipeline", {
+      pipelineId,
+      summary: "Mutual understanding confirmed; creating pipeline stages.",
+      stages: definedStages ?? DEFAULT_PIPELINE.stages,
+    });
+    if (createStagesResponse.isError) throw new Error(createStagesResponse.text);
+  } else {
+    const approveResponse = await flow.callAs(coordinatorId, "slp_approve_stage", {
+      summary: "Base peer understanding approved; checkpointing session for stage peer forks.",
+    });
+    if (approveResponse.isError) throw new Error(approveResponse.text);
+  }
+  await eventually(() => {
+    const refreshedPipeline = flow.pipeline(runId, pipelineId);
+    if (!refreshedPipeline) throw new Error("pipeline disappeared after peer_understand");
+    if (refreshedPipeline.status === "paused" || refreshedPipeline.status === "completed") return;
+    const firstStage = refreshedPipeline.stages[refreshedPipeline.currentStageIndex];
+    if (
+      refreshedPipeline.peerUnderstand.status !== "completed"
+      || refreshedPipeline.status !== "running"
+      || firstStage?.status !== "running"
+    ) {
+      throw new Error("Stage 1 is still starting after peer_understand approval");
+    }
+  });
+}
+
+export async function definePipeline(
+  flow: Flow,
+  runId: string,
+  definition: PipelineDefinition = DEFAULT_PIPELINE,
+  options?: { stopAtPeerUnderstand?: boolean },
+): Promise<string> {
   const response = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", { pipeline: definition });
   if (response.isError) throw new Error(response.text);
   const pipelineId = JSON.parse(response.text).pipelineId as string;
   await eventually(() => {
     const pipeline = flow.pipeline(runId, pipelineId);
-    if (!pipeline || pipeline.status === "queued" || pipeline.status === "starting") throw new Error("pipeline cohort is still starting");
+    if (
+      !pipeline
+      || pipeline.status === "queued"
+      || pipeline.status === "starting"
+      || (pipeline.status === "peer_understand" && pipeline.peerUnderstand.status !== "running")
+    ) {
+      throw new Error("pipeline cohort is still starting");
+    }
   });
+  if (!options?.stopAtPeerUnderstand && flow.pipeline(runId, pipelineId)?.status === "peer_understand") {
+    await completePeerUnderstand(flow, runId, pipelineId);
+  }
   return pipelineId;
 }
 
-export async function startedRunWithPipeline(flow: Flow, definition: PipelineDefinition = DEFAULT_PIPELINE): Promise<{ runId: string; pipelineId: string }> {
+export async function startedRunWithPipeline(
+  flow: Flow,
+  definition: PipelineDefinition = DEFAULT_PIPELINE,
+  options?: { stopAtPeerUnderstand?: boolean },
+): Promise<{ runId: string; pipelineId: string }> {
   const runId = await flow.startRun();
   await delegateToLead(flow, runId);
   // The Lead owns the handoff path: the definition carries the concrete checkout returned by
@@ -73,7 +162,7 @@ export async function startedRunWithPipeline(flow: Flow, definition: PipelineDef
   const workspaceResponse = await flow.callAsRole(runId, "master_lead", null, "slp_create_worktree", { name: definition.name });
   if (workspaceResponse.isError) throw new Error(workspaceResponse.text);
   const workspace = JSON.parse(workspaceResponse.text) as { cwd: string };
-  const pipelineId = await definePipeline(flow, runId, { ...definition, worktree: workspace.cwd });
+  const pipelineId = await definePipeline(flow, runId, { ...definition, worktree: workspace.cwd }, options);
   return { runId, pipelineId };
 }
 
@@ -125,6 +214,9 @@ export async function approveCurrentStage(flow: Flow, runId: string, pipelineId:
 }
 
 export async function completePipeline(flow: Flow, runId: string, pipelineId: string): Promise<void> {
+  if (flow.pipeline(runId, pipelineId)?.peerUnderstand.status !== "completed") {
+    await completePeerUnderstand(flow, runId, pipelineId);
+  }
   while (flow.pipeline(runId, pipelineId)?.status !== "completed") {
     const stage = currentStage(flow, runId, pipelineId);
     for (const assignment of stage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);

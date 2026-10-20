@@ -1,8 +1,9 @@
 // Stage identity is derived from authenticated agent records so peers cannot act on a sibling pipeline.
 import type { BusCaller } from "../bus/http-mcp";
-import type { PipelineState } from "../../shared/pipeline";
+import { PEER_UNDERSTAND_STAGE_ID, type PipelineState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import type { PipelineContext } from "./context";
+import { buildPeerUnderstandStageView } from "./peer-understand";
 import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
 
@@ -18,6 +19,20 @@ export function stageForCaller(ctx: PipelineContext, caller: BusCaller) {
   // Persisted records from completed stages remain audit evidence, never an authorization to submit again.
   if (!agent || agent.archivedAt || !agent.pipelineId || !agent.stageId) throw new ToolError("This tool requires an active stage assignment.");
   const pipeline = requirePipeline(run, agent.pipelineId);
+  // During the pre-stage peer_understand phase, adapt pipeline.peerUnderstand into a stage view for Forked Lead and Base Peer.
+  if (
+    run.status === "running"
+    && pipeline.status === "peer_understand"
+    && agent.stageId === PEER_UNDERSTAND_STAGE_ID
+    && pipeline.peerUnderstand.status === "running"
+  ) {
+    const belongsToPeerUnderstand =
+      agent.role === "forked_lead"
+        ? pipeline.peerUnderstand.forkedLeadAgentId === caller.agentId
+        : agent.role === "base_peer" && pipeline.peerUnderstand.basePeerAgentId === caller.agentId;
+    if (!belongsToPeerUnderstand) throw new ToolError("Agent is not a participant of this stage.");
+    return { run, pipeline, stage: buildPeerUnderstandStageView(pipeline), agent };
+  }
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (run.status !== "running" || pipeline.status !== "running" || !stage || stage.id !== agent.stageId || stage.status !== "running") {
     throw new ToolError("Your stage is no longer running. Read slp_get_pipeline for its current state.");

@@ -14,6 +14,7 @@ interface PipelineDetailProps {
 
 const STATUS_LABELS: Record<string, string> = {
   queued: "Queued",
+  peer_understand: "Peer Understand",
   starting: "Starting",
   running: "Running",
   paused: "Paused",
@@ -182,6 +183,13 @@ export function PipelineDetail({ styles, theme, runId, pipelines }: PipelineDeta
             {renderOptionalLine("Worktree", pipeline.worktree, styles)}
             {renderOptionalLine("Branch", pipeline.branch, styles)}
             {renderOptionalLine("Workspace", pipeline.workspaceId, styles)}
+            {pipeline.peerUnderstand ? (
+              renderOptionalLine(
+                "Peer Understand",
+                `${statusLabel(pipeline.peerUnderstand.status)}${pipeline.peerUnderstand.basePeerAgentId ? ` · base_peer ${pipeline.peerUnderstand.basePeerAgentId}` : ""}`,
+                styles,
+              )
+            ) : null}
             {pipeline.pausedReason ? <Text style={styles.dangerText}>{pipeline.pausedReason}</Text> : null}
             {pipeline.status === "paused" ? (
               <Text style={styles.mutedText}>Resume through the Master Lead tool.</Text>

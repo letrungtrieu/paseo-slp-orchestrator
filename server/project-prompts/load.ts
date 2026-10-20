@@ -8,8 +8,8 @@ import { parseRoleMarkdown } from "./markdown";
 // UI discovery and Start run can race; neither should observe a half-written default catalog.
 const initializingDirectories = new Map<string, Promise<void>>();
 
-// Restrict root-level discovery to the three coordinator role files so unrelated .slp/*.md files are ignored.
-const ROOT_ROLE_FILENAMES = new Set(["SUPERVISOR.MD", "LEAD.MD", "FORKED_LEAD.MD"]);
+// Restrict root-level discovery to the four root orchestration role files so unrelated .slp/*.md files are ignored.
+const ROOT_ROLE_FILENAMES = new Set(["SUPERVISOR.MD", "LEAD.MD", "FORKED_LEAD.MD", "BASE_PEER.MD"]);
 
 async function rootRoleMarkdownFiles(configurationDirectory: string): Promise<string[]> {
   let directoryEntries;
@@ -71,13 +71,17 @@ async function initializeEmptyConfiguration(configurationDirectory: string): Pro
     }
     return;
   }
-  // Upgrade pre-existing .slp folders that were created before FORKED_LEAD.md and END_USER_UAT.md existed on disk.
-  const hasForkedLeadFile = discoveredRoleFiles.some(
-    (filePath) => relative(configurationDirectory, filePath).replace(/\\/g, "/").toUpperCase() === "FORKED_LEAD.MD",
+  // Upgrade pre-existing .slp folders that were created before FORKED_LEAD.md, BASE_PEER.md, and END_USER_UAT.md existed on disk.
+  const discoveredRelativePaths = new Set(
+    discoveredRoleFiles.map((filePath) => relative(configurationDirectory, filePath).replace(/\\/g, "/").toUpperCase()),
   );
-  if (!hasForkedLeadFile) {
+  if (!discoveredRelativePaths.has("FORKED_LEAD.MD") || !discoveredRelativePaths.has("BASE_PEER.MD")) {
     for (const promptFile of defaultPromptFiles()) {
-      if (promptFile.relativePath === "FORKED_LEAD.md" || promptFile.relativePath === "peers/END_USER_UAT.md") {
+      if (
+        promptFile.relativePath === "FORKED_LEAD.md" ||
+        promptFile.relativePath === "BASE_PEER.md" ||
+        promptFile.relativePath === "peers/END_USER_UAT.md"
+      ) {
         await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
       }
     }
@@ -113,7 +117,9 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
           ? "lead"
           : relativePath === "FORKED_LEAD.MD"
             ? "forkedLead"
-            : null;
+            : relativePath === "BASE_PEER.MD"
+              ? "basePeer"
+              : null;
     if (rootRole) {
       // A misplaced role is usually a copied template; reject it instead of silently applying the wrong workflow.
       const allowedRoles =
@@ -121,7 +127,9 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
           ? ["lead", "master-lead"]
           : rootRole === "forkedLead"
             ? ["forked-lead", "lead"]
-            : ["supervisor"];
+            : rootRole === "basePeer"
+              ? ["base-peer"]
+              : ["supervisor"];
       if (!allowedRoles.includes(definition.role)) throw new Error(`${sourcePath}: role must be '${allowedRoles[0]}'`);
       if (rootSourcePaths.has(rootRole)) throw new Error(`${sourcePath}: duplicate ${rootRole} configuration`);
       rootSourcePaths.set(rootRole, sourcePath);
@@ -135,7 +143,7 @@ function addPeer(peers: ProjectRole[], definition: ProjectRole, sourcePaths: Map
   const existingPath = sourcePaths.get(definition.role);
   // IDs, not filenames, are the lookup key, so duplicates cannot be resolved by discovery order.
   if (existingPath) throw new Error(`${definition.sourcePath}: duplicate role '${definition.role}' also defined in ${existingPath}`);
-  if (["lead", "master-lead", "supervisor", "forked-lead"].includes(definition.role)) {
+  if (["lead", "master-lead", "supervisor", "forked-lead", "base-peer"].includes(definition.role)) {
     throw new Error(`${definition.sourcePath}: '${definition.role}' is reserved for a root orchestration role`);
   }
   sourcePaths.set(definition.role, definition.sourcePath);

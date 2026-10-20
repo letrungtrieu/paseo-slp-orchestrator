@@ -2,15 +2,20 @@
 // Each runtime role sees only the coordination actions it is authorized to perform.
 import { z } from "zod";
 import { SLP_ROLES, type SlpRole } from "../../shared/roles";
-import { PipelineEnvelopeSchema, StageReportSubmissionSchema } from "../../shared/pipeline";
+import {
+  PipelineEnvelopeSchema,
+  PipelineStageDefinitionSchema,
+  StageReportSubmissionSchema,
+} from "../../shared/pipeline";
 
 const pipelineIdField = z.string().trim().min(1).describe("Id of the target pipeline");
 
 export const BUS_TOOL_DEFINITIONS = {
-  // The Master Lead can submit one pipeline or an array of parallel task pipelines (each spawning its own Forked Lead).
+  // Master Lead defines task pipelines (with or without stages); Forked Lead can also call slp_define_pipeline
+  // during peer_understand to create the pipeline's stages after confirming mutual understanding with Base Peer.
   slp_define_pipeline: {
-    roles: ["master_lead"],
-    description: "Define one or more parallel task pipelines (via 'pipeline' or 'pipelines'). Each pipeline spawns a dedicated Forked Lead and auto-creates a worktree if 'worktree' is omitted.",
+    roles: ["master_lead", "forked_lead"],
+    description: "Define task pipeline(s) (Master Lead) or create the stages for an active peer_understand pipeline after Forked Lead and Base Peer confirm mutual understanding.",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -40,7 +45,8 @@ export const BUS_TOOL_DEFINITIONS = {
     input: z.object({ pipelineId: pipelineIdField, feedback: z.string().trim().min(1) }),
   },
   slp_send_peer_message: {
-    roles: ["forked_lead", "peer"],
+    // base_peer exchanges direct discovery questions and answers with forked_lead during peer_understand.
+    roles: ["forked_lead", "base_peer", "peer"],
     description: "Send a direct message to a peer in the pipeline or another Forked Lead to clarify implementation or merge conflicts.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
@@ -49,14 +55,18 @@ export const BUS_TOOL_DEFINITIONS = {
     }),
   },
   slp_stage_report: {
-    roles: ["peer"],
+    // Both base_peer (during peer_understand) and stage peers submit structured findings via slp_stage_report.
+    roles: ["base_peer", "peer"],
     description: "Submit this peer's findings or blocker for the current stage.",
     input: StageReportSubmissionSchema,
   },
   slp_approve_stage: {
     roles: ["forked_lead"],
-    description: "Approve the current stage when its goal is met and move the pipeline to the next stage.",
-    input: z.object({ summary: z.string().trim().min(1) }),
+    description: "Approve the current stage (or confirm peer_understand alignment and optionally define the pipeline's stages) to advance the pipeline.",
+    input: z.object({
+      summary: z.string().trim().min(1),
+      stages: z.array(PipelineStageDefinitionSchema).min(1).optional(),
+    }),
   },
   slp_stage_rework: {
     roles: ["forked_lead"],
@@ -67,7 +77,7 @@ export const BUS_TOOL_DEFINITIONS = {
     }),
   },
   slp_escalate: {
-    roles: ["forked_lead", "peer"],
+    roles: ["forked_lead", "base_peer", "peer"],
     description: "Escalate a blocked stage or implementation decision to the Master Lead.",
     input: z.object({ reason: z.string().trim().min(1) }),
   },

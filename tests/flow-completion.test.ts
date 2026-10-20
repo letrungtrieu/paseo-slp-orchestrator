@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePeerUnderstand, completePipeline, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -296,14 +296,18 @@ describe("pipeline completion and integration", () => {
     expect(pipelineIds).toHaveLength(2);
     const [apiPipelineId, uiPipelineId] = pipelineIds;
 
-    // Wait until both parallel pipelines have provisioned their worktrees and started their first stage concurrently.
+    // Wait until both parallel pipelines have provisioned their worktrees and entered peer_understand concurrently, then complete peer_understand.
     await eventually(() => {
       const apiPipeline = flow.pipeline(runId, apiPipelineId);
       const uiPipeline = flow.pipeline(runId, uiPipelineId);
-      if (apiPipeline?.status !== "running" || uiPipeline?.status !== "running") {
-        throw new Error("parallel pipelines are still starting");
+      if (apiPipeline?.status !== "peer_understand" || uiPipeline?.status !== "peer_understand") {
+        throw new Error("parallel pipelines are still starting peer_understand");
       }
     });
+    await Promise.all([
+      completePeerUnderstand(flow, runId, apiPipelineId, "API base peer mapped endpoints and schemas."),
+      completePeerUnderstand(flow, runId, uiPipelineId, "UI base peer mapped components and state."),
+    ]);
 
     const apiStage1LeadId = currentStage(flow, runId, apiPipelineId).forkedLeadAgentId!;
     const uiStage1LeadId = currentStage(flow, runId, uiPipelineId).forkedLeadAgentId!;
