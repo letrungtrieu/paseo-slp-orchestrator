@@ -1,14 +1,11 @@
 // Sequential stages are data authored by Lead; the scheduler only manages cohorts, approval and durable handover.
 import { randomUUID } from "node:crypto";
 import type { PipelineState, StageState } from "../../shared/pipeline";
+import { ROLE_LABELS } from "../../shared/roles";
 import type { MailboxMessage } from "../../shared/state";
+import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import { peerRole } from "../project-prompts/defaults";
 import type { PipelineContext } from "./context";
-import {
-  advancePeerUnderstandPhase,
-  forkBasePeerSessionOptions,
-  forkLeadSessionOptions,
-} from "./peer-understand";
 import {
   coordinatorRevivalBriefing,
   peerRosterUpdateNotice,
@@ -50,6 +47,51 @@ async function keepCreatedAgent(ctx: PipelineContext, runId: string, pipelineId:
   throw new Error("Stage creation was cancelled.");
 }
 
+// Extract the provider prefix (for example `claude`) from a `provider/model` string.
+function extractProviderPrefix(providerIdentifier: string): string {
+  return providerIdentifier.trim().split("/")[0]?.trim().toLowerCase() ?? "";
+}
+
+// Fork the owning Lead's session in the shared pipeline worktree so every stage Peer inherits the Lead's codebase and stage context.
+async function forkLeadSessionOptionsForPeer(
+  ctx: PipelineContext,
+  runId: string,
+  pipelineId: string,
+  peerRoleId: string,
+): Promise<Record<string, unknown> | undefined> {
+  const run = ctx.store.require(runId);
+  const pipeline = requirePipeline(run, pipelineId);
+  const stage = pipeline.stages[pipeline.currentStageIndex];
+  const owningLeadId = stage?.forkedLeadAgentId ?? pipeline.leadAgentId ?? run.masterLeadAgentId;
+  if (!owningLeadId) return undefined;
+  const leadSettings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, {
+    provider: run.providers.lead,
+    permissionModeId: run.providers.leadPermissionModeId ?? undefined,
+    thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
+  });
+  const peerSettings = resolveAgentSettings(run.promptConfig, "peer", peerRoleId, {
+    provider: run.providers.peer,
+    permissionModeId: run.providers.peerPermissionModeId ?? undefined,
+    thinkingOptionId: run.providers.peerThinkingOptionId ?? undefined,
+  });
+  // Session forks require matching provider families and a shared worktree cwd between the Lead and the spawned Peer.
+  if (extractProviderPrefix(leadSettings.provider) !== extractProviderPrefix(peerSettings.provider)) {
+    return undefined;
+  }
+  const leadSessionId = await ctx.gateway.sessionIdOf(owningLeadId).catch(() => null);
+  const forkSource = leadSessionId
+    ? { provider: leadSettings.provider, providerSessionId: leadSessionId }
+    : null;
+  const forkBinding = await ctx.forks.resolve(forkSource, peerSettings.provider);
+  if (forkBinding.mode === "stored-spec") {
+    ctx.store.mutate(runId, (mutableRun) => {
+      mutableRun.forkDegradedReason ??= forkBinding.reason;
+    });
+    return undefined;
+  }
+  return forkBinding.providerOptions;
+}
+
 export async function recoverPipelines(ctx: PipelineContext, runId: string): Promise<void> {
   const run = ctx.store.require(runId);
   if (run.status !== "running") return;
@@ -64,12 +106,12 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
     const initialRun = ctx.store.require(runId);
     const pipeline = requirePipeline(initialRun, pipelineId);
     if (pipeline.status === "completed" && !pipeline.gate && initialRun.status === "running") {
-      const finalCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId ?? null;
+      const finalCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId ?? pipeline.leadAgentId ?? null;
       const liveStatuses = await ctx.gateway.liveStatuses(runId);
       const isFinalCoordinatorDead = !finalCoordinatorId
         || Boolean(ctx.store.require(runId).agents[finalCoordinatorId]?.archivedAt)
         || Boolean(liveStatuses.get(finalCoordinatorId)?.archived);
-      // If a completed pipeline's Forked Lead was archived before merging, hand its slp_finalize_pipeline duty to Master Lead.
+      // If a completed pipeline's Lead was archived before merging, hand its slp_finalize_pipeline duty to the primary Lead.
       if (isFinalCoordinatorDead) {
         ctx.store.mutate(runId, (mutableRun) => {
           const mutablePipeline = requirePipeline(mutableRun, pipelineId);
@@ -94,12 +136,7 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
       return;
     }
     if (["paused", "completed", "integrated", "failed"].includes(pipeline.status)) return;
-    // Complete the pre-stage peer_understand phase before opening Stage 1 so stage peers can fork from Base Peer.
-    const isPeerUnderstandCompleted = await advancePeerUnderstandPhase(ctx, runId, pipelineId);
-    if (!isPeerUnderstandCompleted) return;
-    const postUnderstandPipeline = requirePipeline(ctx.store.require(runId), pipelineId);
-    if (["paused", "completed", "integrated", "failed"].includes(postUnderstandPipeline.status)) return;
-    const stage = postUnderstandPipeline.stages[postUnderstandPipeline.currentStageIndex];
+    const stage = pipeline.stages[pipeline.currentStageIndex];
     if (!stage) throw new Error("Pipeline has no current stage.");
     if (stage.status === "running") {
       const live = await ctx.gateway.liveStatuses(runId);
@@ -149,22 +186,30 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
   let coordinatorCreated = false;
   const createdPeerIndices = new Set<number>();
   if (!currentAssignment(ctx, runId, pipelineId).stage.forkedLeadAgentId) {
-    const extraOptions = await forkLeadSessionOptions(ctx, runId);
     const current = currentAssignment(ctx, runId, pipelineId);
+    // Spawn a replacement Lead directly inside the pipeline's worktree if the owning Lead session was lost.
     const coordinator = await ctx.gateway.createAgent({
-      runId, role: "forked_lead", taskId: null, pipelineId, stageId: stage.id,
+      runId, role: "master_lead", taskId: null, pipelineId, stageId: stage.id,
       provider: run.providers.lead, thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
       permissionModeId: run.providers.leadPermissionModeId ?? undefined,
-      // Claude session forks resolve from the source cwd; peers themselves live in the handed-over worktree.
-      workspaceId: run.devWorkspaceId, parentAgentId: run.masterLeadAgentId,
-      title: `[Lead] [${pipeline.name} · ${stage.name}]`, awaitTool: null,
+      workspaceId: pipeline.workspaceId, peerWorktreePath: pipeline.worktree,
+      parentAgentId: run.supervisorAgentId || undefined,
+      title: `[${ROLE_LABELS.master_lead}] [${pipeline.name} · ${stage.name}]`, awaitTool: null,
       stageContext: stagePromptContext(current.pipeline, current.stage, "Coordinate this stage and approve only when its goal is met."),
-      extraOptions,
     });
     await keepCreatedAgent(ctx, runId, pipelineId, stage.id, coordinator.agentId);
     ctx.store.mutate(runId, (mutableRun) => {
       const mutablePipeline = mutableRun.pipelines[pipelineId];
+      mutablePipeline.leadAgentId = coordinator.agentId;
       mutablePipeline.stages[mutablePipeline.currentStageIndex].forkedLeadAgentId = coordinator.agentId;
+      const coordinatorRecord = mutableRun.agents[coordinator.agentId];
+      if (coordinatorRecord) {
+        coordinatorRecord.workspaceId = pipeline.workspaceId;
+        coordinatorRecord.worktreePath = pipeline.worktree;
+      }
+      if (previousCoordinatorId === mutableRun.masterLeadAgentId) {
+        mutableRun.masterLeadAgentId = coordinator.agentId;
+      }
     });
     coordinatorCreated = true;
   }
@@ -172,8 +217,8 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
     const current = currentAssignment(ctx, runId, pipelineId);
     if (current.stage.peerAgentIds[peerIndex]) continue;
     const definition = peerRole(run.promptConfig, assignment.role);
-    // Fork every stage peer from the pipeline's Base Peer session so it inherits the peer_understand context.
-    const peerForkExtraOptions = await forkBasePeerSessionOptions(ctx, runId, pipelineId, definition.role);
+    // Fork every stage peer directly from the owning Lead's session in the shared pipeline worktree.
+    const peerForkExtraOptions = await forkLeadSessionOptionsForPeer(ctx, runId, pipelineId, definition.role);
     const refreshedCurrent = currentAssignment(ctx, runId, pipelineId);
     const createdPeer = await ctx.gateway.createAgent({
       runId, role: "peer", projectRole: definition.role, taskId: null, pipelineId, stageId: stage.id, stagePeerId: String(peerIndex),
@@ -228,23 +273,39 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
         if (peerIndex >= 0) currentStage.peerAgentIds[peerIndex] = "";
         continue;
       }
-      if (agent.role === "forked_lead") currentStage.forkedLeadAgentId = agent.agentId;
+      if (agent.role === "master_lead") {
+        currentStage.forkedLeadAgentId = agent.agentId;
+        currentPipeline.leadAgentId = agent.agentId;
+      }
       if (agent.role === "peer" && agent.stagePeerId !== null) currentStage.peerAgentIds[Number(agent.stagePeerId)] = agent.agentId;
     }
     if (!currentStage.forkedLeadAgentId) {
-      // Reuse the pipeline's existing Forked Lead across stages so one Forked Lead owns its assigned task from start to merge.
-      const existingPipelineCoordinator = Object.values(run.agents).find(
-        (agent) => agent.pipelineId === pipeline.id && agent.role === "forked_lead" && !agent.archivedAt,
-      );
-      if (existingPipelineCoordinator) {
-        if (!live.has(existingPipelineCoordinator.agentId)) {
-          throw new Error(`Cannot confirm stage participant '${existingPipelineCoordinator.agentId}'; retry recovery after the directory is available.`);
+      // Reuse the pipeline's dedicated Lead across all stages so one Lead owns its worktree from planning through merge.
+      const preferredLeadId = currentPipeline.leadAgentId;
+      const existingPipelineLead =
+        (preferredLeadId && run.agents[preferredLeadId] && !run.agents[preferredLeadId].archivedAt
+          ? run.agents[preferredLeadId]
+          : undefined) ??
+        Object.values(run.agents).find(
+          (agent) => agent.pipelineId === pipeline.id && agent.role === "master_lead" && !agent.archivedAt,
+        ) ??
+        (run.masterLeadAgentId &&
+        run.agents[run.masterLeadAgentId] &&
+        !run.agents[run.masterLeadAgentId].archivedAt &&
+        (!run.agents[run.masterLeadAgentId].pipelineId || run.agents[run.masterLeadAgentId].pipelineId === pipeline.id)
+          ? run.agents[run.masterLeadAgentId]
+          : undefined);
+      if (existingPipelineLead) {
+        if (!live.has(existingPipelineLead.agentId)) {
+          throw new Error(`Cannot confirm stage participant '${existingPipelineLead.agentId}'; retry recovery after the directory is available.`);
         }
-        if (live.get(existingPipelineCoordinator.agentId)?.archived) {
-          existingPipelineCoordinator.archivedAt = new Date().toISOString();
+        if (live.get(existingPipelineLead.agentId)?.archived) {
+          existingPipelineLead.archivedAt = new Date().toISOString();
         } else {
-          existingPipelineCoordinator.stageId = currentStage.id;
-          currentStage.forkedLeadAgentId = existingPipelineCoordinator.agentId;
+          existingPipelineLead.pipelineId = pipeline.id;
+          existingPipelineLead.stageId = currentStage.id;
+          currentStage.forkedLeadAgentId = existingPipelineLead.agentId;
+          currentPipeline.leadAgentId = existingPipelineLead.agentId;
         }
       }
     }
@@ -338,14 +399,14 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
   const run = ctx.store.require(runId);
   const pipeline = requirePipeline(run, pipelineId);
   const stage = pipeline.stages[pipeline.currentStageIndex];
-  if (!stage.result) throw new Error("Stage cannot complete without its Forked Lead approval.");
+  if (!stage.result) throw new Error("Stage cannot complete without its Lead approval.");
   const stageAgents = Object.values(run.agents).filter((agent) => agent.pipelineId === pipelineId && agent.stageId === stage.id);
-  for (const coordinator of stageAgents.filter((agent) => agent.role === "forked_lead" && !agent.archivedAt)) {
+  for (const coordinator of stageAgents.filter((agent) => agent.role === "master_lead" && !agent.archivedAt)) {
     // Approval tools return before this asynchronous boundary, allowing the coordinator's last turn to finish.
     await ctx.gateway.waitForIdle(coordinator.agentId, 60_000);
   }
-  // Keep stage peers and Forked Leads alive even after the final stage completes so the Forked Lead can merge the branch
-  // via slp_finalize_pipeline and consult peers or sibling Forked Leads if merge conflicts arise.
+  // Keep stage peers and Leads alive even after the final stage completes so the Lead can merge the branch
+  // via slp_finalize_pipeline and consult peers or sibling Leads if merge conflicts arise.
   const latestRun = ctx.store.require(runId);
   const latestPipeline = requirePipeline(latestRun, pipelineId);
   const latestStage = latestPipeline.stages[latestPipeline.currentStageIndex];
@@ -378,7 +439,7 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
     if (gateKind) {
       // Optional human modes pause between model-authored stages without adding or changing those stages.
       const note = gateKind === "before_integration" ? "All stages approved. Approve integration into the Lead branch."
-        : `Stage '${currentStage.name}' approved by Forked Lead. Approve the next declared stage.`;
+        : `Stage '${currentStage.name}' approved by Lead. Approve the next declared stage.`;
       currentPipeline.gate = { kind: gateKind, stageId: currentStage.id, openedAt: currentStage.completedAt, note };
       if (!complete) currentPipeline.status = "paused";
       currentPipeline.pausedReason = note;
@@ -388,10 +449,12 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
       mutableRun.mailbox.push(stageMail(mutableRun.supervisorAgentId,
         `Pipeline '${currentPipeline.name}' is waiting for the human gate selected by run mode ${mutableRun.mode}: ${currentPipeline.gate.note}\nTell the human to open SLP Orchestrator and approve the pipeline gate.`, null));
     } else if (currentPipeline.status === "completed") {
-      // Assign pipeline branch integration and conflict resolution directly to the final stage's Forked Lead.
+      // Assign pipeline branch integration and conflict resolution directly to the pipeline's Lead.
       const finalizingAgentId = currentStage.forkedLeadAgentId && !mutableRun.agents[currentStage.forkedLeadAgentId]?.archivedAt
         ? currentStage.forkedLeadAgentId
-        : mutableRun.masterLeadAgentId;
+        : (currentPipeline.leadAgentId && !mutableRun.agents[currentPipeline.leadAgentId]?.archivedAt
+            ? currentPipeline.leadAgentId
+            : mutableRun.masterLeadAgentId);
       mutableRun.mailbox.push(
         stageMail(finalizingAgentId, pipelineFinalizationBriefing(mutableRun, currentPipeline), "slp_finalize_pipeline"),
       );

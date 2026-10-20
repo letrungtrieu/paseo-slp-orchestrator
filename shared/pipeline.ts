@@ -45,43 +45,53 @@ export const PipelineDefinitionSchema = z.object({
   version: z.string().trim().min(1),
   worktree: z.string().trim().min(1),
   description: z.string().trim().min(1),
-  // Stage order is the dependency graph: the next stage is opened only after the Forked Lead
-  // closes the current one. Stages may be empty initially while Forked Lead and Base Peer run
-  // peer_understand and confirm mutual understanding before Forked Lead creates the pipeline stages.
-  stages: z.array(PipelineStageDefinitionSchema).default([]),
+  // Stage order is the dependency graph: the next stage is opened only after the Lead
+  // closes the current one, so the Lead does not need a second hidden dependency format.
+  stages: z.array(PipelineStageDefinitionSchema).min(1),
 });
 export type PipelineDefinition = z.infer<typeof PipelineDefinitionSchema>;
 
 export const PipelineInputDefinitionSchema = PipelineDefinitionSchema.extend({
-  // Default version to "1.0" when Master Lead omits it during multi-task decomposition.
+  // Default version to "1.0" when a Lead omits it during pipeline definition.
   version: z.string().trim().min(1).default("1.0"),
-  // Optional on input: when omitted, definePipeline automatically provisions a dedicated worktree for the task.
+  // Optional on input: when omitted, definePipeline uses the Lead's own worktree or provisions a dedicated worktree.
   worktree: z.string().trim().min(1).optional(),
-  // Optional initial investigation goal for Base Peer; when omitted, Forked Lead creates the investigation goal first.
-  investigationGoal: z.string().trim().min(1).optional(),
-  // Stages can be omitted when Master Lead creates the task shell so Forked Lead defines them after peer_understand.
-  stages: z.array(PipelineStageDefinitionSchema).default([]),
 });
 export type PipelineInputDefinition = z.infer<typeof PipelineInputDefinitionSchema>;
 
 export const PipelineEnvelopeSchema = z.object({
   pipeline: PipelineInputDefinitionSchema.optional(),
   pipelines: z.array(PipelineInputDefinitionSchema).min(1).optional(),
-  // Used when Forked Lead creates the pipeline stages after confirming mutual understanding with Base Peer.
-  pipelineId: z.string().trim().min(1).optional(),
-  summary: z.string().trim().min(1).optional(),
-  stages: z.array(PipelineStageDefinitionSchema).min(1).optional(),
 });
 export type PipelineEnvelope = z.infer<typeof PipelineEnvelopeSchema>;
 
-// Reserved synthetic stage id used to track the pre-stage peer_understand phase in AgentRecord.stageId
-// and bus messages without colliding with stage-1..N ids.
-export const PEER_UNDERSTAND_STAGE_ID = "peer_understand";
-export const BASE_PEER_ROLE_ID = "base-peer";
+// Describes one parallel feature track delegated by the Supervisor to a dedicated Lead and worktree.
+export const DelegatedFeatureSchema = z.object({
+  name: z.string().trim().min(1),
+  acceptanceCriteria: z.string().trim().min(10),
+  worktree: z.string().trim().min(1).optional(),
+});
+export type DelegatedFeature = z.infer<typeof DelegatedFeatureSchema>;
+
+// Supports both single-feature delegation (`acceptanceCriteria`) and N-Lead parallel feature decomposition (`tasks`).
+export const DelegationSubmissionSchema = z
+  .object({
+    acceptanceCriteria: z.string().trim().min(10).optional(),
+    sharedContext: z.string().trim().min(1).optional(),
+    tasks: z.array(DelegatedFeatureSchema).min(1).optional(),
+  })
+  .refine(
+    (submission) =>
+      (typeof submission.acceptanceCriteria === "string" && submission.acceptanceCriteria.trim().length >= 20) ||
+      Boolean(submission.tasks && submission.tasks.length > 0),
+    {
+      message: "Provide either acceptanceCriteria (at least 20 characters) or a non-empty tasks array.",
+    },
+  );
+export type DelegationSubmission = z.infer<typeof DelegationSubmissionSchema>;
 
 export const PIPELINE_STATUSES = [
   "queued",
-  "peer_understand",
   "starting",
   "running",
   "paused",
@@ -126,24 +136,6 @@ export const StageResultSchema = z.object({
 });
 export type StageResult = z.infer<typeof StageResultSchema>;
 
-// Captures the pre-pipeline peer_understand phase where Forked Lead sets the investigation goal,
-// Base Peer investigates the repository, and both confirm mutual understanding before creating stages.
-export const PeerUnderstandStateSchema = z.object({
-  status: StageStatusSchema.default("pending"),
-  // Investigation goal authored by Forked Lead (or seeded at task creation) to guide Base Peer's discovery.
-  investigationGoal: z.string().nullable().default(null),
-  forkedLeadAgentId: z.string().nullable().default(null),
-  basePeerAgentId: z.string().nullable().default(null),
-  // Recorded at the approval checkpoint so subsequent stage peers can fork this session in the same worktree.
-  basePeerSessionId: z.string().nullable().default(null),
-  reports: z.array(StoredStageReportSchema).default([]),
-  messages: z.array(StageMessageSchema).default([]),
-  result: StageResultSchema.nullable().default(null),
-  startedAt: z.string().nullable().default(null),
-  completedAt: z.string().nullable().default(null),
-});
-export type PeerUnderstandState = z.infer<typeof PeerUnderstandStateSchema>;
-
 export const PipelineGateSchema = z.object({
   kind: z.enum(["after_stage", "before_integration"]),
   stageId: z.string().nullable(),
@@ -170,26 +162,13 @@ export type StageState = z.infer<typeof StageStateSchema>;
 export const PipelineStateSchema = PipelineDefinitionSchema.extend({
   id: z.string().min(1),
   status: PipelineStatusSchema.default("queued"),
-  // Defaults to completed when deserializing older snapshots or unit-test fixtures that predate
-  // peer_understand; definePipeline explicitly initializes new pipelines with status: "pending".
-  peerUnderstand: PeerUnderstandStateSchema.default({
-    status: "completed",
-    investigationGoal: null,
-    forkedLeadAgentId: null,
-    basePeerAgentId: null,
-    basePeerSessionId: null,
-    reports: [],
-    messages: [],
-    result: null,
-    startedAt: null,
-    completedAt: null,
-  }),
+  // Tracks the Lead agent that owns this pipeline's worktree and directly supervises all of its stages.
+  leadAgentId: z.string().nullable().default(null),
   currentStageIndex: z.number().int().min(0).default(0),
   workspaceId: z.string().nullable().default(null),
   branch: z.string().nullable().default(null),
   baseCommit: z.string().nullable().default(null),
-  // Stages may be empty while peer_understand is running and are populated when Forked Lead creates the pipeline stages.
-  stages: z.array(StageStateSchema).default([]),
+  stages: z.array(StageStateSchema).min(1),
   pausedReason: z.string().nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),

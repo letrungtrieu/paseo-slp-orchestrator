@@ -48,7 +48,7 @@ function completedPipeline(pipeline: PipelineState): boolean {
     && pipeline.stages.every((stage) => stage.status === "completed" && stage.result !== null);
 }
 
-// Build actionable conflict guidance listing pipeline Peers and sibling Forked Leads so the Forked Lead can consult them before resolving.
+// Build actionable conflict guidance listing pipeline Peers and sibling Leads so the Lead can consult them before resolving.
 function formatMergeConflictGuidance(
   run: Run,
   pipeline: PipelineState,
@@ -70,28 +70,32 @@ function formatMergeConflictGuidance(
       return [`${peerAssignment?.role ?? "peer"} (${peerAgentId}, stage '${completedStage.name}')`];
     }),
   );
-  const siblingForkedLeadContacts = Object.values(run.pipelines)
+  const siblingLeadContacts = Object.values(run.pipelines)
     .filter((candidatePipeline) => candidatePipeline.id !== pipeline.id)
     .flatMap((siblingPipeline) => {
-      const siblingCoordinatorId = [...siblingPipeline.stages]
-        .reverse()
-        .map((siblingStage) => siblingStage.forkedLeadAgentId)
-        .find((coordinatorId): coordinatorId is string => Boolean(coordinatorId && !run.agents[coordinatorId]?.archivedAt));
-      return siblingCoordinatorId ? [`${siblingPipeline.name} -> Forked Lead (${siblingCoordinatorId})`] : [];
+      const siblingCoordinatorId =
+        (siblingPipeline.leadAgentId && !run.agents[siblingPipeline.leadAgentId]?.archivedAt
+          ? siblingPipeline.leadAgentId
+          : null) ??
+        [...siblingPipeline.stages]
+          .reverse()
+          .map((siblingStage) => siblingStage.forkedLeadAgentId)
+          .find((coordinatorId): coordinatorId is string => Boolean(coordinatorId && !run.agents[coordinatorId]?.archivedAt));
+      return siblingCoordinatorId ? [`${siblingPipeline.name} -> Lead (${siblingCoordinatorId})`] : [];
     });
   const consultationHints = [
     pipelinePeerContacts.length > 0
       ? `Pipeline Peers to ask if you need context on this pipeline's changes (via slp_send_peer_message): ${pipelinePeerContacts.join(", ")}.`
       : null,
-    siblingForkedLeadContacts.length > 0
-      ? `Sibling Forked Leads to ask if the conflict involves another feature pipeline (via slp_send_peer_message): ${siblingForkedLeadContacts.join(", ")}.`
+    siblingLeadContacts.length > 0
+      ? `Sibling Leads to ask if the conflict involves another feature pipeline (via slp_send_peer_message): ${siblingLeadContacts.join(", ")}.`
       : null,
-    `Resolution workflow: consult relevant Peers or sibling Forked Leads if any conflicting logic is unclear, merge '${run.integrationBranch}' into '${pipeline.branch}' inside '${pipeline.worktree}', resolve conflicts and commit cleanly, then call slp_finalize_pipeline again.`,
+    `Resolution workflow: consult relevant Peers or sibling Leads if any conflicting logic is unclear, merge '${run.integrationBranch}' into '${pipeline.branch}' inside '${pipeline.worktree}', resolve conflicts and commit cleanly, then call slp_finalize_pipeline again.`,
   ].filter(Boolean).join(" ");
   return `Could not merge pipeline '${pipeline.name}': ${rawErrorMessage}. ${conflictedFilesSummary}. ${consultationHints}`;
 }
 
-// Format the consolidated summary handed to the Master Lead once every active pipeline has been merged into integrationBranch.
+// Format the consolidated summary handed to the primary Lead once every active pipeline has been merged into integrationBranch.
 function masterLeadIntegrationHandover(run: Run): string {
   const integratedPipelineSummaries = Object.values(run.pipelines).map((integratedPipeline) =>
     [
@@ -104,18 +108,18 @@ function masterLeadIntegrationHandover(run: Run): string {
     `All pipelines have been verified and merged into integration branch \`${run.integrationBranch}\` (\`${run.devCwd}\`).`,
     "## Consolidated Pipeline Summaries",
     integratedPipelineSummaries.join("\n\n"),
-    "## Next Action for Master Lead",
-    "1. Review the integrated codebase in your integration worktree (`run.devCwd`).",
+    "## Next Action for Lead",
+    "1. Review the integrated codebase in the integration branch.",
     "2. **Optional Autonomous End-User UAT Team**: If end-to-end user acceptance testing across the combined features is warranted before final delivery, spawn an End-User UAT pipeline (`slp_create_worktree` + `slp_define_pipeline` using `end-user` or `qa-engineer` peers) to test the integrated application as a real end user.",
     "3. Once you have verified that all integrated features work together and meet the overall acceptance criteria, call `slp_report` to hand the result to the Supervisor.",
   ].join("\n\n");
 }
 
-function integratedResult(pipeline: PipelineState, allIntegrated = true, callerRole: BusCaller["role"] = "master_lead"): string {
-  const nextAction = callerRole === "forked_lead"
+function integratedResult(pipeline: PipelineState, allIntegrated = true, isPrimaryLeadCaller = true): string {
+  const nextAction = !isPrimaryLeadCaller
     ? allIntegrated
-      ? "Pipeline branch merged into integration. Consolidated summaries have been attached and handed to the Master Lead. End your turn."
-      : "Pipeline branch merged into integration. Keep your session idle in case sibling Forked Leads consult you on merge conflicts before all pipelines finish."
+      ? "Pipeline branch merged into integration. Consolidated summaries have been attached and handed to the primary Lead. End your turn."
+      : "Pipeline branch merged into integration. Keep your session idle in case sibling Leads consult you on merge conflicts before all pipelines finish."
     : allIntegrated
       ? "All defined pipelines are integrated. Verify the combined result (or spawn an End-User UAT pipeline if needed), then call slp_report in this turn."
       : "Other pipelines still need integration; continue coordinating them before calling slp_report.";
@@ -139,23 +143,25 @@ export async function finalizePipeline(
   const callerAgentRecord = initialRun.agents[caller.agentId];
   const pipelineId = rawPipelineId ?? callerAgentRecord?.pipelineId ?? null;
   if (!pipelineId) throw new ToolError("Pipeline id is required.");
-  // Prevent a Forked Lead from accidentally finalizing a sibling pipeline that belongs to another coordinator.
-  if (caller.role === "forked_lead" && callerAgentRecord?.pipelineId && callerAgentRecord.pipelineId !== pipelineId) {
-    throw new ToolError(`Forked Lead for pipeline '${callerAgentRecord.pipelineId}' cannot finalize pipeline '${pipelineId}'.`);
+  // Prevent a sibling Lead from accidentally finalizing a pipeline owned by another Lead unless primary Lead explicitly targets it.
+  const isPrimaryLeadWithExplicitId = caller.agentId === initialRun.masterLeadAgentId && Boolean(rawPipelineId);
+  if (!isPrimaryLeadWithExplicitId && callerAgentRecord?.pipelineId && callerAgentRecord.pipelineId !== pipelineId) {
+    throw new ToolError(`Lead for pipeline '${callerAgentRecord.pipelineId}' cannot finalize pipeline '${pipelineId}'.`);
   }
   const initialPipeline = requirePipeline(initialRun, pipelineId);
+  const isPrimaryLeadCaller = caller.agentId === initialRun.masterLeadAgentId;
   // Retried tool calls after a successful merge return the durable result instead of creating a
   // second merge commit or sending duplicate completion mail.
   if (initialPipeline.status === "integrated") {
     const allPipelinesDone = Object.values(initialRun.pipelines).every((candidate) => candidate.status === "integrated");
-    return integratedResult(initialPipeline, allPipelinesDone, caller.role);
+    return integratedResult(initialPipeline, allPipelinesDone, isPrimaryLeadCaller);
   }
   return withRunFinalizeLock(runId, async () => {
     const run = ctx.store.require(runId);
     const pipeline = requirePipeline(run, pipelineId);
     if (pipeline.status === "integrated") {
       const allPipelinesDone = Object.values(run.pipelines).every((candidate) => candidate.status === "integrated");
-      return integratedResult(pipeline, allPipelinesDone, caller.role);
+      return integratedResult(pipeline, allPipelinesDone, caller.agentId === run.masterLeadAgentId);
     }
     if (run.status !== "running") throw new ToolError(`Cannot finalize a pipeline while run is '${run.status}'.`);
     if (!completedPipeline(pipeline)) throw new ToolError("Every pipeline stage must be completed and approved first.");
@@ -186,7 +192,7 @@ export async function finalizePipeline(
         pipeline.branch,
       ]);
     } catch (mergeError) {
-      // Capture conflicted file paths before aborting the merge so the Forked Lead knows which files and peers/Forked Leads to consult.
+      // Capture conflicted file paths before aborting the merge so the Lead knows which files and peers/sibling Leads to consult.
       const conflictedFilesOutput = await runGit(run.devCwd, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "");
       await runGit(run.devCwd, ["merge", "--abort"]).catch(() => undefined);
       throw new ToolError(formatMergeConflictGuidance(run, pipeline, conflictedFilesOutput, mergeError));
@@ -201,33 +207,34 @@ export async function finalizePipeline(
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 
     const preArchiveRun = ctx.store.require(runId);
-    const willAllPipelinesBeIntegrated = Object.values(preArchiveRun.pipelines).every(
-      (candidatePipeline) => candidatePipeline.id === pipelineId || candidatePipeline.status === "integrated",
+    const hasPendingLeadPlanning = Object.values(preArchiveRun.agents).some(
+      (agentRecord) =>
+        agentRecord.role === "master_lead" &&
+        !agentRecord.archivedAt &&
+        agentRecord.awaitingTool === "slp_define_pipeline",
     );
-    const finalStageCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId ?? null;
+    const willAllPipelinesBeIntegrated =
+      !hasPendingLeadPlanning &&
+      Object.values(preArchiveRun.pipelines).every(
+        (candidatePipeline) => candidatePipeline.id === pipelineId || candidatePipeline.status === "integrated",
+      );
     const remainingPipelineAgents = Object.values(preArchiveRun.agents).filter(
       (agentRecord) => agentRecord.pipelineId === pipelineId && !agentRecord.archivedAt,
     );
-    // Close all peers (including Base Peer) of this integrated pipeline first so parent archival never cascades to active children.
-    for (const peerRecord of remainingPipelineAgents.filter(
-      (agentRecord) => agentRecord.role === "peer" || agentRecord.role === "base_peer",
-    )) {
+    // Close all peers of this integrated pipeline first so parent archival never cascades to active children.
+    for (const peerRecord of remainingPipelineAgents.filter((agentRecord) => agentRecord.role === "peer")) {
       await ctx.gateway.archive(peerRecord.agentId).catch(() => undefined);
     }
     if (willAllPipelinesBeIntegrated) {
-      // Once the final pipeline integrates, archive all remaining Forked Leads across every integrated pipeline.
-      const allRemainingPipelineCoordinators = Object.values(ctx.store.require(runId).agents).filter(
-        (agentRecord) => agentRecord.role === "forked_lead" && agentRecord.pipelineId !== null && !agentRecord.archivedAt,
+      // Once the final pipeline integrates, archive all sibling Leads while keeping the primary Lead alive to report or run UAT.
+      const siblingLeadsToArchive = Object.values(ctx.store.require(runId).agents).filter(
+        (agentRecord) =>
+          agentRecord.role === "master_lead" &&
+          agentRecord.agentId !== preArchiveRun.masterLeadAgentId &&
+          !agentRecord.archivedAt,
       );
-      for (const coordinatorRecord of allRemainingPipelineCoordinators) {
-        await ctx.gateway.archive(coordinatorRecord.agentId).catch(() => undefined);
-      }
-    } else {
-      // Keep the final stage's Forked Lead alive while sibling pipelines are still running so they can consult it on cross-feature conflicts.
-      for (const coordinatorRecord of remainingPipelineAgents.filter(
-        (agentRecord) => agentRecord.role === "forked_lead" && agentRecord.agentId !== finalStageCoordinatorId,
-      )) {
-        await ctx.gateway.archive(coordinatorRecord.agentId).catch(() => undefined);
+      for (const siblingLeadRecord of siblingLeadsToArchive) {
+        await ctx.gateway.archive(siblingLeadRecord.agentId).catch(() => undefined);
       }
     }
     // Clean up the merged pipeline's owned worktree and delete its local slp/* branch immediately so temporary branches never persist or get pushed.
@@ -255,21 +262,34 @@ export async function finalizePipeline(
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) => mutableRun.agents[queuedMessage.toAgentId]?.pipelineId !== pipelineId,
       );
-      allIntegrated = Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
+      const stillPlanning = Object.values(mutableRun.agents).some(
+        (agentRecord) =>
+          agentRecord.role === "master_lead" &&
+          !agentRecord.archivedAt &&
+          agentRecord.awaitingTool === "slp_define_pipeline",
+      );
+      allIntegrated =
+        !stillPlanning &&
+        Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
       if (mutableRun.status === "running" && allIntegrated) {
-        if (caller.role === "forked_lead") {
-          // Attach the consolidated summaries from all Forked Leads and wake the Master Lead to run UAT or report to Supervisor.
+        const primaryLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
+        if (primaryLeadRecord) {
+          // Reset the primary Lead's pipeline pointer and point its worktreePath to the integration checkout for UAT/reporting.
+          primaryLeadRecord.pipelineId = null;
+          primaryLeadRecord.stageId = null;
+          primaryLeadRecord.worktreePath = mutableRun.devCwd;
+          primaryLeadRecord.workspaceId = mutableRun.devWorkspaceId;
+        }
+        if (caller.agentId !== mutableRun.masterLeadAgentId) {
+          // Attach the consolidated summaries from all Leads and wake the primary Lead to run UAT or report to Supervisor.
           mutableRun.mailbox.push(
             stageMail(mutableRun.masterLeadAgentId, masterLeadIntegrationHandover(mutableRun), "slp_report"),
           );
-        } else {
-          // Stamp slp_report directly on the calling Master Lead while keeping its active turn timestamp so turn_ended nudges if omitted.
-          const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
-          if (masterLeadRecord) {
-            masterLeadRecord.awaitingTool = "slp_report";
-            masterLeadRecord.awaitingSince = masterLeadRecord.awaitingSince ?? integratedAt;
-            masterLeadRecord.nudges = 0;
-          }
+        } else if (primaryLeadRecord) {
+          // Stamp slp_report directly on the calling primary Lead while keeping its active turn timestamp so turn_ended nudges if omitted.
+          primaryLeadRecord.awaitingTool = "slp_report";
+          primaryLeadRecord.awaitingSince = primaryLeadRecord.awaitingSince ?? integratedAt;
+          primaryLeadRecord.nudges = 0;
         }
       }
     });
@@ -281,6 +301,6 @@ export async function finalizePipeline(
       summary: `${pipeline.name}: ${mergedCommit}`,
       outcome: "delivered",
     });
-    return integratedResult(ctx.store.require(runId).pipelines[pipelineId], allIntegrated, caller.role);
+    return integratedResult(ctx.store.require(runId).pipelines[pipelineId], allIntegrated, caller.agentId === initialRun.masterLeadAgentId);
   });
 }

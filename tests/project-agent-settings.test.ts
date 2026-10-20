@@ -30,15 +30,10 @@ describe("project model and thinking overrides", () => {
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toMatchObject({ provider: "claude/form-model", thinkingOptionId: "high" });
   });
 
-  // Root orchestration roles govern their own model family; BASE_PEER.md governs the base session from which stage peers fork.
-  it.each(["supervisor", "master_lead", "forked_lead", "base_peer"] as const)("applies root model settings to %s", (role) => {
+  // Root orchestration roles govern their own model family; LEAD.md governs the Lead session from which stage peers fork.
+  it.each(["supervisor", "master_lead"] as const)("applies root model settings to %s", (role) => {
     const configuration = defaultProjectPrompts();
-    const definition =
-      role === "supervisor"
-        ? configuration.supervisor
-        : role === "base_peer"
-          ? configuration.basePeer!
-          : configuration.lead;
+    const definition = role === "supervisor" ? configuration.supervisor : configuration.lead;
     definition.model = "claude/project-root";
     definition.thinking = "high";
     expect(resolveAgentSettings(configuration, role, undefined, runDefaults)).toMatchObject({
@@ -47,28 +42,17 @@ describe("project model and thinking overrides", () => {
     });
   });
 
-  it("allows FORKED_LEAD.md to override model or thinking independently of LEAD.md", () => {
-    const configuration = defaultProjectPrompts();
-    configuration.lead.model = "claude/master-lead-model";
-    configuration.lead.thinking = "high";
-    configuration.forkedLead!.model = "claude/forked-lead-model";
-    expect(resolveAgentSettings(configuration, "forked_lead", undefined, runDefaults)).toMatchObject({
-      provider: "claude/forked-lead-model",
-      thinkingOptionId: "high",
-    });
-  });
-
-  it("keeps base_peer's provider when a .slp/peers file specifies a compatible short model ID", () => {
+  it("keeps Lead's provider when a .slp/peers file specifies a compatible short model ID", () => {
     const configuration = defaultProjectPrompts();
     configuration.peers.find((peer) => peer.role === "qa-engineer")!.model = "fast-model";
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults).provider).toBe("claude/fast-model");
   });
 
-  it("resolves .slp/peers models under BASE_PEER.md's provider when BASE_PEER.md switches provider", () => {
+  it("resolves .slp/peers models under LEAD.md's provider when LEAD.md switches provider", () => {
     const configuration = defaultProjectPrompts();
-    configuration.basePeer!.model = "codex/gpt-5.4";
+    configuration.lead.model = "codex/gpt-5.4";
     configuration.peers.find((peer) => peer.role === "developer")!.model = "gpt-5.4-mini";
-    // Because stage peers fork from base_peer, short models in .slp/peers resolve against base_peer's codex provider.
+    // Because stage peers fork directly from Lead in the shared worktree, short models in .slp/peers resolve against Lead's codex provider.
     expect(resolveAgentSettings(configuration, "peer", "developer", runDefaults)).toMatchObject({
       provider: "codex/gpt-5.4-mini",
       permissionModeId: getUnattendedModeId("codex"),
@@ -76,27 +60,27 @@ describe("project model and thinking overrides", () => {
     });
   });
 
-  it("falls back to global config when a .slp/peers model does not match base_peer's provider or catalog", () => {
+  it("falls back to global config when a .slp/peers model does not match Lead's provider or catalog", () => {
     const configuration = defaultProjectPrompts();
     const qaPeer = configuration.peers.find((peer) => peer.role === "qa-engineer")!;
-    // Foreign provider prefix (`codex/...` while base_peer is `claude`) falls back to global runDefaults.
+    // Foreign provider prefix (`codex/...` while Lead is `claude`) falls back to global runDefaults.
     qaPeer.model = "codex/role-model";
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toEqual(runDefaults);
 
-    // Foreign model-family prefix (`gpt-5.4` while base_peer is `claude`) falls back to global runDefaults.
+    // Foreign model-family prefix (`gpt-5.4` while Lead is `claude`) falls back to global runDefaults.
     qaPeer.model = "gpt-5.4";
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults)).toEqual(runDefaults);
 
-    // Model absent from the supplied base_peer provider catalog falls back to global runDefaults.
+    // Model absent from the supplied Lead provider catalog falls back to global runDefaults.
     qaPeer.model = "claude-nonexistent-99";
     const claudeCatalog = [{ id: "claude-sonnet-4-6", provider: "claude" }];
     expect(resolveAgentSettings(configuration, "peer", "qa-engineer", runDefaults, claudeCatalog)).toEqual(runDefaults);
   });
 
-  it("maps Full Access to the new provider's native permission ID for root roles such as BASE_PEER.md", () => {
+  it("maps Full Access to the new provider's native permission ID for root roles such as LEAD.md", () => {
     const configuration = defaultProjectPrompts();
-    configuration.basePeer!.model = "codex/role-model";
-    expect(resolveAgentSettings(configuration, "base_peer", undefined, runDefaults).permissionModeId).toBe(
+    configuration.lead.model = "codex/role-model";
+    expect(resolveAgentSettings(configuration, "master_lead", undefined, runDefaults).permissionModeId).toBe(
       getUnattendedModeId("codex"),
     );
   });
@@ -104,13 +88,13 @@ describe("project model and thinking overrides", () => {
   // A provider change on a root role must never silently replace a deliberately restricted permission choice with Full Access.
   it("rejects an incompatible restricted permission override with its configuration path", () => {
     const configuration = defaultProjectPrompts();
-    configuration.basePeer!.model = "codex/role-model";
+    configuration.lead.model = "codex/role-model";
     expect(() =>
-      resolveAgentSettings(configuration, "base_peer", undefined, {
+      resolveAgentSettings(configuration, "master_lead", undefined, {
         ...runDefaults,
         permissionModeId: "restricted-mode",
       }),
-    ).toThrow(/\.slp\/BASE_PEER\.md: model switches/);
+    ).toThrow(/\.slp\/LEAD\.md: model switches/);
   });
 });
 

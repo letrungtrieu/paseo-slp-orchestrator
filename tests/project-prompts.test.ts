@@ -20,8 +20,6 @@ describe("project prompt initialization", () => {
       "security-reviewer",
     ]);
     expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toContain("# Workflow");
-    expect(await readFile(join(repoPath, ".slp/FORKED_LEAD.md"), "utf8")).toContain("role: forked-lead");
-    expect(await readFile(join(repoPath, ".slp/BASE_PEER.md"), "utf8")).toContain("role: base-peer");
     expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
     expect(await readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).toContain("role: end-user");
     // Business-role metadata must not prescribe a permanent pipeline kind.
@@ -81,7 +79,6 @@ describe("Markdown role discovery", () => {
     const configuration = await loadProjectPrompts(repoPath);
     expect(configuration.supervisor.role).toBe("supervisor");
     expect(configuration.lead.role).toBe("master-lead");
-    expect(configuration.forkedLead?.role).toBe("forked-lead");
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
       "developer",
       "end-user",
@@ -117,7 +114,6 @@ describe("project system prompt composition", () => {
     const configuration = await loadProjectPrompts(repoPath);
     const defaultDeveloperPrompt = systemPromptFor("peer", configuration, "developer");
     const defaultQaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
-    const defaultForkedLeadPrompt = systemPromptFor("forked_lead", configuration);
     const defaultLeadPrompt = systemPromptFor("master_lead", configuration);
 
     // Seeded .slp files contain the default metrics, methodology, anti-bloat, and QA screenshot rules out of the box.
@@ -130,7 +126,6 @@ describe("project system prompt composition", () => {
     expect(defaultQaPrompt).toContain("screenshot evidence");
     expect(defaultQaPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
     expect(defaultDeveloperPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
-    expect(defaultForkedLeadPrompt).toContain("system garbage/bloat");
     expect(defaultLeadPrompt).toContain("system garbage/bloat");
 
     // Customizing .slp workflows replaces the prompt body cleanly without any hardcoded contract wrappers remaining.
@@ -140,19 +135,14 @@ describe("project system prompt composition", () => {
     qa.workflow = "PRIVATE_QA_WORKFLOW: test invoice fractions.";
     developer.workflow = "CUSTOM_DEV_WORKFLOW: write minimal code.";
     configuration.lead.workflow = "CUSTOM_LEAD_WORKFLOW: prioritize acceptance risk.";
-    configuration.forkedLead!.workflow = "CUSTOM_FORKED_LEAD_WORKFLOW: coordinate stage only.";
 
     const customLeadPrompt = systemPromptFor("master_lead", configuration);
-    const customForkedLeadPrompt = systemPromptFor("forked_lead", configuration);
     const customQaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
     const customDeveloperPrompt = systemPromptFor("peer", configuration, "developer");
 
     expect(customLeadPrompt).toContain("features: [invoice-regression]");
     expect(customLeadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
     expect(customLeadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
-    expect(customLeadPrompt).not.toContain("CUSTOM_FORKED_LEAD_WORKFLOW");
-    expect(customForkedLeadPrompt).toContain("CUSTOM_FORKED_LEAD_WORKFLOW");
-    expect(customForkedLeadPrompt).not.toContain("CUSTOM_LEAD_WORKFLOW");
     expect(customQaPrompt).toContain("PRIVATE_QA_WORKFLOW");
     expect(customQaPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
     expect(customDeveloperPrompt).toContain("CUSTOM_DEV_WORKFLOW");

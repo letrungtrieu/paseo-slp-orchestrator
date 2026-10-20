@@ -5,6 +5,7 @@ import { normalizeRoleId, parseRoleMarkdown } from "./markdown";
 
 // Seed roles provide the initial .slp/*.md files; users can edit or replace every file without changing engine code.
 const DEFAULT_ROLES = [
+  // Supervisor is the single human-facing role; it stays read-only and delegates 1 or N parallel features.
   {
     role: "supervisor",
     name: "Supervisor",
@@ -12,27 +13,15 @@ const DEFAULT_ROLES = [
     file: "SUPERVISOR.md",
     workflow: DEFAULT_WORKFLOWS.supervisor.trim(),
   },
+  // Each Lead owns its feature worktree, coordinates with sibling Leads, and directly supervises and forks stage Peers.
   {
     role: "master-lead",
     name: "Lead",
-    description: "Plan the solution, decompose parallel tasks, assign project peer roles and oversee integration.",
+    description: "Investigate the assigned feature worktree, align cross-feature contracts with sibling Leads, define stages, and fork/supervise stage Peers.",
     file: "LEAD.md",
     workflow: DEFAULT_WORKFLOWS.master_lead.trim(),
   },
-  {
-    role: "forked-lead",
-    name: "Forked Lead",
-    description: "Coordinate one task pipeline across all of its stages, audit peer metrics and data hygiene, and merge the completed pipeline branch into integration.",
-    file: "FORKED_LEAD.md",
-    workflow: DEFAULT_WORKFLOWS.forked_lead.trim(),
-  },
-  {
-    role: "base-peer",
-    name: "Base Peer",
-    description: "Investigate the repository and align with the Forked Lead during peer_understand so all subsequent stage peers fork from a shared understanding of the task.",
-    file: "BASE_PEER.md",
-    workflow: DEFAULT_WORKFLOWS.base_peer.trim(),
-  },
+  // Developer peers implement scoped code and tests while documenting concrete input/logic/output metrics.
   {
     role: "developer",
     name: "Developer",
@@ -115,8 +104,8 @@ export function defaultProjectPrompts(): ProjectPromptConfig {
     parseRoleMarkdown(definition.markdown, `.slp/${definition.relativePath}`),
   );
   // Root files have a fixed purpose; peer names are discovered solely from their front matter.
-  const [supervisor, lead, forkedLead, basePeer, ...peers] = roles;
-  return { supervisor, lead, forkedLead, basePeer, peers };
+  const [supervisor, lead, ...peers] = roles;
+  return { supervisor, lead, peers };
 }
 
 // Common UAT role aliases map to the project's configured .slp/peers/END_USER_UAT.md role when present.

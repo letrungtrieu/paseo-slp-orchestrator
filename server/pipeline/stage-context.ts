@@ -1,9 +1,8 @@
 // Stage identity is derived from authenticated agent records so peers cannot act on a sibling pipeline.
 import type { BusCaller } from "../bus/http-mcp";
-import { PEER_UNDERSTAND_STAGE_ID, type PipelineState } from "../../shared/pipeline";
+import type { PipelineState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import type { PipelineContext } from "./context";
-import { buildPeerUnderstandStageView } from "./peer-understand";
 import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
 
@@ -19,33 +18,22 @@ export function stageForCaller(ctx: PipelineContext, caller: BusCaller) {
   // Persisted records from completed stages remain audit evidence, never an authorization to submit again.
   if (!agent || agent.archivedAt || !agent.pipelineId || !agent.stageId) throw new ToolError("This tool requires an active stage assignment.");
   const pipeline = requirePipeline(run, agent.pipelineId);
-  // During the pre-stage peer_understand phase, adapt pipeline.peerUnderstand into a stage view for Forked Lead and Base Peer.
-  if (
-    run.status === "running"
-    && pipeline.status === "peer_understand"
-    && agent.stageId === PEER_UNDERSTAND_STAGE_ID
-    && pipeline.peerUnderstand.status === "running"
-  ) {
-    const belongsToPeerUnderstand =
-      agent.role === "forked_lead"
-        ? pipeline.peerUnderstand.forkedLeadAgentId === caller.agentId
-        : agent.role === "base_peer" && pipeline.peerUnderstand.basePeerAgentId === caller.agentId;
-    if (!belongsToPeerUnderstand) throw new ToolError("Agent is not a participant of this stage.");
-    return { run, pipeline, stage: buildPeerUnderstandStageView(pipeline), agent };
-  }
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (run.status !== "running" || pipeline.status !== "running" || !stage || stage.id !== agent.stageId || stage.status !== "running") {
     throw new ToolError("Your stage is no longer running. Read slp_get_pipeline for its current state.");
   }
-  const belongsToStage = agent.role === "forked_lead" ? stage.forkedLeadAgentId === caller.agentId : stage.peerAgentIds.includes(caller.agentId);
+  const belongsToStage =
+    agent.role === "master_lead"
+      ? stage.forkedLeadAgentId === caller.agentId || pipeline.leadAgentId === caller.agentId
+      : stage.peerAgentIds.includes(caller.agentId);
   if (!belongsToStage) throw new ToolError("Agent is not a participant of this stage.");
   return { run, pipeline, stage, agent };
 }
 
 export function requireStageLead(ctx: PipelineContext, caller: BusCaller) {
   const assignment = stageForCaller(ctx, caller);
-  // Goal approval belongs only to this stage's coordinator, independently of any peer's business role name.
-  if (assignment.agent.role !== "forked_lead") throw new ToolError("Only this stage's Forked Lead can decide completion.");
+  // Goal approval belongs only to this stage's Lead, independently of any peer's business role name.
+  if (assignment.agent.role !== "master_lead") throw new ToolError("Only this stage's Lead can decide completion.");
   return assignment;
 }
 
@@ -60,6 +48,9 @@ export function pausePipelineForAgent(ctx: PipelineContext, agentId: string, rea
 export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: string, reason: string): void {
   const run = ctx.store.require(runId);
   const pipeline = requirePipeline(run, pipelineId);
+  const targetLeadId = pipeline.leadAgentId && !run.agents[pipeline.leadAgentId]?.archivedAt
+    ? pipeline.leadAgentId
+    : run.masterLeadAgentId;
   ctx.store.mutate(runId, (mutableRun) => {
     const mutablePipeline = mutableRun.pipelines[pipelineId];
     mutablePipeline.status = "paused";
@@ -74,10 +65,10 @@ export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: s
       agent.deferredTool = null;
     }
     // Persist the notification with the pause so a reload cannot strand a pipeline without its owner knowing.
-    mutableRun.mailbox.push(stageMail(mutableRun.masterLeadAgentId,
+    mutableRun.mailbox.push(stageMail(targetLeadId,
       `Pipeline ${mutablePipeline.name} (${pipelineId}) paused: ${reason}\nInspect slp_get_pipeline, then use slp_resume_pipeline with a recovery decision.`, "slp_resume_pipeline"));
   });
-  ctx.logEvent(runId, { taskId: null, from: "pipeline", to: run.masterLeadAgentId, kind: "pipeline.paused", summary: `${pipelineId}: ${reason}`, outcome: "blocked" });
+  ctx.logEvent(runId, { taskId: null, from: "pipeline", to: targetLeadId, kind: "pipeline.paused", summary: `${pipelineId}: ${reason}`, outcome: "blocked" });
 }
 
 export function publicPipeline(pipeline: PipelineState) {

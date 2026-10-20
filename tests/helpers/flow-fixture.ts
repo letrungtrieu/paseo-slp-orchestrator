@@ -88,11 +88,28 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
     const dispatcher = createBusDispatcher(ctx);
 
     const findRecord = (runId: string, role: string, stageId: string | null) => {
-      const records = Object.values(store.require(runId).agents).filter((agent) => !agent.archivedAt);
-      const stageRecords = stageId === null ? records.filter((agent) => agent.stageId === null) : records.filter((agent) => agent.stageId === stageId);
+      const currentRun = store.require(runId);
+      const records = Object.values(currentRun.agents).filter((agent) => !agent.archivedAt);
       const normalizedRole = normalizePipelineRoleId(role);
+      const effectiveRole = role === "forked_lead" ? "master_lead" : role;
+      // Leads supervise both run-level pipeline definition and active stage execution in their worktree.
+      const stageRecords = stageId === null
+        ? records.filter((agent) => agent.stageId === null || (effectiveRole === "master_lead" && agent.role === "master_lead"))
+        : records.filter(
+            (agent) =>
+              agent.stageId === stageId
+              || (effectiveRole === "master_lead"
+                && agent.role === "master_lead"
+                && Object.values(currentRun.pipelines).some((pipeline) =>
+                  pipeline.stages.some(
+                    (stage) =>
+                      stage.id === stageId
+                      && (stage.forkedLeadAgentId === agent.agentId || pipeline.leadAgentId === agent.agentId),
+                  ),
+                )),
+          );
       const matchingRecord = stageRecords.find((agent) => agent.projectRole === normalizedRole)
-        ?? stageRecords.find((agent) => agent.role === role);
+        ?? stageRecords.find((agent) => agent.role === effectiveRole);
       if (!matchingRecord) throw new Error(`No ${role} agent for stage ${stageId ?? "(run)"}`);
       return matchingRecord;
     };

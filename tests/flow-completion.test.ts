@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePeerUnderstand, completePipeline, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -13,13 +13,13 @@ describe("pipeline completion and integration", () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
     const firstStage = currentStage(flow, runId, pipelineId);
-    const firstCohort = [...firstStage.peerAgentIds, firstStage.forkedLeadAgentId!];
+    const firstPeerCohort = [...firstStage.peerAgentIds];
     for (const assignment of firstStage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);
     await approveCurrentStage(flow, runId, pipelineId);
 
     const secondStage = currentStage(flow, runId, pipelineId);
     expect(secondStage.id).not.toBe(firstStage.id);
-    expect(secondStage.peerAgentIds.some((agentId) => firstCohort.includes(agentId))).toBe(false);
+    expect(secondStage.peerAgentIds.some((agentId) => firstPeerCohort.includes(agentId))).toBe(false);
     // Stage 1 peers remain alive during Stage 2 for cross-stage consultation, and are listed in Stage 2's briefing.
     for (const peerAgentId of firstStage.peerAgentIds) {
       expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
@@ -30,23 +30,23 @@ describe("pipeline completion and integration", () => {
     expect(secondStage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].projectRole)).toEqual(["developer"]);
 
     await completePipeline(flow, runId, pipelineId);
-    const finalForkedLeadId = flow.pipeline(runId, pipelineId)!.stages.at(-1)!.forkedLeadAgentId!;
-    // Peers remain alive while the Forked Lead prepares to merge the completed pipeline branch.
+    const owningLeadId = flow.pipeline(runId, pipelineId)!.stages.at(-1)!.forkedLeadAgentId!;
+    // Peers remain alive while the Lead prepares to merge the completed pipeline branch.
     for (const peerAgentId of firstStage.peerAgentIds) {
       expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
     }
-    expect(flow.mailTo(runId, finalForkedLeadId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
-    // Flushing the mailbox must deliver slp_finalize_pipeline to the Forked Lead while pipeline.status is 'completed'.
+    expect(flow.mailTo(runId, owningLeadId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
+    // Flushing the mailbox must deliver slp_finalize_pipeline to the Lead while pipeline.status is 'completed'.
     const deliveredFinalizeCount = await flow.deliverMail(runId);
     expect(deliveredFinalizeCount).toBeGreaterThanOrEqual(1);
-    expect(flow.run(runId).agents[finalForkedLeadId].awaitingTool).toBe("slp_finalize_pipeline");
+    expect(flow.run(runId).agents[owningLeadId].awaitingTool).toBe("slp_finalize_pipeline");
 
-    const finalization = await flow.callAs(finalForkedLeadId, "slp_finalize_pipeline", {
-      summary: "Forked Lead verified and merged the completed pipeline.",
+    const finalization = await flow.callAs(owningLeadId, "slp_finalize_pipeline", {
+      summary: "Lead verified and merged the completed pipeline.",
     });
     expect(finalization.isError).toBe(false);
-    for (const agentId of firstCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
-    expect(flow.gateway.archivedAgentIds).toContain(finalForkedLeadId);
+    for (const agentId of firstPeerCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
+    expect(flow.run(runId).agents[owningLeadId].awaitingTool).toBe("slp_report");
   });
 
   it("accepts and integrates a completed Lead-authored pipeline and deletes its local slp/* branch after merge", async () => {
@@ -202,9 +202,9 @@ describe("pipeline completion and integration", () => {
     });
     expect(secondMerge.isError).toBe(false);
 
-    // Both Forked Leads are now archived and Master Lead received the consolidated summary of both pipelines.
-    expect(flow.gateway.archivedAgentIds).toContain(firstForkedLeadId);
+    // Sibling Lead is archived once all pipelines integrate while primary Lead stays alive to run UAT or report, and receives the consolidated summary.
     expect(flow.gateway.archivedAgentIds).toContain(secondForkedLeadId);
+    expect(flow.gateway.archivedAgentIds).not.toContain(firstForkedLeadId);
     const masterLeadHandover = flow.mailTo(runId, flow.run(runId).masterLeadAgentId).at(-1);
     expect(masterLeadHandover?.awaitTool).toBe("slp_report");
     expect(masterLeadHandover?.text).toContain("Auth feature merged");
@@ -296,23 +296,19 @@ describe("pipeline completion and integration", () => {
     expect(pipelineIds).toHaveLength(2);
     const [apiPipelineId, uiPipelineId] = pipelineIds;
 
-    // Wait until both parallel pipelines have provisioned their worktrees and entered peer_understand concurrently, then complete peer_understand.
+    // Wait until both parallel pipelines have provisioned their worktrees and started Stage 1 concurrently.
     await eventually(() => {
       const apiPipeline = flow.pipeline(runId, apiPipelineId);
       const uiPipeline = flow.pipeline(runId, uiPipelineId);
-      if (apiPipeline?.status !== "peer_understand" || uiPipeline?.status !== "peer_understand") {
-        throw new Error("parallel pipelines are still starting peer_understand");
+      if (apiPipeline?.status !== "running" || uiPipeline?.status !== "running") {
+        throw new Error("parallel pipelines are still starting stage 1");
       }
     });
-    await Promise.all([
-      completePeerUnderstand(flow, runId, apiPipelineId, "API base peer mapped endpoints and schemas."),
-      completePeerUnderstand(flow, runId, uiPipelineId, "UI base peer mapped components and state."),
-    ]);
 
     const apiStage1LeadId = currentStage(flow, runId, apiPipelineId).forkedLeadAgentId!;
     const uiStage1LeadId = currentStage(flow, runId, uiPipelineId).forkedLeadAgentId!;
     expect(apiStage1LeadId).not.toBe(uiStage1LeadId);
-    expect(flow.run(runId).agents[apiStage1LeadId].parentAgentId).toBe(flow.run(runId).masterLeadAgentId);
+    expect(apiStage1LeadId).toBe(flow.run(runId).masterLeadAgentId);
     expect(flow.run(runId).agents[uiStage1LeadId].parentAgentId).toBe(flow.run(runId).masterLeadAgentId);
 
     // Advance both pipelines to Stage 2 and verify each task reuses its dedicated Forked Lead rather than spawning a second Forked Lead.

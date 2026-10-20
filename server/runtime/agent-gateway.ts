@@ -4,7 +4,6 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
-import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import type { AgentRecord, Run } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
 import { systemPromptFor, type StagePromptContext } from "../prompts/system-prompts";
@@ -117,14 +116,6 @@ function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
   if (run.status !== "running" || agentRecord.archivedAt || !agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline) return false;
-  // During the pre-stage peer_understand phase, base_peer and forked_lead carry PEER_UNDERSTAND_STAGE_ID.
-  if (
-    pipeline.status === "peer_understand"
-    && agentRecord.stageId === PEER_UNDERSTAND_STAGE_ID
-    && ["starting", "running", "completing"].includes(pipeline.peerUnderstand.status)
-  ) {
-    return true;
-  }
   const currentStage = pipeline.stages[pipeline.currentStageIndex];
   // Only refresh the cohort that can still receive work; archived prior stages should not be revived.
   return Boolean(
@@ -135,21 +126,20 @@ function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
   );
 }
 
-// The Master Lead owns planning, pause recovery, integration and reporting across the run, so directory misses must be verified too.
+// Each Lead owns planning, pause recovery, integration and reporting across its feature pipeline, so directory misses must be verified too.
 function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
   return (
     !agentRecord.archivedAt
     && agentRecord.role === "master_lead"
-    && agentRecord.agentId === run.masterLeadAgentId
     && !["completed", "aborted"].includes(run.status)
   );
 }
 
-// Verify Supervisor and Forked Lead directory misses so archiving any parent in Paseo always cascades to its child agents.
+// Verify Supervisor and Lead directory misses so archiving any parent in Paseo always cascades to its child agents.
 function isActiveParentCoordinator(run: Run, agentRecord: AgentRecord): boolean {
   if (agentRecord.archivedAt || ["completed", "aborted"].includes(run.status)) return false;
   if (agentRecord.role === "supervisor") return agentRecord.agentId === run.supervisorAgentId;
-  return agentRecord.role === "forked_lead";
+  return agentRecord.role === "master_lead";
 }
 
 export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
@@ -218,6 +208,10 @@ export class AgentGateway {
       stageId: spec.stageId ?? null,
       stagePeerId: spec.stagePeerId ?? null,
       parentAgentId: spec.parentAgentId ?? null,
+      workspaceId: spec.workspaceId ?? null,
+      worktreePath: spec.peerWorktreePath ?? null,
+      featureName: null,
+      featureCriteria: null,
       archivedAt: null,
       token: randomBytes(24).toString("base64url"),
       // Direct stage messages can temporarily defer an agent's normal report obligation.

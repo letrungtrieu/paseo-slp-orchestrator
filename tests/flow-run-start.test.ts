@@ -25,12 +25,17 @@ describe("dynamic pipeline startup", () => {
     expect(delegatedRun.status).toBe("planning");
     expect(delegatedRun.masterLeadAgentId).toBeTruthy();
     expect(Object.values(delegatedRun.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "supervisor"]);
-    expect(flow.gateway.createdAgents.every(({ spec }) => spec.workspaceId === delegatedRun.supervisorWorkspaceId)).toBe(true);
+    // Supervisor runs in the base workspace, while the Lead is immediately spawned inside its dedicated feature worktree.
+    const supervisorSpec = flow.gateway.createdAgents.find(({ record }) => record.role === "supervisor")?.spec;
+    const leadSpec = flow.gateway.createdAgents.find(({ record }) => record.role === "master_lead")?.spec;
+    expect(supervisorSpec?.workspaceId).toBe(delegatedRun.supervisorWorkspaceId);
+    expect(leadSpec?.workspaceId).not.toBe(delegatedRun.supervisorWorkspaceId);
+    expect(delegatedRun.agents[delegatedRun.masterLeadAgentId].worktreePath).toBeTruthy();
     expect(flow.gateway.createdAgents.every(({ spec }) => spec.pipelineId == null && spec.stageId == null)).toBe(true);
     expect(flow.mailTo(runId, delegatedRun.masterLeadAgentId).at(-1)?.text).toContain("slp_define_pipeline");
   });
 
-  it("accepts the Lead's complete JSON and creates one Forked Lead in the base workspace plus equal peers in the pipeline worktree", async () => {
+  it("accepts the Lead's complete JSON and reuses the Lead directly with equal peers in the pipeline worktree", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const run = flow.run(runId);
@@ -42,10 +47,8 @@ describe("dynamic pipeline startup", () => {
     expect(stage.goal).toBe(TWO_PEER_PIPELINE.stages[0].goal);
     expect(stage.status).toBe("running");
     expect(stage.peerAgentIds).toHaveLength(2);
-    expect(stage.forkedLeadAgentId).toBeTruthy();
-    // Only pipeline peers get an isolated worktree branch; the Forked Lead stays in the Supervisor/Lead workspace.
-    const forkedLeadSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === stage.forkedLeadAgentId)?.spec;
-    expect(forkedLeadSpec?.workspaceId).toBe(run.supervisorWorkspaceId);
+    expect(stage.forkedLeadAgentId).toBe(run.masterLeadAgentId);
+    expect(pipeline.leadAgentId).toBe(run.masterLeadAgentId);
     expect(pipeline.workspaceId).not.toBe(run.supervisorWorkspaceId);
     for (const peerAgentId of stage.peerAgentIds) {
       const peerCreationSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === peerAgentId)?.spec;

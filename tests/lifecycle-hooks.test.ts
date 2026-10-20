@@ -61,7 +61,7 @@ function dynamicHookContext() {
     [masterLeadId]: buildAgentRecord({ agentId: masterLeadId, role: "master_lead", taskId: null }),
     // Give the peer a bounded scope so out-of-scope write requests can be verified against it.
     [peerId]: buildAgentRecord({ agentId: peerId, role: "peer", projectRole: "developer", writeScope: ["src/**"], pipelineId: pipeline.id, stageId: pipeline.stages[0].id, stagePeerId: "0", taskId: null }),
-    [stageLeadId]: buildAgentRecord({ agentId: stageLeadId, role: "forked_lead", pipelineId: pipeline.id, stageId: pipeline.stages[0].id, taskId: null }),
+    [stageLeadId]: buildAgentRecord({ agentId: stageLeadId, role: "master_lead", parentAgentId: masterLeadId, pipelineId: pipeline.id, stageId: pipeline.stages[0].id, taskId: null }),
   } }));
   const queuedMessages: Array<{ toAgentId: string; text: string; awaitTool: string | null }> = [];
   const permissionResponses: Array<{ agentId: string; requestId: string; response: unknown }> = [];
@@ -141,7 +141,7 @@ describe("hook registration", () => {
     expect(updatedRun.agents[fixture.peerId].archivedAt).toBeTruthy();
     expect(updatedRun.agents[fixture.masterLeadId].archivedAt).toBeNull();
     expect(updatedRun.agents[fixture.supervisorId].archivedAt).toBeNull();
-    expect(fixture.logs.some((entry) => entry.kind === "forked_lead.archived")).toBe(true);
+    expect(fixture.logs.some((entry) => entry.kind === "master_lead.archived")).toBe(true);
   });
 
   // Archiving the Master Lead must recursively archive child Forked Leads and grandchild Peers in bottom-up order.

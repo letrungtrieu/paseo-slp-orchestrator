@@ -31,7 +31,7 @@ beforeEach(() => {
   store.insert(buildRun({ status: "running", pipelines: { [pipeline.id]: pipeline }, agents: {
     "sup-agent": buildAgentRecord({ agentId: "sup-agent", role: "supervisor", token: "tok-sup" }),
     "lead-agent": buildAgentRecord({ agentId: "lead-agent", role: "master_lead", token: "tok-lead" }),
-    "stage-lead": buildAgentRecord({ agentId: "stage-lead", role: "forked_lead", pipelineId: pipeline.id, stageId: "stage-1", taskId: null, token: "tok-stage" }),
+    "stage-lead": buildAgentRecord({ agentId: "stage-lead", role: "master_lead", pipelineId: pipeline.id, stageId: "stage-1", taskId: null, token: "tok-stage" }),
     "peer-1": buildAgentRecord({ agentId: "peer-1", role: "peer", projectRole: "developer", pipelineId: pipeline.id, stageId: "stage-1", stagePeerId: "0", taskId: null, token: "tok-peer" }),
     "peer-2": buildAgentRecord({ agentId: "peer-2", role: "peer", projectRole: "reviewer", pipelineId: pipeline.id, stageId: "stage-1", stagePeerId: "1", taskId: null, token: "tok-reviewer" }),
   } }));

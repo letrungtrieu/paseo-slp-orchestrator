@@ -1,6 +1,7 @@
 // Run-level lifecycle for model-authored pipelines. Fixed task phases remain readable in old
 // snapshots, but every new run advances through persisted PipelineState records instead.
 import { randomUUID } from "node:crypto";
+import type { DelegatedFeature, DelegationSubmission } from "../../shared/pipeline";
 import { ROLE_LABELS, type RunMode } from "../../shared/roles";
 import type { ProviderChoices, Run } from "../../shared/state";
 import { assertGitRepository, currentBranchName, mergeIntegrationIntoBase } from "../git/git";
@@ -12,6 +13,7 @@ import {
   reportForSupervisor,
   reworkNotice,
   supervisorBriefing,
+  type SiblingLeadSummary,
 } from "../prompts/messages";
 import {
   archiveAgentSubtree,
@@ -20,6 +22,7 @@ import {
   handleSupervisorArchived,
 } from "./agent-hierarchy";
 import { archiveAgentLogged, type PipelineContext } from "./context";
+import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
 
@@ -34,9 +37,20 @@ export interface StartRunInput {
   mode: RunMode;
   providers: Partial<ProviderChoices>;
 }
-function allPipelinesIntegrated(run: Run): boolean {
+
+export function allPipelinesIntegrated(run: Run): boolean {
   const pipelines = Object.values(run.pipelines);
-  return pipelines.length > 0 && pipelines.every((pipeline) => pipeline.status === "integrated");
+  if (pipelines.length === 0 || !pipelines.every((pipeline) => pipeline.status === "integrated")) {
+    return false;
+  }
+  // If any parallel Lead has not yet defined its pipeline, the run is still executing parallel tracks.
+  const hasPendingLeadPlanning = Object.values(run.agents).some(
+    (agentRecord) =>
+      agentRecord.role === "master_lead" &&
+      !agentRecord.archivedAt &&
+      agentRecord.awaitingTool === "slp_define_pipeline",
+  );
+  return !hasPendingLeadPlanning;
 }
 
 export async function startRun(ctx: PipelineContext, input: StartRunInput) {
@@ -124,14 +138,77 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   return { runId, supervisorAgentId: supervisor.agentId, supervisorWorkspaceId: supervisorWorkspace.workspaceId };
 }
 
-// Reuse an unarchived Master Lead when available, or spawn a fresh Master Lead in the shared base workspace when starting or resuming delegation.
-async function ensureActiveMasterLead(ctx: PipelineContext, runId: string): Promise<string> {
+// Normalize single-string or multi-feature Supervisor delegation input into a uniform task list and overall criteria.
+function normalizeDelegationSubmission(
+  run: Run,
+  rawInput: string | DelegationSubmission,
+): { overallCriteria: string; sharedContext?: string; tasks: DelegatedFeature[] } {
+  if (typeof rawInput === "string") {
+    const trimmedCriteria = rawInput.trim();
+    return {
+      overallCriteria: trimmedCriteria,
+      tasks: [{ name: run.title || "feature", acceptanceCriteria: trimmedCriteria }],
+    };
+  }
+  const tasks =
+    rawInput.tasks && rawInput.tasks.length > 0
+      ? rawInput.tasks
+      : [
+          {
+            name: run.title || "feature",
+            acceptanceCriteria: (rawInput.acceptanceCriteria ?? "").trim(),
+          },
+        ];
+  const overallCriteria =
+    rawInput.acceptanceCriteria?.trim()
+    || tasks.map((task) => `${task.name}: ${task.acceptanceCriteria}`).join("\n");
+  return {
+    overallCriteria,
+    sharedContext: rawInput.sharedContext?.trim() || undefined,
+    tasks,
+  };
+}
+
+// Provision or open a dedicated Git worktree for a Lead so the Lead and its stage Peers share the exact same cwd.
+async function provisionLeadWorktree(
+  ctx: PipelineContext,
+  runId: string,
+  featureName: string,
+  explicitWorktreePath?: string,
+) {
+  let targetWorktreePath = explicitWorktreePath?.trim() ?? "";
+  if (!targetWorktreePath) {
+    const createdWorktreePayload = JSON.parse(
+      await createPipelineWorktree(ctx, runId, featureName, { allowDuringDelegation: true }),
+    ) as { cwd: string };
+    targetWorktreePath = createdWorktreePayload.cwd;
+  }
+  const latestRun = ctx.store.require(runId);
+  return openPipelineWorktree(ctx, latestRun, targetWorktreePath);
+}
+
+// Reuse an unarchived Lead when available, or spawn a fresh Lead inside a dedicated worktree when starting or resuming delegation.
+async function ensureActiveMasterLead(
+  ctx: PipelineContext,
+  runId: string,
+  featureName?: string,
+  explicitWorktreePath?: string,
+): Promise<{
+  agentId: string;
+  workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
+}> {
   const initialRun = ctx.store.require(runId);
   const existingMasterLeadRecord = initialRun.masterLeadAgentId
     ? initialRun.agents[initialRun.masterLeadAgentId]
     : undefined;
+  const workspace = await provisionLeadWorktree(
+    ctx,
+    runId,
+    featureName ?? initialRun.title ?? "feature",
+    explicitWorktreePath,
+  );
   if (existingMasterLeadRecord && !existingMasterLeadRecord.archivedAt) {
-    return existingMasterLeadRecord.agentId;
+    return { agentId: existingMasterLeadRecord.agentId, workspace };
   }
   const spawnedMasterLead = await ctx.gateway.createAgent({
     runId,
@@ -141,8 +218,9 @@ async function ensureActiveMasterLead(ctx: PipelineContext, runId: string): Prom
     thinkingOptionId: initialRun.providers.leadThinkingOptionId ?? undefined,
     permissionModeId: initialRun.providers.leadPermissionModeId ?? undefined,
     parentAgentId: initialRun.supervisorAgentId || undefined,
-    workspaceId: initialRun.devWorkspaceId,
-    title: `[${ROLE_LABELS.master_lead}] [${initialRun.title}]`,
+    workspaceId: workspace.workspaceId,
+    peerWorktreePath: workspace.cwd,
+    title: `[${ROLE_LABELS.master_lead}] [${featureName ?? initialRun.title}]`,
     awaitTool: null,
   });
   const latestRun = ctx.store.require(runId);
@@ -150,24 +228,105 @@ async function ensureActiveMasterLead(ctx: PipelineContext, runId: string): Prom
     await ctx.gateway.archive(spawnedMasterLead.agentId).catch(() => undefined);
     throw new ToolError("This run has finished.");
   }
-  return spawnedMasterLead.agentId;
+  return { agentId: spawnedMasterLead.agentId, workspace };
 }
 
-export async function delegate(ctx: PipelineContext, runId: string, acceptanceCriteria: string): Promise<string> {
+export async function delegate(
+  ctx: PipelineContext,
+  runId: string,
+  rawInput: string | DelegationSubmission,
+): Promise<string> {
   const run = ctx.store.require(runId);
-  // Delegating twice during an active cycle would reset the Master Lead mid-plan; allow fresh delegation once a prior cycle completed.
+  // Delegating twice during an active cycle would reset Leads mid-plan; allow fresh delegation once a prior cycle completed.
   if (run.criteria !== null && run.status !== "delegating" && run.status !== "completed") {
     throw new ToolError("The project was already delegated. Use slp_request_rework for changes.");
   }
-  const activeMasterLeadId = await ensureActiveMasterLead(ctx, runId);
+  const { overallCriteria, sharedContext, tasks } = normalizeDelegationSubmission(run, rawInput);
+  const provisionedLeads: Array<{
+    agentId: string;
+    task: DelegatedFeature;
+    workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
+  }> = [];
+
+  for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
+    const task = tasks[taskIndex];
+    if (taskIndex === 0 && tasks.length === 1) {
+      const { agentId, workspace } = await ensureActiveMasterLead(ctx, runId, task.name, task.worktree);
+      provisionedLeads.push({ agentId, task, workspace });
+      continue;
+    }
+    const workspace = await provisionLeadWorktree(ctx, runId, task.name, task.worktree);
+    const currentRun = ctx.store.require(runId);
+    const spawnedLead = await ctx.gateway.createAgent({
+      runId,
+      role: "master_lead",
+      taskId: null,
+      provider: currentRun.providers.lead,
+      thinkingOptionId: currentRun.providers.leadThinkingOptionId ?? undefined,
+      permissionModeId: currentRun.providers.leadPermissionModeId ?? undefined,
+      parentAgentId: currentRun.supervisorAgentId || undefined,
+      workspaceId: workspace.workspaceId,
+      peerWorktreePath: workspace.cwd,
+      title: `[${ROLE_LABELS.master_lead}] [${task.name}]`,
+      awaitTool: null,
+    });
+    if (ctx.store.require(runId).status === "aborted") {
+      await ctx.gateway.archive(spawnedLead.agentId).catch(() => undefined);
+      throw new ToolError("This run has finished.");
+    }
+    provisionedLeads.push({ agentId: spawnedLead.agentId, task, workspace });
+  }
+
   ctx.store.mutate(runId, (mutableRun) => {
-    mutableRun.masterLeadAgentId = activeMasterLeadId;
-    mutableRun.criteria = acceptanceCriteria;
+    mutableRun.masterLeadAgentId = provisionedLeads[0].agentId;
+    mutableRun.criteria = overallCriteria;
     mutableRun.status = "planning";
-    // Delegation and its assignment must survive reload together; a saved plan state alone cannot wake the Lead.
-    mutableRun.mailbox.push(stageMail(activeMasterLeadId, delegationMessage(acceptanceCriteria), "slp_define_pipeline"));
+    for (const { agentId, task, workspace } of provisionedLeads) {
+      if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
+        mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
+      }
+      const leadRecord = mutableRun.agents[agentId];
+      if (leadRecord) {
+        leadRecord.workspaceId = workspace.workspaceId;
+        leadRecord.worktreePath = workspace.cwd;
+        leadRecord.featureName = task.name;
+        leadRecord.featureCriteria = task.acceptanceCriteria;
+      }
+    }
+    // Deliver each Lead's assignment alongside the full roster of sibling Leads so parallel features stay aligned.
+    for (const currentLead of provisionedLeads) {
+      const siblingLeads: SiblingLeadSummary[] = provisionedLeads
+        .filter((candidate) => candidate.agentId !== currentLead.agentId)
+        .map((sibling) => ({
+          agentId: sibling.agentId,
+          featureName: sibling.task.name,
+          worktreePath: sibling.workspace.cwd,
+          branch: sibling.workspace.branch,
+          acceptanceCriteria: sibling.task.acceptanceCriteria,
+        }));
+      const hasMultipleFeatures = provisionedLeads.length > 1 || Boolean(sharedContext);
+      const messageBody = delegationMessage(
+        overallCriteria,
+        hasMultipleFeatures
+          ? {
+              featureName: currentLead.task.name,
+              featureCriteria: currentLead.task.acceptanceCriteria,
+              worktreePath: currentLead.workspace.cwd,
+              branch: currentLead.workspace.branch,
+              sharedContext,
+              siblingLeads,
+            }
+          : {
+              worktreePath: currentLead.workspace.cwd,
+              branch: currentLead.workspace.branch,
+            },
+      );
+      mutableRun.mailbox.push(stageMail(currentLead.agentId, messageBody, "slp_define_pipeline"));
+    }
   });
-  return "Delegated to the Master Lead. Tell the Supreme Manager in Vietnamese that work has started, then end your turn.";
+  return provisionedLeads.length === 1
+    ? "Delegated to the Lead in its dedicated worktree. Tell the Supreme Manager in Vietnamese that work has started, then end your turn."
+    : `Delegated ${provisionedLeads.length} parallel features to dedicated Leads in isolated worktrees with cross-Lead awareness. Tell the Supreme Manager in Vietnamese that work has started, then end your turn.`;
 }
 
 export function report(ctx: PipelineContext, runId: string, summary: string): string {
@@ -180,11 +339,12 @@ export function report(ctx: PipelineContext, runId: string, summary: string): st
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.finalReport = summary;
     mutableRun.status = "reporting";
-    const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
-    if (masterLeadRecord?.awaitingTool === "slp_report") {
-      masterLeadRecord.awaitingTool = null;
-      masterLeadRecord.awaitingSince = null;
-      masterLeadRecord.nudges = 0;
+    for (const agentRecord of Object.values(mutableRun.agents)) {
+      if (agentRecord.role === "master_lead" && agentRecord.awaitingTool === "slp_report") {
+        agentRecord.awaitingTool = null;
+        agentRecord.awaitingSince = null;
+        agentRecord.nudges = 0;
+      }
     }
     mutableRun.mailbox.push(stageMail(mutableRun.supervisorAgentId,
       reportForSupervisor(summary, mutableRun.baseBranch, mutableRun.integrationBranch), "slp_present_to_manager"));
@@ -198,12 +358,21 @@ export async function requestRework(ctx: PipelineContext, runId: string, feedbac
   if (run.status !== "reporting" && run.status !== "awaiting_user" && run.status !== "completed") {
     throw new ToolError(`Cannot request rework while run is '${run.status}'.`);
   }
-  const activeMasterLeadId = await ensureActiveMasterLead(ctx, runId);
+  const { agentId: activeMasterLeadId, workspace } = await ensureActiveMasterLead(ctx, runId, "rework");
   // Integrated pipelines are immutable history; rework starts a new Lead-authored pipeline instead of reopening a closed stage.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.masterLeadAgentId = activeMasterLeadId;
     mutableRun.status = "planning";
     mutableRun.gate = null;
+    if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
+      mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
+    }
+    const leadRecord = mutableRun.agents[activeMasterLeadId];
+    if (leadRecord) {
+      leadRecord.workspaceId = workspace.workspaceId;
+      leadRecord.worktreePath = workspace.cwd;
+      leadRecord.pipelineId = null;
+    }
     const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
     if (supervisorRecord) {
       supervisorRecord.awaitingTool = null;
@@ -215,9 +384,9 @@ export async function requestRework(ctx: PipelineContext, runId: string, feedbac
     );
     // A rework request is a new pipeline assignment, so its message belongs to the same durable transition.
     mutableRun.mailbox.push(stageMail(activeMasterLeadId,
-      `${reworkNotice(feedback)}\nDefine a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
+      `${reworkNotice(feedback)}\nYour fresh worktree is \`${workspace.cwd}\` (branch \`${workspace.branch}\`). Define a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
   });
-  return "Sent back to the Master Lead. End your turn while it defines a fresh pipeline.";
+  return "Sent back to the Lead. End your turn while it defines a fresh pipeline.";
 }
 
 export async function presentToManager(ctx: PipelineContext, runId: string, assessment: string): Promise<string> {

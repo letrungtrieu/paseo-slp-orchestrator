@@ -1,64 +1,78 @@
 // Direct conversations and peer evidence are durable stage records, independent of business role names.
 import { randomUUID } from "node:crypto";
 import type { BusCaller } from "../bus/http-mcp";
-import { PEER_UNDERSTAND_STAGE_ID, type StageReportSubmission } from "../../shared/pipeline";
+import type { StageReportSubmission } from "../../shared/pipeline";
 import type { PipelineContext } from "./context";
-import {
-  basePeerUnderstandBriefing,
-  coordinatorPeerUnderstandReviewBriefing,
-} from "./peer-understand";
 import { coordinatorRevivalBriefing } from "./stage-briefings";
 import { pausePipeline, requirePipeline, requireStageLead, stageForCaller } from "./stage-context";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
 
-export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: { toAgentId: string; message: string; waitForReply: boolean }): string {
+export function sendPeerMessage(
+  ctx: PipelineContext,
+  caller: BusCaller,
+  input: { toAgentId: string; message: string; waitForReply: boolean },
+): string {
   const run = ctx.store.require(caller.runId);
   const agent = run.agents[caller.agentId];
-  if (!agent || agent.archivedAt || !agent.pipelineId || !agent.stageId) {
-    throw new ToolError("This tool requires an active stage assignment.");
+  if (!agent || agent.archivedAt) {
+    throw new ToolError("This tool requires an active agent session.");
   }
-  const pipeline = requirePipeline(run, agent.pipelineId);
   const recipient = run.agents[input.toAgentId];
   const createdAt = new Date().toISOString();
 
-  // Allow direct cross-pipeline consultation between unarchived Forked Leads when coordinating related features or resolving merge conflicts.
+  // Allow direct cross-Lead collaboration between unarchived Leads during planning, stage execution, or merge finalization
+  // so parallel Leads can align shared APIs, data schemas, and end-to-end user flows across features.
   if (
-    run.status === "running"
-    && agent.role === "forked_lead"
+    ["planning", "running"].includes(run.status)
+    && agent.role === "master_lead"
     && recipient
     && !recipient.archivedAt
-    && recipient.role === "forked_lead"
-    && recipient.pipelineId
-    && recipient.pipelineId !== agent.pipelineId
+    && recipient.role === "master_lead"
     && input.toAgentId !== caller.agentId
   ) {
-    const recipientPipeline = requirePipeline(run, recipient.pipelineId);
-    const callerStage = pipeline.stages.find((candidate) => candidate.id === agent.stageId) ?? pipeline.stages.at(-1);
-    const recipientStage = recipientPipeline.stages.find((candidate) => candidate.id === recipient.stageId) ?? recipientPipeline.stages.at(-1);
-    if (!callerStage || !recipientStage) {
-      throw new ToolError("Cannot resolve stage context for cross-pipeline Forked Lead consultation.");
-    }
+    const callerPipeline = agent.pipelineId ? run.pipelines[agent.pipelineId] : undefined;
+    const recipientPipeline = recipient.pipelineId ? run.pipelines[recipient.pipelineId] : undefined;
+    const callerStage = callerPipeline
+      ? (callerPipeline.stages.find((candidate) => candidate.id === agent.stageId) ?? callerPipeline.stages.at(-1))
+      : undefined;
+    const recipientStage = recipientPipeline
+      ? (recipientPipeline.stages.find((candidate) => candidate.id === recipient.stageId) ?? recipientPipeline.stages.at(-1))
+      : undefined;
+    const callerFeatureLabel = callerPipeline?.name ?? agent.featureName ?? "parallel-feature";
     const restoresSiblingReply = recipient.waitingForAgentId === caller.agentId;
     const siblingReplyTool = restoresSiblingReply ? recipient.deferredTool : null;
-    const crossPipelineDeliveryText = `Cross-pipeline consultation from pipeline '${pipeline.name}' Forked Lead (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) with concrete context and metrics so merge conflicts or shared feature boundaries can be resolved.`;
+    const crossLeadDeliveryText = `Cross-Lead collaboration message from Lead (${caller.agentId}, feature '${callerFeatureLabel}'):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) with concrete API contracts, schemas, or merge resolution details so your parallel features integrate seamlessly.`;
     ctx.store.mutate(run.id, (mutableRun) => {
       const messageEntry = { id: randomUUID(), fromAgentId: caller.agentId, toAgentId: input.toAgentId, message: input.message, createdAt };
-      callerStage.messages.push(messageEntry);
-      if (recipientStage.id !== callerStage.id) {
+      if (callerStage) {
+        callerStage.messages.push(messageEntry);
+      }
+      if (recipientStage && recipientStage.id !== callerStage?.id) {
         recipientStage.messages.push(messageEntry);
       }
       mutableRun.mailbox.push({
-        id: randomUUID(), toAgentId: input.toAgentId, text: crossPipelineDeliveryText,
-        taskId: null, awaitTool: siblingReplyTool, isReminder: false, createdAt,
+        id: randomUUID(),
+        toAgentId: input.toAgentId,
+        text: crossLeadDeliveryText,
+        taskId: null,
+        awaitTool: siblingReplyTool,
+        isReminder: false,
+        createdAt,
       });
       if (restoresSiblingReply) {
         recipient.waitingForAgentId = null;
         recipient.deferredTool = null;
       }
       if (input.waitForReply) {
-        // Preserve whichever obligation (slp_finalize_pipeline or slp_approve_stage) the Forked Lead owed before consulting its sibling.
-        const defaultLeadObligation = pipeline.status === "completed" ? "slp_finalize_pipeline" : "slp_approve_stage";
+        // Preserve whichever obligation (slp_define_pipeline, slp_approve_stage, slp_finalize_pipeline, or slp_report) the Lead owed before consulting its sibling.
+        const defaultLeadObligation = !callerPipeline
+          ? "slp_define_pipeline"
+          : callerPipeline.status === "completed"
+            ? "slp_finalize_pipeline"
+            : callerPipeline.status === "integrated"
+              ? "slp_report"
+              : "slp_approve_stage";
         agent.waitingForAgentId = input.toAgentId;
         agent.deferredTool = agent.awaitingTool ?? defaultLeadObligation;
         agent.awaitingTool = null;
@@ -67,17 +81,25 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
     });
     ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: input.toAgentId, kind: "stage.message", summary: input.message.slice(0, 240), outcome: "queued" });
     return input.waitForReply
-      ? "Cross-pipeline consultation queued. End your turn while waiting for the sibling Forked Lead's reply."
-      : "Cross-pipeline message queued. Continue your stage or merge assignment.";
+      ? "Cross-Lead consultation queued. End your turn while waiting for the sibling Lead's reply."
+      : "Cross-Lead message queued. Continue your planning, stage, or merge assignment.";
   }
 
-  // Allow the Forked Lead and Peers of a completed pipeline to exchange merge/conflict Q&A before slp_finalize_pipeline finishes.
+  if (!agent.pipelineId || !agent.stageId) {
+    throw new ToolError("This tool requires an active stage assignment.");
+  }
+  const pipeline = requirePipeline(run, agent.pipelineId);
+
+  // Allow the Lead and Peers of a completed pipeline to exchange merge/conflict Q&A before slp_finalize_pipeline finishes.
   if (run.status === "running" && pipeline.status === "completed") {
     const finalStage = pipeline.stages.at(-1);
     if (!finalStage) throw new ToolError("Completed pipeline has no stages.");
     const pipelinePeerIds = new Set(pipeline.stages.flatMap((completedStage) => completedStage.peerAgentIds).filter(Boolean));
     const pipelineCoordinatorIds = new Set(
-      pipeline.stages.map((completedStage) => completedStage.forkedLeadAgentId).filter((id): id is string => Boolean(id)),
+      [
+        pipeline.leadAgentId,
+        ...pipeline.stages.map((completedStage) => completedStage.forkedLeadAgentId),
+      ].filter((id): id is string => Boolean(id)),
     );
     const isPipelineParticipant = pipelinePeerIds.has(caller.agentId) || pipelineCoordinatorIds.has(caller.agentId);
     const isRecipientInPipeline = Boolean(
@@ -86,13 +108,13 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
       && input.toAgentId !== caller.agentId,
     );
     if (!isPipelineParticipant || !recipient || !isRecipientInPipeline) {
-      throw new ToolError("Select an active peer or Forked Lead of this pipeline, or another pipeline's Forked Lead.");
+      throw new ToolError("Select an active peer or Lead of this pipeline, or another pipeline's Lead.");
     }
     const callerStageName = pipeline.stages.find((candidate) => candidate.id === agent.stageId)?.name ?? finalStage.name;
     const restoresMergeReply = recipient.waitingForAgentId === caller.agentId;
     const mergeReplyTool = restoresMergeReply ? recipient.deferredTool : null;
-    const mergeDeliveryText = agent.role === "forked_lead"
-      ? `Merge/conflict question from pipeline '${pipeline.name}' Forked Lead (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) explaining why your code was written this way and how the conflict should be resolved, then end your turn. Do not call slp_stage_report.`
+    const mergeDeliveryText = agent.role === "master_lead"
+      ? `Merge/conflict question from pipeline '${pipeline.name}' Lead (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) explaining why your code was written this way and how the conflict should be resolved, then end your turn. Do not call slp_stage_report.`
       : `Merge/conflict reply from stage '${callerStageName}' ${agent.projectRole ?? "peer"} (${caller.agentId}):\n${input.message}\nUse this clarification to resolve the conflict and call slp_finalize_pipeline when ready.`;
     ctx.store.mutate(run.id, (mutableRun) => {
       finalStage.messages.push({ id: randomUUID(), fromAgentId: caller.agentId, toAgentId: input.toAgentId, message: input.message, createdAt });
@@ -104,8 +126,8 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
         recipient.waitingForAgentId = null;
         recipient.deferredTool = null;
       }
-      if (input.waitForReply && agent.role === "forked_lead") {
-        // Suspend slp_finalize_pipeline nudges while the Forked Lead waits for the peer's conflict explanation.
+      if (input.waitForReply && agent.role === "master_lead") {
+        // Suspend slp_finalize_pipeline nudges while the Lead waits for the peer's conflict explanation.
         agent.waitingForAgentId = input.toAgentId;
         agent.deferredTool = agent.awaitingTool ?? "slp_finalize_pipeline";
         agent.awaitingTool = null;
@@ -113,99 +135,9 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
       }
     });
     ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: input.toAgentId, kind: "stage.message", summary: input.message.slice(0, 240), outcome: "queued" });
-    return input.waitForReply && agent.role === "forked_lead"
+    return input.waitForReply && agent.role === "master_lead"
       ? "Message saved and queued. End your turn while waiting for the reply."
       : "Message saved and queued. Continue resolving the merge or end your turn.";
-  }
-
-  // Allow Base Peer and Forked Lead to exchange direct discovery questions and answers during peer_understand.
-  if (
-    run.status === "running"
-    && pipeline.status === "peer_understand"
-    && pipeline.peerUnderstand.status === "running"
-  ) {
-    const peerUnderstandParticipantIds = new Set(
-      [pipeline.peerUnderstand.forkedLeadAgentId, pipeline.peerUnderstand.basePeerAgentId].filter(
-        (participantId): participantId is string => Boolean(participantId),
-      ),
-    );
-    if (!peerUnderstandParticipantIds.has(caller.agentId)) {
-      throw new ToolError("Agent is not a participant of peer_understand.");
-    }
-    if (!recipient || recipient.archivedAt || !peerUnderstandParticipantIds.has(input.toAgentId) || input.toAgentId === caller.agentId) {
-      throw new ToolError("Select the active Forked Lead or Base Peer of this pipeline's peer_understand phase.");
-    }
-    const restoresPeerUnderstandReply = recipient.waitingForAgentId === caller.agentId;
-    const isInitialInvestigationGoalFromLead =
-      agent.role === "forked_lead"
-      && recipient.role === "base_peer"
-      && pipeline.peerUnderstand.reports.length === 0
-      && !restoresPeerUnderstandReply;
-    const peerUnderstandReplyTool = restoresPeerUnderstandReply
-      ? recipient.deferredTool
-      : isInitialInvestigationGoalFromLead
-        ? "slp_stage_report"
-        : null;
-    const senderLabel = agent.role === "forked_lead" ? "Forked Lead" : (agent.projectRole ?? "base-peer");
-    ctx.store.mutate(run.id, (mutableRun) => {
-      // Persist Forked Lead's investigation goal on peerUnderstand so Base Peer and downstream stage peers inherit it.
-      if (agent.role === "forked_lead" && recipient.role === "base_peer" && pipeline.peerUnderstand.reports.length === 0) {
-        pipeline.peerUnderstand.investigationGoal = input.message;
-      }
-      const peerUnderstandDeliveryText = isInitialInvestigationGoalFromLead
-        ? `${basePeerUnderstandBriefing(mutableRun, pipeline)}\n\n### Direct Investigation Goal from Forked Lead (${caller.agentId})\n${input.message}`
-        : `Direct peer_understand message from ${senderLabel} (${caller.agentId}):\n${input.message}\nReply directly with slp_send_peer_message when a response is needed, or continue the peer_understand alignment.`;
-      pipeline.peerUnderstand.messages.push({
-        id: randomUUID(),
-        fromAgentId: caller.agentId,
-        toAgentId: input.toAgentId,
-        message: input.message,
-        createdAt,
-      });
-      if (isInitialInvestigationGoalFromLead) {
-        // Replace any earlier unread discovery briefing so Base Peer receives one consolidated investigation assignment.
-        mutableRun.mailbox = mutableRun.mailbox.filter(
-          (queuedMessage) => !(queuedMessage.toAgentId === input.toAgentId && queuedMessage.awaitTool === "slp_stage_report"),
-        );
-      }
-      mutableRun.mailbox.push({
-        id: randomUUID(),
-        toAgentId: input.toAgentId,
-        text: peerUnderstandDeliveryText,
-        taskId: null,
-        awaitTool: peerUnderstandReplyTool,
-        isReminder: false,
-        createdAt,
-      });
-      if (restoresPeerUnderstandReply) {
-        recipient.waitingForAgentId = null;
-        recipient.deferredTool = null;
-      }
-      if (input.waitForReply) {
-        const defaultLeadUnderstandTool =
-          pipeline.stages.length === 0 ? "slp_define_pipeline" : "slp_approve_stage";
-        const activeCallerObligation =
-          agent.awaitingTool && agent.awaitingTool !== "slp_send_peer_message"
-            ? agent.awaitingTool
-            : null;
-        agent.waitingForAgentId = input.toAgentId;
-        agent.deferredTool =
-          activeCallerObligation ?? (agent.role === "base_peer" ? "slp_stage_report" : defaultLeadUnderstandTool);
-        agent.awaitingTool = null;
-        agent.awaitingSince = createdAt;
-      }
-    });
-    ctx.logEvent(run.id, {
-      taskId: null,
-      from: caller.agentId,
-      to: input.toAgentId,
-      kind: "stage.message",
-      summary: input.message.slice(0, 240),
-      outcome: "queued",
-    });
-    return input.waitForReply
-      ? "Message saved and queued. End your turn while waiting for the reply."
-      : "Message saved and queued. Continue the peer_understand alignment or report your findings.";
   }
 
   const currentStage = pipeline.stages[pipeline.currentStageIndex];
@@ -214,7 +146,7 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
   }
   const completedPriorStages = pipeline.stages.slice(0, pipeline.currentStageIndex);
   const currentStageParticipantIds = new Set(
-    [...currentStage.peerAgentIds, currentStage.forkedLeadAgentId].filter((id): id is string => Boolean(id)),
+    [...currentStage.peerAgentIds, currentStage.forkedLeadAgentId, pipeline.leadAgentId].filter((id): id is string => Boolean(id)),
   );
   const priorStagePeerIds = new Set(
     completedPriorStages.flatMap((priorStage) => priorStage.peerAgentIds).filter(Boolean),
@@ -237,10 +169,10 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
   const restoresReply = recipient.waitingForAgentId === caller.agentId;
   const replyTool = restoresReply ? recipient.deferredTool : null;
   const deliveryText = isRecipientPriorStagePeer
-    ? `Cross-stage question from stage '${currentStage.name}' ${agent.projectRole ?? "Forked Lead"} (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) with concrete metrics (exact logic, expected inputs, and expected outputs/outcomes), then end your turn. Do not call slp_stage_report.`
+    ? `Cross-stage question from stage '${currentStage.name}' ${agent.projectRole ?? "Lead"} (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) with concrete metrics (exact logic, expected inputs, and expected outputs/outcomes), then end your turn. Do not call slp_stage_report.`
     : isPriorStagePeerCaller
       ? `Cross-stage reply from prior stage '${callerStageName}' ${agent.projectRole ?? "peer"} (${caller.agentId}):\n${input.message}\nReply directly with slp_send_peer_message if further clarification is needed, or continue your stage assignment.`
-      : `Direct stage message from ${agent.projectRole ?? "Forked Lead"} (${caller.agentId}):\n${input.message}\nReply directly with slp_send_peer_message when a response is needed. Keep the stage goal in view.`;
+      : `Direct stage message from ${agent.projectRole ?? "Lead"} (${caller.agentId}):\n${input.message}\nReply directly with slp_send_peer_message when a response is needed. Keep the stage goal in view.`;
   ctx.store.mutate(run.id, (mutableRun) => {
     // Store history under the active stage and queue delivery atomically so a reload cannot lose the message.
     currentStage.messages.push({ id: randomUUID(), fromAgentId: caller.agentId, toAgentId: input.toAgentId, message: input.message, createdAt });
@@ -266,9 +198,8 @@ export function sendPeerMessage(ctx: PipelineContext, caller: BusCaller, input: 
 
 export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submission: StageReportSubmission): string {
   const { run, pipeline, stage, agent } = stageForCaller(ctx, caller);
-  const isPeerRole = agent.role === "peer" || (agent.role === "base_peer" && stage.id === PEER_UNDERSTAND_STAGE_ID);
-  if (!isPeerRole || !agent.projectRole) throw new ToolError("Only an assigned stage peer submits peer evidence.");
-  const coordinatorId = stage.forkedLeadAgentId;
+  if (agent.role !== "peer" || !agent.projectRole) throw new ToolError("Only an assigned stage peer submits peer evidence.");
+  const coordinatorId = stage.forkedLeadAgentId ?? pipeline.leadAgentId;
   if (!coordinatorId) throw new ToolError("Stage coordinator is unavailable.");
   const report = { ...submission, agentId: caller.agentId, role: agent.projectRole, submittedAt: new Date().toISOString() };
   let notifiedCoordinator = false;
@@ -303,7 +234,7 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
       mutableRun.agents[coordinatorId].waitingForAgentId = null;
       mutableRun.agents[coordinatorId].deferredTool = null;
     }
-    // Check whether any other active peer in this stage still owes its stage report before waking the Forked Lead.
+    // Check whether any other active peer in this stage still owes its stage report before waking the Lead.
     const otherPeersStillOwingReport = stage.peerAgentIds.some((peerAgentId) => {
       if (!peerAgentId || peerAgentId === caller.agentId) return false;
       const peerRecord = mutableRun.agents[peerAgentId];
@@ -320,26 +251,19 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
         (queuedMessage) =>
           !(
             queuedMessage.toAgentId === coordinatorId
-            && (queuedMessage.awaitTool === "slp_approve_stage" || queuedMessage.awaitTool === "slp_define_pipeline")
+            && queuedMessage.awaitTool === "slp_approve_stage"
           ),
       );
-      const coordinatorReviewPrompt = stage.id === PEER_UNDERSTAND_STAGE_ID
-        ? coordinatorPeerUnderstandReviewBriefing(mutableRun, pipeline)
-        : coordinatorRevivalBriefing(mutableRun, pipeline, stage);
-      const coordinatorAwaitTool =
-        stage.id === PEER_UNDERSTAND_STAGE_ID && pipeline.stages.length === 0
-          ? "slp_define_pipeline"
-          : "slp_approve_stage";
       mutableRun.mailbox.push(
-        stageMail(coordinatorId, coordinatorReviewPrompt, coordinatorAwaitTool),
+        stageMail(coordinatorId, coordinatorRevivalBriefing(mutableRun, pipeline, stage), "slp_approve_stage"),
       );
       notifiedCoordinator = true;
     }
   });
   ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: coordinatorId, kind: "stage.report", summary: `${agent.projectRole}: ${submission.status}`, outcome: "queued" });
   return notifiedCoordinator
-    ? "Stage report saved and queued for the Forked Lead. End your turn; further assignments arrive as messages."
-    : "Stage report saved. Waiting for remaining stage peers to finish before waking the Forked Lead. End your turn.";
+    ? "Stage report saved and queued for the Lead. End your turn; further assignments arrive as messages."
+    : "Stage report saved. Waiting for remaining stage peers to finish before waking the Lead. End your turn.";
 }
 
 export function requestStageRework(ctx: PipelineContext, caller: BusCaller, input: { agentIds: string[]; feedback: string }): string {
@@ -356,7 +280,7 @@ export function requestStageRework(ctx: PipelineContext, caller: BusCaller, inpu
       stage.messages.push({ id: randomUUID(), fromAgentId: caller.agentId, toAgentId: recipientId,
         message: input.feedback, createdAt: new Date().toISOString() });
       run.mailbox.push(stageMail(recipientId,
-        `Forked Lead requests rework for stage '${stage.name}'.\nGoal: ${stage.goal}\n${input.feedback}\nDiscuss with your peers as needed and submit new evidence using slp_stage_report.`, "slp_stage_report"));
+        `Lead requests rework for stage '${stage.name}'.\nGoal: ${stage.goal}\n${input.feedback}\nDiscuss with your peers as needed and submit new evidence using slp_stage_report.`, "slp_stage_report"));
     }
     // The coordinator has delegated a further pass and should be woken by results rather than approval reminders.
     agent.awaitingTool = null;
@@ -368,10 +292,10 @@ export function requestStageRework(ctx: PipelineContext, caller: BusCaller, inpu
 
 export function escalateStage(ctx: PipelineContext, caller: BusCaller, reason: string): string {
   const { run, pipeline, stage, agent } = stageForCaller(ctx, caller);
-  if (agent.role === "peer" || agent.role === "base_peer") {
-    // Peer disagreement belongs to its Forked Lead; only that coordinator escalates a whole stage to the Master Lead.
+  if (agent.role === "peer") {
+    // Peer disagreement belongs to its Lead; only that coordinator escalates a whole stage.
     return submitStageReport(ctx, caller, { summary: reason, findings: [], status: "blocked" });
   }
   pausePipeline(ctx, run.id, pipeline.id, `${stage.name}: ${reason}`);
-  return "Stage escalated to the Master Lead. End your turn until a recovery decision arrives.";
+  return "Stage escalated. End your turn until a recovery decision arrives.";
 }

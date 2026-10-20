@@ -1,6 +1,5 @@
-// Detects and respawns dead, archived or wedged Master Lead, Forked Lead and Peer sessions
+// Detects and respawns dead, archived or wedged Lead and Peer sessions
 // while preserving healthy sibling peers and re-queueing the exact pending workflow obligation.
-import { PEER_UNDERSTAND_STAGE_ID } from "../../shared/pipeline";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
@@ -128,16 +127,21 @@ export async function reviveMasterLead(
     const previousMasterLeadId = initialRun.masterLeadAgentId;
     const previousMasterLeadRecord = initialRun.agents[previousMasterLeadId];
     const previousAwaitingTool = previousMasterLeadRecord?.awaitingTool ?? null;
+    const targetWorkspaceId = previousMasterLeadRecord?.workspaceId ?? initialRun.devWorkspaceId;
+    const targetWorktreePath = previousMasterLeadRecord?.worktreePath ?? undefined;
     const replacementMasterLead = await ctx.gateway.createAgent({
       runId,
       role: "master_lead",
       taskId: null,
+      pipelineId: previousMasterLeadRecord?.pipelineId ?? undefined,
+      stageId: previousMasterLeadRecord?.stageId ?? undefined,
       provider: initialRun.providers.lead,
       thinkingOptionId: initialRun.providers.leadThinkingOptionId ?? undefined,
       permissionModeId: initialRun.providers.leadPermissionModeId ?? undefined,
       parentAgentId: initialRun.supervisorAgentId || undefined,
-      workspaceId: initialRun.devWorkspaceId,
-      title: `[${ROLE_LABELS.master_lead}] [${initialRun.title}]`,
+      workspaceId: targetWorkspaceId,
+      peerWorktreePath: targetWorktreePath,
+      title: `[${ROLE_LABELS.master_lead}] [${previousMasterLeadRecord?.featureName ?? initialRun.title}]`,
       awaitTool: null,
     });
     const postCreateRun = ctx.store.require(runId);
@@ -156,14 +160,30 @@ export async function reviveMasterLead(
         deadLeadRecord.waitingForAgentId = null;
         deadLeadRecord.deferredTool = null;
       }
+      const replacementRecord = mutableRun.agents[replacementMasterLead.agentId];
+      if (replacementRecord && deadLeadRecord) {
+        replacementRecord.workspaceId = deadLeadRecord.workspaceId;
+        replacementRecord.worktreePath = deadLeadRecord.worktreePath;
+        replacementRecord.featureName = deadLeadRecord.featureName;
+        replacementRecord.featureCriteria = deadLeadRecord.featureCriteria;
+      }
       mutableRun.masterLeadAgentId = replacementMasterLead.agentId;
-      // Re-parent active child Forked Leads to the replacement Master Lead before retiring the old session.
+      for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
+        if (mutablePipeline.leadAgentId === previousMasterLeadId) {
+          mutablePipeline.leadAgentId = replacementMasterLead.agentId;
+        }
+        const activeStage = mutablePipeline.stages[mutablePipeline.currentStageIndex];
+        if (activeStage?.forkedLeadAgentId === previousMasterLeadId) {
+          activeStage.forkedLeadAgentId = replacementMasterLead.agentId;
+        }
+      }
+      // Re-parent active child agents to the replacement Lead before retiring the old session.
       for (const childRecord of Object.values(mutableRun.agents)) {
         if (childRecord.parentAgentId === previousMasterLeadId) {
           childRecord.parentAgentId = replacementMasterLead.agentId;
         }
       }
-      // Transfer unread mail from the dead Master Lead identity so pending escalations or delegations are not lost.
+      // Transfer unread mail from the dead Lead identity so pending escalations or delegations are not lost.
       for (const queuedMessage of mutableRun.mailbox) {
         if (queuedMessage.toAgentId === previousMasterLeadId) {
           queuedMessage.toAgentId = replacementMasterLead.agentId;
@@ -274,33 +294,13 @@ export async function markStageParticipantForRevival(
     mutableParticipant.deferredTool = null;
     const targetPipeline = mutableRun.pipelines[mutableParticipant.pipelineId];
     if (!targetPipeline) return;
-    // Support reviving Forked Lead or Base Peer when peer_understand is the active phase.
-    if (
-      mutableParticipant.stageId === PEER_UNDERSTAND_STAGE_ID
-      && targetPipeline.peerUnderstand.status !== "completed"
-    ) {
-      if (targetPipeline.peerUnderstand.forkedLeadAgentId === targetAgentId) {
-        targetPipeline.peerUnderstand.forkedLeadAgentId = null;
-        const basePeerId = targetPipeline.peerUnderstand.basePeerAgentId;
-        if (basePeerId && mutableRun.agents[basePeerId]?.parentAgentId === targetAgentId) {
-          mutableRun.agents[basePeerId].parentAgentId = null;
-        }
-      }
-      if (targetPipeline.peerUnderstand.basePeerAgentId === targetAgentId) {
-        targetPipeline.peerUnderstand.basePeerAgentId = null;
-      }
-      targetPipeline.peerUnderstand.status = "starting";
-      if (targetPipeline.status === "paused" && !targetPipeline.gate) {
-        targetPipeline.status = "peer_understand";
-        targetPipeline.pausedReason = null;
-      }
-      affectedPipelineId = targetPipeline.id;
-      return;
-    }
     const currentStage = targetPipeline.stages[targetPipeline.currentStageIndex];
     if (!currentStage || currentStage.id !== mutableParticipant.stageId) return;
-    if (currentStage.forkedLeadAgentId === targetAgentId) {
+    if (currentStage.forkedLeadAgentId === targetAgentId || targetPipeline.leadAgentId === targetAgentId) {
       currentStage.forkedLeadAgentId = null;
+      if (targetPipeline.leadAgentId === targetAgentId) {
+        targetPipeline.leadAgentId = null;
+      }
       // Detach surviving stage peers before archiving a wedged coordinator so they can be re-parented to its replacement.
       for (const peerAgentId of currentStage.peerAgentIds) {
         const peerRecord = mutableRun.agents[peerAgentId];
@@ -335,26 +335,6 @@ function selectStageTargetsForCohortRevival(
   liveStatuses: Map<string, AgentLiveStatus>,
 ): string[] {
   const targetPipeline = requirePipeline(run, pipelineId);
-  if (targetPipeline.peerUnderstand.status !== "completed") {
-    const peerUnderstandParticipants = [
-      targetPipeline.peerUnderstand.forkedLeadAgentId,
-      targetPipeline.peerUnderstand.basePeerAgentId,
-    ].filter((agentId): agentId is string => Boolean(agentId));
-    const brokenPeerUnderstandParticipants = peerUnderstandParticipants.filter((agentId) => {
-      const liveStatus = liveStatuses.get(agentId);
-      const persistedRecord = run.agents[agentId];
-      return !persistedRecord || Boolean(persistedRecord.archivedAt) || !liveStatus || liveStatus.archived || liveStatus.status === "error";
-    });
-    if (brokenPeerUnderstandParticipants.length > 0) return brokenPeerUnderstandParticipants;
-    const stalledPeerUnderstandParticipants = peerUnderstandParticipants.filter((agentId) => Boolean(run.agents[agentId]?.awaitingTool));
-    if (stalledPeerUnderstandParticipants.length > 0) return stalledPeerUnderstandParticipants;
-    if (targetPipeline.peerUnderstand.reports.length === 0 && targetPipeline.peerUnderstand.basePeerAgentId) {
-      return [targetPipeline.peerUnderstand.basePeerAgentId];
-    }
-    return targetPipeline.peerUnderstand.forkedLeadAgentId
-      ? [targetPipeline.peerUnderstand.forkedLeadAgentId]
-      : peerUnderstandParticipants;
-  }
   const currentStage = targetPipeline.stages[targetPipeline.currentStageIndex];
   if (!currentStage) throw new ToolError(`Pipeline '${targetPipeline.name}' has no active stage to revive.`);
   const stageParticipants = [currentStage.forkedLeadAgentId, ...currentStage.peerAgentIds].filter(
@@ -386,8 +366,15 @@ export async function reviveAgentsOnDemand(
   const liveStatuses = await ctx.gateway.liveStatuses(caller.runId);
   const revivalSummaries: string[] = [];
   const manualReason = input.reason ?? `manual revival requested by ${caller.role}`;
+  const explicitTargetRecord = input.agentId ? initialRun.agents[input.agentId] : undefined;
+  const isStageCoordinatorTarget =
+    input.target === "agent" &&
+    Boolean(explicitTargetRecord?.pipelineId && explicitTargetRecord?.stageId);
 
-  if (input.target === "master_lead" || (input.target === "agent" && input.agentId === initialRun.masterLeadAgentId)) {
+  if (
+    input.target === "master_lead" ||
+    (input.target === "agent" && input.agentId === initialRun.masterLeadAgentId && !isStageCoordinatorTarget)
+  ) {
     if (caller.agentId === initialRun.masterLeadAgentId) {
       throw new ToolError("Master Lead cannot revive itself while executing a tool call; use target 'stage_cohort' or 'agent' for stage participants.");
     }

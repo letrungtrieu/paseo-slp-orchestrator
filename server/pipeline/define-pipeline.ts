@@ -1,7 +1,6 @@
 // Pipeline creation is the boundary where Lead-authored JSON becomes durable orchestration state.
 import { randomUUID } from "node:crypto";
 import {
-  PEER_UNDERSTAND_STAGE_ID,
   PipelineInputDefinitionSchema,
   PipelineStateSchema,
   type PipelineDefinition,
@@ -11,16 +10,16 @@ import {
   type PipelineState,
   type StageState,
 } from "../../shared/pipeline";
+import { ROLE_LABELS } from "../../shared/roles";
 import type { Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
 import { peerRole } from "../project-prompts/defaults";
 import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
-import { requirePipeline } from "./stage-context";
 import { recoverPipelines } from "./stage-engine";
 import type { PipelineContext } from "./context";
 import { ToolError } from "./tool-error";
 
-// Serialize concurrent pipeline definition calls per run so parallel tool invocations from Master Lead never collide.
+// Serialize concurrent pipeline definition calls per run so parallel tool invocations from Leads never collide.
 const definingRunLocks = new Map<string, Promise<unknown>>();
 
 async function withRunDefineLock<ResultType>(runId: string, operation: () => Promise<ResultType>): Promise<ResultType> {
@@ -179,88 +178,54 @@ function recheckWorkspaceAndIdentity(
   if (worktreeCollision) throw new ToolError(`Worktree or branch is already assigned to pipeline '${worktreeCollision.name}'.`);
 }
 
-// Handles Forked Lead creating the pipeline stages after confirming mutual understanding with Base Peer in peer_understand.
-function definePipelineStagesFromForkedLead(
+// Check whether a Lead agent already owns an active (non-integrated, non-failed) pipeline.
+function leadHasActivePipeline(
+  run: Run,
+  leadAgentId: string,
+  pendingBatchPipelines: readonly PipelineState[],
+): boolean {
+  const allPipelines = [...Object.values(run.pipelines), ...pendingBatchPipelines];
+  return allPipelines.some(
+    (pipeline) =>
+      pipeline.leadAgentId === leadAgentId &&
+      !["integrated", "failed"].includes(pipeline.status),
+  );
+}
+
+// Resolve or spawn the dedicated Lead agent that lives inside this pipeline's worktree and supervises all of its stages.
+async function resolveOrSpawnPipelineLead(
   ctx: PipelineContext,
-  caller: BusCaller,
-  rawInput: PipelineEnvelope | PipelineInputDefinition,
-): string {
-  const currentRun = ctx.store.require(caller.runId);
-  const callerRecord = currentRun.agents[caller.agentId];
-  if (!callerRecord || callerRecord.archivedAt || !callerRecord.pipelineId) {
-    throw new ToolError("Forked Lead has no active pipeline assignment.");
-  }
-  const targetPipelineId =
-    ("pipelineId" in rawInput && rawInput.pipelineId) ? rawInput.pipelineId : callerRecord.pipelineId;
-  const targetPipeline = requirePipeline(currentRun, targetPipelineId);
+  runId: string,
+  callerLeadId: string,
+  pipelineName: string,
+  workspace: Awaited<ReturnType<typeof openPipelineWorktree>>,
+  pendingBatchPipelines: readonly PipelineState[],
+): Promise<string> {
+  const currentRun = ctx.store.require(runId);
+  const callerRecord = currentRun.agents[callerLeadId];
+  // Reuse the calling Lead when it does not already own another active concurrent pipeline.
   if (
-    currentRun.status !== "running"
-    || targetPipeline.status !== "peer_understand"
-    || targetPipeline.peerUnderstand.status !== "running"
-    || targetPipeline.peerUnderstand.forkedLeadAgentId !== caller.agentId
+    callerRecord &&
+    !callerRecord.archivedAt &&
+    !leadHasActivePipeline(currentRun, callerLeadId, pendingBatchPipelines)
   ) {
-    throw new ToolError("Forked Lead can only create pipeline stages while its peer_understand phase is running.");
+    return callerLeadId;
   }
-  // Enforce that Forked Lead and Base Peer have completed discovery and confirmed understanding before creating stages.
-  if (targetPipeline.peerUnderstand.reports.length === 0) {
-    throw new ToolError(
-      "Confirm mutual understanding with Base Peer first: set the investigation goal via slp_send_peer_message and wait for Base Peer's slp_stage_report before creating the pipeline stages.",
-    );
-  }
-  const requestedStages =
-    ("stages" in rawInput && rawInput.stages)
-    || ("pipeline" in rawInput && rawInput.pipeline?.stages)
-    || ("pipelines" in rawInput && rawInput.pipelines?.[0]?.stages)
-    || [];
-  const materializedStages = materializePipelineStages(currentRun, requestedStages);
-  const confirmationSummary =
-    ("summary" in rawInput && rawInput.summary)
-    || ("pipeline" in rawInput && rawInput.pipeline?.description)
-    || `Confirmed mutual understanding with Base Peer and created ${materializedStages.length} pipeline stage(s).`;
-  const confirmedAt = new Date().toISOString();
-
-  ctx.store.mutate(caller.runId, (mutableRun) => {
-    const mutablePipeline = requirePipeline(mutableRun, targetPipelineId);
-    mutablePipeline.stages = materializedStages;
-    mutablePipeline.peerUnderstand.result = {
-      summary: confirmationSummary,
-      approvedBy: caller.agentId,
-      approvedAt: confirmedAt,
-    };
-    mutablePipeline.peerUnderstand.status = "completing";
-    mutablePipeline.updatedAt = confirmedAt;
-    const mutableCaller = mutableRun.agents[caller.agentId];
-    if (mutableCaller) {
-      mutableCaller.awaitingTool = null;
-      mutableCaller.awaitingSince = null;
-      mutableCaller.nudges = 0;
-    }
-    mutableRun.mailbox = mutableRun.mailbox.filter(
-      (queuedMessage) =>
-        !(
-          queuedMessage.toAgentId === caller.agentId
-          && (queuedMessage.awaitTool === "slp_define_pipeline" || queuedMessage.awaitTool === "slp_approve_stage")
-        ),
-    );
-  });
-
-  ctx.logEvent(caller.runId, {
+  // When a Lead defines an additional concurrent pipeline, spawn a dedicated sibling Lead in that pipeline's worktree.
+  const spawnedSiblingLead = await ctx.gateway.createAgent({
+    runId,
+    role: "master_lead",
     taskId: null,
-    from: caller.agentId,
-    to: "pipeline",
-    kind: "stage.approved",
-    summary: `${targetPipeline.name}/${PEER_UNDERSTAND_STAGE_ID}: ${confirmationSummary} (${materializedStages.length} stages defined)`,
-    outcome: "delivered",
+    provider: currentRun.providers.lead,
+    thinkingOptionId: currentRun.providers.leadThinkingOptionId ?? undefined,
+    permissionModeId: currentRun.providers.leadPermissionModeId ?? undefined,
+    parentAgentId: callerLeadId || currentRun.supervisorAgentId || undefined,
+    workspaceId: workspace.workspaceId,
+    peerWorktreePath: workspace.cwd,
+    title: `[${ROLE_LABELS.master_lead}] [${pipelineName}]`,
+    awaitTool: null,
   });
-  void recoverPipelines(ctx, caller.runId).catch((recoveryError) => {
-    console.error(`[slp] stage startup failed after Forked Lead defined pipeline ${targetPipelineId}`, recoveryError);
-  });
-  return JSON.stringify({
-    pipelineId: targetPipeline.id,
-    name: targetPipeline.name,
-    stagesDefined: materializedStages.length,
-    message: "Mutual understanding confirmed and pipeline stages created. End your turn while Base Peer's session is checkpointed and Stage 1 starts.",
-  });
+  return spawnedSiblingLead.agentId;
 }
 
 export async function definePipeline(
@@ -270,9 +235,6 @@ export async function definePipeline(
   caller?: BusCaller,
 ): Promise<string> {
   return withRunDefineLock(runId, async () => {
-    if (caller?.role === "forked_lead") {
-      return definePipelineStagesFromForkedLead(ctx, caller, rawInput);
-    }
     const run = ctx.store.require(runId);
     if (!["planning", "running"].includes(run.status)) {
       throw new ToolError(`Cannot define a pipeline while run is '${run.status}'.`);
@@ -281,20 +243,38 @@ export async function definePipeline(
     validateUniqueNames(ctx, runId, definitions);
     validatePeerRoles(ctx, runId, definitions);
 
+    const callerLeadId = caller?.agentId || run.masterLeadAgentId;
     const preparedPipelines: Array<{
       pipeline: PipelineState;
       workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
+      leadAgentId: string;
     }> = [];
 
-    for (const definition of definitions) {
-      // Automatically provision a dedicated Git worktree when the Master Lead omits worktree during task decomposition.
+    for (let definitionIndex = 0; definitionIndex < definitions.length; definitionIndex += 1) {
+      const definition = definitions[definitionIndex];
+      const latestRunBeforeWorktree = ctx.store.require(runId);
+      const callerRecord = latestRunBeforeWorktree.agents[callerLeadId];
+      // Default to the calling Lead's pre-provisioned worktree when available and not yet claimed by an active pipeline.
       let requestedWorktreePath = definition.worktree?.trim() ?? "";
       if (!requestedWorktreePath) {
-        const autoCreatedPayload = JSON.parse(
-          await createPipelineWorktree(ctx, runId, definition.name),
-        ) as { cwd: string };
-        requestedWorktreePath = autoCreatedPayload.cwd;
+        const callerWorktree = callerRecord?.worktreePath ?? "";
+        const callerWorktreeAlreadyClaimed =
+          !callerWorktree ||
+          [...Object.values(latestRunBeforeWorktree.pipelines), ...preparedPipelines.map((entry) => entry.pipeline)].some(
+            (existingPipeline) =>
+              !["integrated", "failed"].includes(existingPipeline.status) &&
+              existingPipeline.worktree === callerWorktree,
+          );
+        if (!callerWorktreeAlreadyClaimed && definitionIndex === 0) {
+          requestedWorktreePath = callerWorktree;
+        } else {
+          const autoCreatedPayload = JSON.parse(
+            await createPipelineWorktree(ctx, runId, definition.name),
+          ) as { cwd: string };
+          requestedWorktreePath = autoCreatedPayload.cwd;
+        }
       }
+      // Open and validate the worktree before mutating run state so invalid checkouts fail atomically.
       const latestRun = ctx.store.require(runId);
       const workspace = await openPipelineWorktree(ctx, latestRun, requestedWorktreePath);
       const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd);
@@ -305,26 +285,23 @@ export async function definePipeline(
         workspace,
         preparedPipelines.map((entry) => entry.pipeline),
       );
+      // Bind this pipeline to its dedicated Lead session so stage Peers can fork from that Lead in the same cwd.
+      const owningLeadId = await resolveOrSpawnPipelineLead(
+        ctx,
+        runId,
+        callerLeadId,
+        definition.name,
+        workspace,
+        preparedPipelines.map((entry) => entry.pipeline),
+      );
       const pipelineId = randomUUID();
       const createdAt = new Date().toISOString();
+      // Persist all stage definitions in 'pending' state; recoverPipelines transitions Stage 1 to 'starting'.
       const pipeline = PipelineStateSchema.parse({
         ...sanitizedDefinition,
         id: pipelineId,
         status: "queued",
-        // Every newly defined pipeline runs peer_understand first so Forked Lead sets the investigation goal,
-        // Base Peer investigates and aligns with Forked Lead, and the stages are confirmed before Stage 1 forks.
-        peerUnderstand: {
-          status: "pending",
-          investigationGoal: definition.investigationGoal ?? null,
-          forkedLeadAgentId: null,
-          basePeerAgentId: null,
-          basePeerSessionId: null,
-          reports: [],
-          messages: [],
-          result: null,
-          startedAt: null,
-          completedAt: null,
-        },
+        leadAgentId: owningLeadId,
         currentStageIndex: 0,
         workspaceId: workspace.workspaceId,
         branch: workspace.branch,
@@ -349,47 +326,54 @@ export async function definePipeline(
         mergedCommit: null,
         integratedAt: null,
       });
-      preparedPipelines.push({ pipeline, workspace });
+      preparedPipelines.push({ pipeline, workspace, leadAgentId: owningLeadId });
     }
 
     ctx.store.mutate(runId, (mutableRun) => {
-      for (const { pipeline, workspace } of preparedPipelines) {
+      for (const { pipeline, workspace, leadAgentId } of preparedPipelines) {
         // External worktrees are never treated as plugin-owned cleanup targets; a previously
         // created slp worktree retains its ownership record from slp_create_worktree.
         if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
           mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
         }
         mutableRun.pipelines[pipeline.id] = pipeline;
+        const leadRecord = mutableRun.agents[leadAgentId];
+        if (leadRecord) {
+          leadRecord.pipelineId = pipeline.id;
+          leadRecord.workspaceId = workspace.workspaceId;
+          leadRecord.worktreePath = workspace.cwd;
+          leadRecord.featureName = leadRecord.featureName ?? pipeline.name;
+        }
       }
       mutableRun.status = "running";
-      const masterLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
+      const callerLeadRecord = mutableRun.agents[callerLeadId];
       // Clear either initial planning (slp_define_pipeline) or post-integration (slp_report) obligation when spawning new or UAT pipelines.
-      if (masterLeadRecord?.awaitingTool === "slp_define_pipeline" || masterLeadRecord?.awaitingTool === "slp_report") {
-        masterLeadRecord.awaitingTool = null;
-        masterLeadRecord.awaitingSince = null;
-        masterLeadRecord.nudges = 0;
+      if (callerLeadRecord?.awaitingTool === "slp_define_pipeline" || callerLeadRecord?.awaitingTool === "slp_report") {
+        callerLeadRecord.awaitingTool = null;
+        callerLeadRecord.awaitingSince = null;
+        callerLeadRecord.nudges = 0;
       }
       // Drop any undelivered delegation, integration handover or reminder mail once new pipelines are running.
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) =>
           !(
-            queuedMessage.toAgentId === mutableRun.masterLeadAgentId
+            queuedMessage.toAgentId === callerLeadId
             && (queuedMessage.awaitTool === "slp_define_pipeline" || queuedMessage.awaitTool === "slp_report")
           ),
       );
     });
 
-    for (const { pipeline } of preparedPipelines) {
+    for (const { pipeline, leadAgentId } of preparedPipelines) {
       ctx.logEvent(runId, {
         taskId: null,
-        from: "master_lead",
+        from: leadAgentId || "master_lead",
         to: "pipeline",
         kind: "pipeline.defined",
         summary: `${pipeline.name} v${pipeline.version} (${pipeline.stages.length} stages)`,
         outcome: "delivered",
       });
     }
-    // Spawn a dedicated Forked Lead for each defined pipeline and run all pipelines concurrently.
+    // Start Stage 1 for each defined pipeline and fork stage Peers directly from the owning Lead's session.
     void recoverPipelines(ctx, runId).catch((recoveryError) => {
       console.error(`[slp] pipeline startup failed for run ${runId}`, recoveryError);
     });
@@ -401,6 +385,7 @@ export async function definePipeline(
       worktree: pipeline.worktree,
       branch: pipeline.branch,
       workspaceId: pipeline.workspaceId,
+      leadAgentId: pipeline.leadAgentId,
       status: pipeline.status,
     }));
     const firstSummary = createdSummaries[0];
@@ -409,8 +394,8 @@ export async function definePipeline(
       pipelineIds: createdSummaries.map((summary) => summary.pipelineId),
       pipelines: createdSummaries,
       message: createdSummaries.length === 1
-        ? "Pipeline saved. Define any further independent pipelines, then end your turn so stage coordinators can start."
-        : `${createdSummaries.length} parallel task pipelines saved. End your turn so each Forked Lead can start its assigned task concurrently.`,
+        ? "Pipeline saved. End your turn while Stage 1 Peers fork from your session and start work."
+        : `${createdSummaries.length} parallel task pipelines saved. End your turn while each Lead and its Stage 1 Peers start work concurrently.`,
     });
   });
 }

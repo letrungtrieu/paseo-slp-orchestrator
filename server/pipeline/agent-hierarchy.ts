@@ -6,27 +6,26 @@ import { archiveAgentLogged, type PipelineContext } from "./context";
 // Prevent overlapping agent.archived events and sweeper ticks from running duplicate cascade archives for the same subtree.
 const archivingSubtreeKeys = new Set<string>();
 
-// Role depth ensures leaf peers close before stage coordinators and stage coordinators close before Master Lead.
+// Role depth ensures leaf peers close before Leads and Leads close before Supervisor.
 const ROLE_ARCHIVE_PRIORITY: Readonly<Record<string, number>> = {
   peer: 0,
-  base_peer: 0,
-  forked_lead: 1,
-  master_lead: 2,
-  supervisor: 3,
+  master_lead: 1,
+  supervisor: 2,
 };
 
 function hasMasterLeadRecord(run: Run): boolean {
   return Object.values(run.agents).some((agentRecord) => agentRecord.role === "master_lead");
 }
 
-function hasStageForkedLeadRecord(run: Run, peerRecord: AgentRecord): boolean {
-  if (!peerRecord.pipelineId || !peerRecord.stageId) return false;
-  // A stage peer is only considered orphaned when no Forked Lead record exists for its stage.
+function hasStageLeadRecord(run: Run, peerRecord: AgentRecord): boolean {
+  const peerPipelineId = peerRecord.pipelineId;
+  if (!peerPipelineId || !peerRecord.stageId) return false;
+  // A stage peer is only considered orphaned when no Lead record exists for its pipeline or stage.
   return Object.values(run.agents).some(
     (candidateRecord) =>
-      candidateRecord.role === "forked_lead"
-      && candidateRecord.pipelineId === peerRecord.pipelineId
-      && candidateRecord.stageId === peerRecord.stageId,
+      candidateRecord.role === "master_lead"
+      && candidateRecord.pipelineId === peerPipelineId
+      && (candidateRecord.stageId === peerRecord.stageId || run.pipelines[peerPipelineId]?.leadAgentId === candidateRecord.agentId),
   );
 }
 
@@ -35,7 +34,6 @@ export function directChildAgentsOf(run: Run, parentAgentId: string): AgentRecor
   const parentRecord = run.agents[parentAgentId];
   const isSupervisorParent = parentRecord?.role === "supervisor" || run.supervisorAgentId === parentAgentId;
   const isMasterLeadParent = parentRecord?.role === "master_lead" || run.masterLeadAgentId === parentAgentId;
-  const isForkedLeadParent = parentRecord?.role === "forked_lead";
   const directChildren: AgentRecord[] = [];
   const seenChildIds = new Set<string>();
 
@@ -53,7 +51,7 @@ export function directChildAgentsOf(run: Run, parentAgentId: string): AgentRecor
       continue;
     }
     if (isSupervisorParent) {
-      // Master Lead sessions belong directly under the Supervisor even in older snapshots without parentAgentId.
+      // Lead sessions belong directly under the Supervisor even in older snapshots without parentAgentId.
       if (
         candidateRecord.role === "master_lead"
         && (!candidateRecord.parentAgentId || !run.agents[candidateRecord.parentAgentId])
@@ -61,46 +59,26 @@ export function directChildAgentsOf(run: Run, parentAgentId: string): AgentRecor
         registerChild(candidateRecord);
         continue;
       }
-      // Attach orphaned stage leads or peers if a partial fixture omitted the intermediate Master Lead record.
-      if (candidateRecord.role === "forked_lead" && !hasMasterLeadRecord(run)) {
-        registerChild(candidateRecord);
-        continue;
-      }
-      if (candidateRecord.role === "peer" && !hasMasterLeadRecord(run) && !hasStageForkedLeadRecord(run, candidateRecord)) {
+      if (candidateRecord.role === "peer" && !hasMasterLeadRecord(run) && !hasStageLeadRecord(run, candidateRecord)) {
         registerChild(candidateRecord);
       }
       continue;
     }
-    if (isMasterLeadParent && run.masterLeadAgentId === parentAgentId) {
-      // Every Forked Lead without an explicit live parent belongs to the current Master Lead.
+    if (isMasterLeadParent) {
       if (
-        candidateRecord.role === "forked_lead"
+        candidateRecord.role === "peer"
         && (!candidateRecord.parentAgentId || !run.agents[candidateRecord.parentAgentId])
       ) {
-        registerChild(candidateRecord);
-        continue;
-      }
-      // Attach stage peers directly if their stage's Forked Lead record was omitted from the store.
-      if (candidateRecord.role === "peer" && !hasStageForkedLeadRecord(run, candidateRecord)) {
-        registerChild(candidateRecord);
-      }
-      continue;
-    }
-    if (
-      isForkedLeadParent
-      && candidateRecord.role === "peer"
-      && (!candidateRecord.parentAgentId || !run.agents[candidateRecord.parentAgentId])
-      && parentRecord.pipelineId !== null
-      && parentRecord.stageId !== null
-      && candidateRecord.pipelineId === parentRecord.pipelineId
-      && candidateRecord.stageId === parentRecord.stageId
-    ) {
-      const owningStage = run.pipelines[parentRecord.pipelineId]?.stages.find(
-        (stageCandidate) => stageCandidate.id === parentRecord.stageId,
-      );
-      // Peers without an explicit parent link belong to their stage's active Forked Lead coordinator.
-      if (!owningStage || owningStage.forkedLeadAgentId === parentAgentId) {
-        registerChild(candidateRecord);
+        if (
+          parentRecord?.pipelineId &&
+          candidateRecord.pipelineId === parentRecord.pipelineId
+        ) {
+          registerChild(candidateRecord);
+          continue;
+        }
+        if (run.masterLeadAgentId === parentAgentId && !hasStageLeadRecord(run, candidateRecord)) {
+          registerChild(candidateRecord);
+        }
       }
     }
   }
@@ -190,14 +168,52 @@ export async function retireIntegratedPipelineWorkspace(
     }
   }
   if (willAllPipelinesBeIntegrated) {
-    // Once all pipelines are integrated, sweep any remaining slp/<runId8>/* local branches that are not bound to an active pipeline.
+    // Once all pipelines are integrated, retire any unused owned pipeline worktrees and sweep remaining slp/<runId8>/* local branches.
     const latestRun = ctx.store.find(runId);
-    const activePipelineBranches = latestRun
-      ? Object.values(latestRun.pipelines)
-          .filter((candidatePipeline) => candidatePipeline.id !== pipelineId && !["integrated", "failed"].includes(candidatePipeline.status))
-          .map((candidatePipeline) => candidatePipeline.branch)
-          .filter((branchName): branchName is string => Boolean(branchName))
+    const activePipelines = latestRun
+      ? Object.values(latestRun.pipelines).filter(
+          (candidatePipeline) => candidatePipeline.id !== pipelineId && !["integrated", "failed"].includes(candidatePipeline.status),
+        )
       : [];
+    const activePipelineBranches = activePipelines
+      .map((candidatePipeline) => candidatePipeline.branch)
+      .filter((branchName): branchName is string => Boolean(branchName));
+    const activePipelineWorktrees = new Set(activePipelines.map((candidatePipeline) => candidatePipeline.worktree));
+    const unusedOwnedWorkspaces = latestRun
+      ? Object.values(latestRun.pipelineWorkspaces).filter(
+          (candidateWorkspace) =>
+            candidateWorkspace.owned &&
+            !activePipelineWorktrees.has(candidateWorkspace.cwd) &&
+            !activePipelineBranches.includes(candidateWorkspace.branch),
+        )
+      : [];
+    for (const unusedWorkspace of unusedOwnedWorkspaces) {
+      if (
+        canUsePaseoSdk &&
+        unusedWorkspace.workspaceId !== currentRun.supervisorWorkspaceId &&
+        unusedWorkspace.workspaceId !== currentRun.devWorkspaceId
+      ) {
+        const paseo = await ctx.holder.get();
+        await paseo.workspaces.archive(unusedWorkspace.workspaceId).catch(() => undefined);
+      }
+      await removeWorktreeAndDeleteBranch(currentRun.repoPath, {
+        worktreePath: unusedWorkspace.cwd,
+        branchName: unusedWorkspace.branch,
+        protectedWorktrees: [currentRun.repoPath, currentRun.devCwd],
+        protectedBranches: [currentRun.baseBranch, currentRun.integrationBranch, ...activePipelineBranches],
+      });
+    }
+    if (unusedOwnedWorkspaces.length > 0 && ctx.store.find(runId)) {
+      try {
+        ctx.store.mutate(runId, (mutableRun) => {
+          for (const unusedWorkspace of unusedOwnedWorkspaces) {
+            delete mutableRun.pipelineWorkspaces[unusedWorkspace.workspaceId];
+          }
+        });
+      } catch {
+        // Ignore mutations that arrive after the SQLite store is closed during plugin or test teardown.
+      }
+    }
     await deleteRunLocalPipelineBranches(currentRun.repoPath, runId, {
       preservedBranches: [currentRun.baseBranch, currentRun.integrationBranch, ...activePipelineBranches],
     });
@@ -367,39 +383,24 @@ export async function handleAgentArchived(
         (queuedMessage) => !affectedAgentIds.has(queuedMessage.toAgentId),
       );
       if (targetRecord.role === "master_lead") {
-        // Pause active pipelines without queueing a resume prompt so the sweeper does not respawn archived stage cohorts.
+        // If a sibling Lead was archived, pause its owned pipeline; if the primary Lead was archived, pause all active pipelines.
+        const isPrimaryLead = archivedAgentId === mutableRun.masterLeadAgentId;
         for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
-          if (["queued", "peer_understand", "starting", "running"].includes(mutablePipeline.status)) {
+          const ownsThisPipeline =
+            isPrimaryLead ||
+            mutablePipeline.id === targetRecord.pipelineId ||
+            mutablePipeline.leadAgentId === archivedAgentId;
+          if (ownsThisPipeline && ["queued", "starting", "running"].includes(mutablePipeline.status)) {
             mutablePipeline.status = "paused";
-            mutablePipeline.pausedReason ??= "Master Lead was archived; dependent stage leads and peers were archived.";
+            mutablePipeline.pausedReason ??= `Lead (${archivedAgentId}) was archived; dependent peers were archived.`;
             mutablePipeline.updatedAt = effectiveArchivedAt;
           }
-        }
-      } else if (targetRecord.role === "forked_lead" && targetRecord.pipelineId) {
-        const mutablePipeline = mutableRun.pipelines[targetRecord.pipelineId];
-        const currentStage = mutablePipeline?.stages[mutablePipeline.currentStageIndex];
-        // Pause when the archived Forked Lead owns either the active peer_understand phase or the currently running stage.
-        const ownsActivePeerUnderstand = Boolean(
-          mutablePipeline?.status === "peer_understand"
-          && mutablePipeline.peerUnderstand.forkedLeadAgentId === archivedAgentId
-          && ["pending", "starting", "running"].includes(mutablePipeline.peerUnderstand.status),
-        );
-        const ownsActiveStage = Boolean(
-          mutablePipeline
-          && ["queued", "starting", "running"].includes(mutablePipeline.status)
-          && currentStage?.id === targetRecord.stageId
-          && ["pending", "starting", "running"].includes(currentStage.status),
-        );
-        if (mutablePipeline && (ownsActivePeerUnderstand || ownsActiveStage)) {
-          mutablePipeline.status = "paused";
-          mutablePipeline.pausedReason ??= `Stage Lead (${archivedAgentId}) was archived; child peers were archived.`;
-          mutablePipeline.updatedAt = effectiveArchivedAt;
         }
       }
     });
 
     const archivedDescendants = await archiveAgentSubtree(ctx, runId, archivedAgentId);
-    if (targetRecord.role === "master_lead" || targetRecord.role === "forked_lead") {
+    if (targetRecord.role === "master_lead") {
       ctx.logEvent(runId, {
         taskId: null,
         from: archivedAgentId,

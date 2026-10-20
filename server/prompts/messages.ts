@@ -3,9 +3,57 @@ export function supervisorBriefing(): string {
   return "You are the Supervisor of an SLP run. Greet the human briefly and wait for their requirement according to your configured .slp/SUPERVISOR.md workflow. Do not delegate until requirements are clear.";
 }
 
-export function delegationMessage(acceptanceCriteria: string): string {
-  // The Master Lead follows its configured .slp/LEAD.md workflow to plan and define pipelines.
-  return `The Supervisor delegated this project.\nAcceptance criteria:\n${acceptanceCriteria}\nFollow your configured .slp/LEAD.md workflow and available .slp peer roles to define the pipeline(s) with slp_define_pipeline. Once defined, end your turn.`;
+export interface SiblingLeadSummary {
+  agentId: string;
+  featureName: string;
+  worktreePath: string | null;
+  branch: string | null;
+  acceptanceCriteria: string;
+}
+
+export interface DelegatedLeadContext {
+  leadAgentId?: string;
+  featureName?: string;
+  featureCriteria?: string;
+  worktreePath?: string;
+  branch?: string;
+  sharedContext?: string | null;
+  siblingLeads?: ReadonlyArray<SiblingLeadSummary>;
+}
+
+export function delegationMessage(acceptanceCriteria: string, context?: DelegatedLeadContext): string {
+  // Each Lead runs inside its dedicated feature worktree and receives the full roster of sibling Leads running in parallel.
+  const effectiveCriteria = context?.featureCriteria ?? acceptanceCriteria;
+  const messageSections = [
+    "The Supervisor delegated this feature to you as Lead.",
+    context?.featureName
+      ? `### Your Assigned Feature: ${context.featureName}\n- **Lead Agent ID**: \`${context.leadAgentId ?? "self"}\`\n- **Dedicated Worktree**: \`${context.worktreePath ?? "assigned"}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
+      : context?.worktreePath
+        ? `### Your Dedicated Worktree\n- **Worktree**: \`${context.worktreePath}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
+        : "",
+    `### Acceptance Criteria\n${effectiveCriteria}`,
+    context?.sharedContext ? `### Shared Cross-Feature Context\n${context.sharedContext}` : "",
+  ].filter(Boolean);
+
+  if (context?.siblingLeads && context.siblingLeads.length > 0) {
+    const siblingLines = context.siblingLeads.map(
+      (siblingLead) =>
+        `- **Feature \`${siblingLead.featureName}\`** — Lead \`${siblingLead.agentId}\` (worktree \`${siblingLead.worktreePath ?? "n/a"}\`, branch \`${siblingLead.branch ?? "n/a"}\`):\n  Criteria: ${siblingLead.acceptanceCriteria}`,
+    );
+    messageSections.push(
+      [
+        "### Parallel Sibling Leads & Concurrent Features (Coordinate via `slp_send_peer_message`)",
+        "The following features are being implemented in parallel with yours by sibling Leads:",
+        ...siblingLines,
+        "Whenever your implementation shares APIs, schemas, data contracts, routes, or end-to-end flows with a sibling feature, contact that sibling Lead directly using `slp_send_peer_message({ toAgentId: \"<siblingLeadId>\", message: \"...\", waitForReply: true })` so your implementations align before integration.",
+      ].join("\n"),
+    );
+  }
+
+  messageSections.push(
+    "Follow your configured .slp/LEAD.md workflow and available .slp peer roles to define your pipeline stages with slp_define_pipeline. Every stage peer will run in your worktree and fork directly from your session. Once defined, end your turn.",
+  );
+  return messageSections.join("\n\n");
 }
 
 export function reportForSupervisor(summary: string, baseBranch: string, integrationBranch: string): string {

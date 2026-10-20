@@ -14,7 +14,6 @@ interface PipelineDetailProps {
 
 const STATUS_LABELS: Record<string, string> = {
   queued: "Queued",
-  peer_understand: "Peer Understand",
   starting: "Starting",
   running: "Running",
   paused: "Paused",
@@ -105,7 +104,7 @@ function StageRow({ styles, theme, stage, stageIndex, currentStageIndex }: {
       </View>
       <Text style={styles.mutedText}>{stage.goal}</Text>
       {stageIndex === currentStageIndex ? <Text style={styles.warningText}>Current stage</Text> : null}
-      {renderOptionalLine("Forked Lead", stage.forkedLeadAgentId, styles)}
+      {renderOptionalLine("Lead", stage.forkedLeadAgentId, styles)}
       {renderOptionalLine("Started", formatTime(stage.startedAt), styles)}
       {renderOptionalLine("Completed", formatTime(stage.completedAt), styles)}
       <View style={styles.stack}>
@@ -183,16 +182,10 @@ export function PipelineDetail({ styles, theme, runId, pipelines }: PipelineDeta
             {renderOptionalLine("Worktree", pipeline.worktree, styles)}
             {renderOptionalLine("Branch", pipeline.branch, styles)}
             {renderOptionalLine("Workspace", pipeline.workspaceId, styles)}
-            {pipeline.peerUnderstand ? (
-              renderOptionalLine(
-                "Peer Understand",
-                `${statusLabel(pipeline.peerUnderstand.status)}${pipeline.peerUnderstand.basePeerAgentId ? ` · base_peer ${pipeline.peerUnderstand.basePeerAgentId}` : ""}`,
-                styles,
-              )
-            ) : null}
+            {renderOptionalLine("Lead", pipeline.leadAgentId, styles)}
             {pipeline.pausedReason ? <Text style={styles.dangerText}>{pipeline.pausedReason}</Text> : null}
             {pipeline.status === "paused" ? (
-              <Text style={styles.mutedText}>Resume through the Master Lead tool.</Text>
+              <Text style={styles.mutedText}>Resume through the Lead tool.</Text>
             ) : null}
             {pipelineGate ? (
               <View style={[styles.stack, { padding: 8, borderRadius: 8, backgroundColor: theme.colors.surface2 }]}>

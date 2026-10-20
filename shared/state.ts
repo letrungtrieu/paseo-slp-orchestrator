@@ -19,6 +19,11 @@ export const AgentRecordSchema = z.object({
   pipelineId: z.string().nullable().default(null),
   stageId: z.string().nullable().default(null),
   stagePeerId: z.string().nullable().default(null),
+  // Tracks the dedicated worktree and parallel feature assignment owned by each Lead (or Peer).
+  workspaceId: z.string().nullable().default(null),
+  worktreePath: z.string().nullable().default(null),
+  featureName: z.string().nullable().default(null),
+  featureCriteria: z.string().nullable().default(null),
   // Explicit parent agent reference enables recursive bottom-up archival across separate Paseo worktrees.
   parentAgentId: z.string().nullable().default(null),
   archivedAt: z.string().nullable().default(null),

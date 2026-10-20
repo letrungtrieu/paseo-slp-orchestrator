@@ -130,44 +130,8 @@ export async function sweepPeerShellWatchdog(
   }> = [];
   const activeRunningPeerIds = new Set<string>();
 
-  // Only inspect peers belonging to currently running stages (or peer_understand) that Paseo reports as mid-turn with no pending permission dialog.
+  // Only inspect peers belonging to currently running stages that Paseo reports as mid-turn with no pending permission dialog.
   for (const pipeline of Object.values(run.pipelines)) {
-    if (pipeline.status === "peer_understand" && pipeline.peerUnderstand.status === "running") {
-      const basePeerId = pipeline.peerUnderstand.basePeerAgentId;
-      if (basePeerId) {
-        const basePeerRecord = run.agents[basePeerId];
-        const basePeerLiveStatus = liveStatuses.get(basePeerId);
-        if (
-          basePeerRecord
-          && !basePeerRecord.archivedAt
-          && basePeerLiveStatus
-          && !basePeerLiveStatus.archived
-          && basePeerLiveStatus.status === "running"
-          && basePeerLiveStatus.pendingPermissions.length === 0
-        ) {
-          activeRunningPeerIds.add(basePeerId);
-          activeRunningPeers.push({
-            pipeline,
-            stage: {
-              id: "peer_understand",
-              name: "peer_understand",
-              goal: pipeline.description,
-              peers: [{ role: "base-peer", task: pipeline.description }],
-              status: pipeline.peerUnderstand.status,
-              forkedLeadAgentId: pipeline.peerUnderstand.forkedLeadAgentId,
-              peerAgentIds: [basePeerId],
-              reports: pipeline.peerUnderstand.reports,
-              messages: pipeline.peerUnderstand.messages,
-              result: pipeline.peerUnderstand.result,
-              startedAt: pipeline.peerUnderstand.startedAt,
-              completedAt: pipeline.peerUnderstand.completedAt,
-            },
-            peerRecord: basePeerRecord,
-          });
-        }
-      }
-      continue;
-    }
     if (pipeline.status !== "running") continue;
     const currentStage = pipeline.stages[pipeline.currentStageIndex];
     if (!currentStage || currentStage.status !== "running") continue;
@@ -291,7 +255,7 @@ export async function handlePeerShell(
 ): Promise<string> {
   const currentRun = ctx.store.require(caller.runId);
   const peerRecord = currentRun.agents[input.peerAgentId];
-  if (!peerRecord || (peerRecord.role !== "peer" && peerRecord.role !== "base_peer")) {
+  if (!peerRecord || peerRecord.role !== "peer") {
     throw new ToolError(`Unknown peer agent '${input.peerAgentId}'.`);
   }
   if (peerRecord.archivedAt) {
@@ -299,14 +263,14 @@ export async function handlePeerShell(
   }
 
   const callerRecord = currentRun.agents[caller.agentId];
-  // A Forked Lead only governs peers inside its own task pipeline; the Master Lead can intervene across any pipeline.
+  // A pipeline Lead only governs peers inside its own task pipeline; the primary Lead can intervene across any pipeline.
   if (
-    caller.role === "forked_lead"
+    caller.agentId !== currentRun.masterLeadAgentId
     && callerRecord?.pipelineId
     && peerRecord.pipelineId !== callerRecord.pipelineId
   ) {
     throw new ToolError(
-      `Forked Lead '${caller.agentId}' cannot manage peer '${peerRecord.agentId}' from another pipeline.`,
+      `Lead '${caller.agentId}' cannot manage peer '${peerRecord.agentId}' from another pipeline.`,
     );
   }
 
@@ -369,7 +333,7 @@ export async function handlePeerShell(
   const expectedPeerTool = peerRecord.awaitingTool ?? peerRecord.deferredTool ?? "slp_stage_report";
 
   const interruptPromptLines = [
-    `## Shell Command Canceled by ${caller.role === "forked_lead" ? "Forked Lead" : "Master Lead"} (\`${caller.agentId}\`)`,
+    `## Shell Command Canceled by Lead (\`${caller.agentId}\`)`,
     "",
     `- **Canceled Command**: \`${canceledCommandText}\``,
     `- **Coordinator Guidance**: ${coordinatorGuidance}`,

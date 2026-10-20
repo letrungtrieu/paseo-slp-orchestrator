@@ -71,9 +71,10 @@ describe("stage coordination", () => {
     expect(flow.mailTo(runId, reviewerId).at(-1)?.text).toContain("Re-check the retry behavior");
 
     await reportPeer(flow, runId, pipelineId, "reviewer", "Retry behavior is now covered.");
+    await reportPeer(flow, runId, pipelineId, "developer", "Developer implementation is ready.");
     await approveCurrentStage(flow, runId, pipelineId);
     expect(flow.pipeline(runId, pipelineId)!.stages[0].status).toBe("completed");
-    // Peers and Forked Lead stay alive while the pipeline is 'completed' so the Forked Lead can merge and consult peers on conflicts.
+    // Peers and Lead stay alive while the pipeline is 'completed' so the Lead can merge and consult peers on conflicts.
     expect(flow.gateway.archivedAgentIds).not.toContain(reviewerId);
     expect(flow.gateway.archivedAgentIds).not.toContain(coordinatorId);
     expect(flow.mailTo(runId, coordinatorId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
@@ -83,221 +84,143 @@ describe("stage coordination", () => {
     });
     expect(finalization.isError).toBe(false);
     expect(flow.gateway.archivedAgentIds).toContain(reviewerId);
-    expect(flow.gateway.archivedAgentIds).toContain(coordinatorId);
+    expect(flow.run(runId).agents[coordinatorId].awaitingTool).toBe("slp_report");
   });
 
-  it("runs peer_understand before stage 1, lets base_peer and forked_lead align via messages and rework, and forks every stage peer from base_peer", async () => {
-    const flow = await createFlow({ mode: "FULL_AUTO" });
-    const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE, { stopAtPeerUnderstand: true });
-
-    const understandPipeline = flow.pipeline(runId, pipelineId)!;
-    expect(understandPipeline.status).toBe("peer_understand");
-    expect(understandPipeline.peerUnderstand.status).toBe("running");
-
-    const basePeerId = understandPipeline.peerUnderstand.basePeerAgentId!;
-    const forkedLeadId = understandPipeline.peerUnderstand.forkedLeadAgentId!;
-    expect(basePeerId).toBeTruthy();
-    expect(forkedLeadId).toBeTruthy();
-    expect(flow.run(runId).agents[basePeerId]?.role).toBe("base_peer");
-    expect(flow.run(runId).agents[basePeerId]?.projectRole).toBe("base-peer");
-
-    // Base Peer asks Forked Lead a clarifying question during peer_understand and Forked Lead replies.
-    const questionResponse = await flow.callAs(basePeerId, "slp_send_peer_message", {
-      toAgentId: forkedLeadId,
-      message: "Should billing import reject duplicate invoice IDs or upsert them?",
-      waitForReply: true,
-    });
-    expect(questionResponse.isError).toBe(false);
-    expect(flow.run(runId).agents[basePeerId]?.waitingForAgentId).toBe(forkedLeadId);
-
-    const leadReplyResponse = await flow.callAs(forkedLeadId, "slp_send_peer_message", {
-      toAgentId: basePeerId,
-      message: "Upsert duplicate invoice IDs idempotently and return the updated count.",
-      waitForReply: false,
-    });
-    expect(leadReplyResponse.isError).toBe(false);
-    expect(flow.run(runId).agents[basePeerId]?.waitingForAgentId).toBeNull();
-    expect(flow.pipeline(runId, pipelineId)!.peerUnderstand.messages).toHaveLength(2);
-
-    // Base Peer submits its initial understanding report; Forked Lead requests one rework pass before approving.
-    const firstUnderstandReport = await flow.callAs(basePeerId, "slp_stage_report", {
-      summary: "Mapped billing import module and upsert contract.",
-      findings: ["src/billing.ts handles batch parsing"],
-      status: "completed",
-    });
-    expect(firstUnderstandReport.isError).toBe(false);
-
-    const understandRework = await flow.callAs(forkedLeadId, "slp_stage_rework", {
-      agentIds: [basePeerId],
-      feedback: "Include the exact input/output types for the idempotent upsert in your report.",
-    });
-    expect(understandRework.isError).toBe(false);
-    expect(flow.mailTo(runId, basePeerId).at(-1)?.awaitTool).toBe("slp_stage_report");
-
-    const secondUnderstandReport = await flow.callAs(basePeerId, "slp_stage_report", {
-      summary: "Mapped billing import with input InvoiceBatch -> output UpsertMetrics { inserted, updated }.",
-      findings: ["Input: InvoiceBatch", "Output: UpsertMetrics { inserted, updated }"],
-      status: "completed",
-    });
-    expect(secondUnderstandReport.isError).toBe(false);
-
-    const approveUnderstand = await flow.callAs(forkedLeadId, "slp_approve_stage", {
-      summary: "Base Peer fully understands the root problem and expected input/output contract.",
-    });
-    expect(approveUnderstand.isError).toBe(false);
-
-    await eventually(() => {
-      const activePipeline = flow.pipeline(runId, pipelineId);
-      if (activePipeline?.status !== "running" || activePipeline.stages[0]?.status !== "running") {
-        throw new Error("Stage 1 has not started after peer_understand approval");
-      }
-    });
-
-    const postUnderstandPipeline = flow.pipeline(runId, pipelineId)!;
-    const expectedBasePeerSessionId = `session-of-${basePeerId}`;
-    expect(postUnderstandPipeline.peerUnderstand.status).toBe("completed");
-    expect(postUnderstandPipeline.peerUnderstand.basePeerSessionId).toBe(expectedBasePeerSessionId);
-
-    // Every Stage 1 peer is forked from Base Peer's provider session in the shared pipeline worktree.
-    const stage1 = currentStage(flow, runId, pipelineId);
-    expect(stage1.forkedLeadAgentId).toBe(forkedLeadId);
-    for (const stage1PeerId of stage1.peerAgentIds) {
-      const createdStage1Spec = flow.gateway.createdAgents.find(
-        (createdEntry) => createdEntry.record.agentId === stage1PeerId,
-      )?.spec;
-      expect(createdStage1Spec?.extraOptions).toEqual({
-        extraArgs: { resume: expectedBasePeerSessionId, "fork-session": null },
-      });
-      const peerBriefingText = flow.mailTo(runId, stage1PeerId).at(-1)?.text ?? "";
-      expect(peerBriefingText).toContain("Base Peer Understanding (peer_understand)");
-      expect(peerBriefingText).toContain("UpsertMetrics");
-    }
-
-    // Advance to Stage 2 and verify Stage 2 peers also fork from Base Peer's session without repeating discovery.
-    for (const assignment of stage1.peers) await reportPeer(flow, runId, pipelineId, assignment.role);
-    await approveCurrentStage(flow, runId, pipelineId);
-
-    const stage2 = currentStage(flow, runId, pipelineId);
-    for (const stage2PeerId of stage2.peerAgentIds) {
-      const createdStage2Spec = flow.gateway.createdAgents.find(
-        (createdEntry) => createdEntry.record.agentId === stage2PeerId,
-      )?.spec;
-      expect(createdStage2Spec?.extraOptions).toEqual({
-        extraArgs: { resume: expectedBasePeerSessionId, "fork-session": null },
-      });
-    }
-  });
-
-  it("lets Forked Lead create the investigation goal first, confirm mutual understanding with Base Peer, and only then create the pipeline stages", async () => {
+  it("spawns N dedicated Leads in immediate worktrees on parallel slp_delegate, lets sibling Leads align contracts via slp_send_peer_message, and forks stage Peers directly from their owning Lead", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
-    await delegateToLead(flow, runId);
 
-    // Master Lead creates a task shell without pre-defining stages so Forked Lead and Base Peer investigate first.
-    const defineShellResponse = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {
-      pipeline: {
-        name: "deferred-stage-pipeline",
-        version: "1.0",
-        description: "Investigate invoice reconciliation and build the required stages after mutual confirmation.",
-      },
-    });
-    expect(defineShellResponse.isError).toBe(false);
-    const pipelineId = JSON.parse(defineShellResponse.text).pipelineId as string;
-
-    await eventually(() => {
-      const activePipeline = flow.pipeline(runId, pipelineId);
-      if (
-        activePipeline?.status !== "peer_understand"
-        || activePipeline.peerUnderstand.status !== "running"
-        || !activePipeline.peerUnderstand.forkedLeadAgentId
-        || !activePipeline.peerUnderstand.basePeerAgentId
-      ) {
-        throw new Error("peer_understand cohort is still starting");
-      }
-    });
-
-    const initialPipeline = flow.pipeline(runId, pipelineId)!;
-    const forkedLeadId = initialPipeline.peerUnderstand.forkedLeadAgentId!;
-    const basePeerId = initialPipeline.peerUnderstand.basePeerAgentId!;
-    expect(initialPipeline.stages).toHaveLength(0);
-    expect(initialPipeline.peerUnderstand.investigationGoal).toBeNull();
-    // Forked Lead is prompted first to formulate the investigation goal and send it to Base Peer.
-    expect(flow.mailTo(runId, forkedLeadId).at(-1)?.awaitTool).toBe("slp_send_peer_message");
-    expect(flow.mailTo(runId, forkedLeadId).at(-1)?.text).toContain("Step 1: Set the Investigation Goal for Base Peer");
-
-    // Forked Lead cannot create pipeline stages before Base Peer has investigated and confirmed mutual understanding.
-    const prematureStageCreate = await flow.callAs(forkedLeadId, "slp_define_pipeline", {
-      pipelineId,
-      stages: DEFAULT_PIPELINE.stages,
-    });
-    expect(prematureStageCreate.isError).toBe(true);
-    expect(prematureStageCreate.text).toContain("Confirm mutual understanding with Base Peer first");
-
-    // Step 1: Forked Lead creates the investigation goal and sends it to Base Peer via slp_send_peer_message.
-    const investigationGoalText =
-      "Inspect src/reconcile.ts, map the duplicate-invoice edge cases, and propose the exact input/output contract.";
-    const sendGoalResponse = await flow.callAs(forkedLeadId, "slp_send_peer_message", {
-      toAgentId: basePeerId,
-      message: investigationGoalText,
-      waitForReply: true,
-    });
-    expect(sendGoalResponse.isError).toBe(false);
-    expect(flow.pipeline(runId, pipelineId)!.peerUnderstand.investigationGoal).toBe(investigationGoalText);
-    expect(flow.mailTo(runId, basePeerId).at(-1)?.awaitTool).toBe("slp_stage_report");
-    expect(flow.mailTo(runId, basePeerId).at(-1)?.text).toContain(investigationGoalText);
-
-    // Step 2: Base Peer investigates and submits slp_stage_report confirming mutual understanding with Forked Lead.
-    const basePeerReportResponse = await flow.callAs(basePeerId, "slp_stage_report", {
-      summary: "Confirmed reconciliation contract: ReconcileInput -> ReconcileResult { matched, unmatched }.",
-      findings: ["src/reconcile.ts requires idempotent matching", "Contract: ReconcileInput -> ReconcileResult"],
-      status: "completed",
-    });
-    expect(basePeerReportResponse.isError).toBe(false);
-    expect(flow.mailTo(runId, forkedLeadId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
-
-    // Step 3: Only after mutual understanding is confirmed does Forked Lead create the pipeline stages.
-    const createStagesResponse = await flow.callAs(forkedLeadId, "slp_define_pipeline", {
-      pipelineId,
-      summary: "Mutual understanding confirmed with Base Peer; creating coding and QA stages.",
-      stages: [
+    // Supervisor analyzes the requirement and delegates two parallel features (`auth-api` and `checkout-ui`) with shared context.
+    const delegateResponse = await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
+      acceptanceCriteria: "Deliver both auth-api and checkout-ui with a consistent session token contract.",
+      sharedContext: "Both features share the `X-Session-Token` header and `SessionPayload` response schema.",
+      tasks: [
         {
-          name: "implement-reconcile",
-          goal: "Implement ReconcileInput -> ReconcileResult according to the confirmed Base Peer blueprint.",
-          peers: [{ role: "developer", task: "Implement src/reconcile.ts and unit tests." }],
+          name: "auth-api",
+          acceptanceCriteria: "Implement `/api/auth/session` returning `SessionPayload`.",
         },
         {
-          name: "verify-reconcile",
-          goal: "Verify the reconciliation metrics and edge cases.",
-          peers: [{ role: "qa_engineer", task: "Run reconciliation tests and verify metrics." }],
+          name: "checkout-ui",
+          acceptanceCriteria: "Consume `/api/auth/session` in the checkout header component.",
         },
       ],
     });
-    expect(createStagesResponse.isError).toBe(false);
+    expect(delegateResponse.isError).toBe(false);
+
+    const planningRun = flow.run(runId);
+    expect(planningRun.status).toBe("planning");
+    const activeLeadRecords = Object.values(planningRun.agents).filter(
+      (agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt,
+    );
+    expect(activeLeadRecords).toHaveLength(2);
+
+    const authLead = activeLeadRecords.find((agentRecord) => agentRecord.featureName === "auth-api")!;
+    const checkoutLead = activeLeadRecords.find((agentRecord) => agentRecord.featureName === "checkout-ui")!;
+    expect(authLead).toBeTruthy();
+    expect(checkoutLead).toBeTruthy();
+    // Each Lead is immediately placed in its own dedicated Git worktree at slp_delegate.
+    expect(authLead.worktreePath).toBeTruthy();
+    expect(checkoutLead.worktreePath).toBeTruthy();
+    expect(authLead.worktreePath).not.toBe(checkoutLead.worktreePath);
+
+    // Each Lead's delegation message includes the sibling Lead's agentId, feature name, branch, and acceptance criteria.
+    const authDelegationText = flow.mailTo(runId, authLead.agentId).at(-1)?.text ?? "";
+    const checkoutDelegationText = flow.mailTo(runId, checkoutLead.agentId).at(-1)?.text ?? "";
+    expect(authDelegationText).toContain(checkoutLead.agentId);
+    expect(authDelegationText).toContain("checkout-ui");
+    expect(authDelegationText).toContain("X-Session-Token");
+    expect(checkoutDelegationText).toContain(authLead.agentId);
+    expect(checkoutDelegationText).toContain("auth-api");
+
+    // During planning (before defining pipelines), Checkout Lead contacts Auth Lead directly via slp_send_peer_message to align the exact schema.
+    const alignQuestion = await flow.callAs(checkoutLead.agentId, "slp_send_peer_message", {
+      toAgentId: authLead.agentId,
+      message: "Let's confirm: will `/api/auth/session` return `{ token: string, expiresAt: string }`?",
+      waitForReply: true,
+    });
+    expect(alignQuestion.isError).toBe(false);
+    expect(flow.run(runId).agents[checkoutLead.agentId].waitingForAgentId).toBe(authLead.agentId);
+
+    const alignReply = await flow.callAs(authLead.agentId, "slp_send_peer_message", {
+      toAgentId: checkoutLead.agentId,
+      message: "Confirmed: `{ token: string, expiresAt: string }` with status 200.",
+      waitForReply: false,
+    });
+    expect(alignReply.isError).toBe(false);
+    expect(flow.run(runId).agents[checkoutLead.agentId].waitingForAgentId).toBeNull();
+    expect(flow.mailTo(runId, checkoutLead.agentId).at(-1)?.text).toContain("Confirmed: `{ token: string, expiresAt: string }`");
+
+    // Both Leads now define their pipelines in their own pre-created worktrees (without needing slp_create_worktree).
+    const authDefineResponse = await flow.callAs(authLead.agentId, "slp_define_pipeline", {
+      pipeline: {
+        name: "auth-api",
+        version: "1.0",
+        description: "Auth API pipeline",
+        stages: [
+          {
+            name: "implement-auth",
+            goal: "Implement /api/auth/session with { token, expiresAt }.",
+            peers: [{ role: "developer", task: "Build auth endpoint." }],
+          },
+        ],
+      },
+    });
+    expect(authDefineResponse.isError).toBe(false);
+    const authPipelineId = JSON.parse(authDefineResponse.text).pipelineId as string;
+
+    // Checkout Lead defines its pipeline concurrently in its own worktree after aligning on the session payload contract.
+    const checkoutDefineResponse = await flow.callAs(checkoutLead.agentId, "slp_define_pipeline", {
+      pipeline: {
+        name: "checkout-ui",
+        version: "1.0",
+        description: "Checkout UI pipeline",
+        stages: [
+          {
+            name: "implement-checkout",
+            goal: "Consume /api/auth/session in checkout header.",
+            peers: [{ role: "developer", task: "Build checkout header." }],
+          },
+        ],
+      },
+    });
+    expect(checkoutDefineResponse.isError).toBe(false);
+    const checkoutPipelineId = JSON.parse(checkoutDefineResponse.text).pipelineId as string;
 
     await eventually(() => {
-      const runningPipeline = flow.pipeline(runId, pipelineId);
-      if (runningPipeline?.status !== "running" || runningPipeline.stages[0]?.status !== "running") {
-        throw new Error("Stage 1 has not started after Forked Lead created pipeline stages");
+      const authPipeline = flow.pipeline(runId, authPipelineId);
+      const checkoutPipeline = flow.pipeline(runId, checkoutPipelineId);
+      if (authPipeline?.status !== "running" || checkoutPipeline?.status !== "running") {
+        throw new Error("Parallel Lead pipelines are still starting");
       }
     });
 
-    const activePipeline = flow.pipeline(runId, pipelineId)!;
-    expect(activePipeline.stages).toHaveLength(2);
-    expect(activePipeline.peerUnderstand.status).toBe("completed");
-    expect(activePipeline.peerUnderstand.basePeerSessionId).toBe(`session-of-${basePeerId}`);
-    const stage1PeerId = activePipeline.stages[0].peerAgentIds[0];
-    const stage1PeerBriefing = flow.mailTo(runId, stage1PeerId).at(-1)?.text ?? "";
-    expect(stage1PeerBriefing).toContain("Forked Lead Investigation Goal");
-    expect(stage1PeerBriefing).toContain(investigationGoalText);
-    expect(stage1PeerBriefing).toContain("ReconcileResult");
+    // Verify each pipeline uses its owning Lead's dedicated worktree and forks its stage Peers directly from that Lead's session.
+    const authPipeline = flow.pipeline(runId, authPipelineId)!;
+    const checkoutPipeline = flow.pipeline(runId, checkoutPipelineId)!;
+    expect(authPipeline.worktree).toBe(authLead.worktreePath);
+    expect(checkoutPipeline.worktree).toBe(checkoutLead.worktreePath);
+    expect(authPipeline.leadAgentId).toBe(authLead.agentId);
+    expect(checkoutPipeline.leadAgentId).toBe(checkoutLead.agentId);
+
+    const authPeerId = authPipeline.stages[0].peerAgentIds[0];
+    const checkoutPeerId = checkoutPipeline.stages[0].peerAgentIds[0];
+    const authPeerSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === authPeerId)?.spec;
+    const checkoutPeerSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === checkoutPeerId)?.spec;
+    expect(authPeerSpec?.extraOptions).toEqual({
+      extraArgs: { resume: `session-of-${authLead.agentId}`, "fork-session": null },
+    });
+    expect(checkoutPeerSpec?.extraOptions).toEqual({
+      extraArgs: { resume: `session-of-${checkoutLead.agentId}`, "fork-session": null },
+    });
   });
 
-  it("falls back to global peer config when a .slp/peers model does not match base_peer's provider so native session forking still succeeds", async () => {
+  it("falls back to global peer config when a .slp/peers model does not match Lead's provider so native session forking still succeeds", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const runId = await flow.startRun();
-    // Configure Base Peer on claude/claude-sonnet-4-6, Reviewer on a matching claude model, and Developer on a mismatched codex model.
+    // Configure Lead on claude/claude-sonnet-4-6, Reviewer on a matching claude model, and Developer on a mismatched codex model.
     flow.store.mutate(runId, (mutableRun) => {
-      mutableRun.promptConfig!.basePeer!.model = "claude/claude-sonnet-4-6";
+      mutableRun.promptConfig!.lead.model = "claude/claude-sonnet-4-6";
       const reviewerRole = mutableRun.promptConfig!.peers.find((peer) => peer.role === "reviewer")!;
       const developerRole = mutableRun.promptConfig!.peers.find((peer) => peer.role === "developer")!;
       reviewerRole.model = "claude-opus-4-6";
@@ -306,31 +229,12 @@ describe("stage coordination", () => {
     await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
       acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
     });
-    const workspaceResponse = await flow.callAsRole(runId, "master_lead", null, "slp_create_worktree", {
-      name: TWO_PEER_PIPELINE.name,
-    });
-    const createdWorkspace = JSON.parse(workspaceResponse.text) as { cwd: string };
+    const leadId = flow.run(runId).masterLeadAgentId;
     const defineResponse = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {
-      pipeline: { ...TWO_PEER_PIPELINE, worktree: createdWorkspace.cwd },
+      pipeline: { ...TWO_PEER_PIPELINE, worktree: undefined },
     });
     const definedPipelineId = JSON.parse(defineResponse.text).pipelineId as string;
 
-    await eventually(() => {
-      const activePipeline = flow.pipeline(runId, definedPipelineId);
-      if (activePipeline?.status !== "peer_understand" || activePipeline.peerUnderstand.status !== "running") {
-        throw new Error("peer_understand is still starting");
-      }
-    });
-    const basePeerId = flow.pipeline(runId, definedPipelineId)!.peerUnderstand.basePeerAgentId!;
-    const coordinatorId = flow.pipeline(runId, definedPipelineId)!.peerUnderstand.forkedLeadAgentId!;
-    await flow.callAs(basePeerId, "slp_stage_report", {
-      summary: "Base Peer mapped the repository on claude/claude-sonnet-4-6.",
-      findings: ["Base Peer provider is claude"],
-      status: "completed",
-    });
-    await flow.callAs(coordinatorId, "slp_approve_stage", {
-      summary: "Approved Base Peer understanding.",
-    });
     await eventually(() => {
       if (flow.pipeline(runId, definedPipelineId)?.status !== "running") {
         throw new Error("Stage 1 is still starting");
@@ -343,14 +247,14 @@ describe("stage coordination", () => {
     const reviewerCreatedSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === reviewerPeerId)?.spec;
     const developerCreatedSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === developerPeerId)?.spec;
 
-    // Reviewer's short model ID matches Base Peer's claude provider, whereas Developer's codex model falls back to global claude/sonnet.
+    // Reviewer's short model ID matches Lead's claude provider, whereas Developer's codex model falls back to global claude/sonnet.
     expect(reviewerCreatedSpec?.provider).toBe("claude/claude-opus-4-6");
     expect(developerCreatedSpec?.provider).toBe("claude/sonnet");
     expect(reviewerCreatedSpec?.extraOptions).toEqual({
-      extraArgs: { resume: `session-of-${basePeerId}`, "fork-session": null },
+      extraArgs: { resume: `session-of-${leadId}`, "fork-session": null },
     });
     expect(developerCreatedSpec?.extraOptions).toEqual({
-      extraArgs: { resume: `session-of-${basePeerId}`, "fork-session": null },
+      extraArgs: { resume: `session-of-${leadId}`, "fork-session": null },
     });
   });
 });

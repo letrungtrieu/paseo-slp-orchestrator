@@ -118,20 +118,20 @@ export function resolveAgentSettings(
   const defaultProviderId = defaults.provider.split("/", 1)[0];
   const defaultPermissionModeId = defaults.permissionModeId ?? unattendedModeForProvider(defaultProviderId);
 
-  // Stage peers are forked from base_peer, so their .slp/peers model definitions depend on base_peer's
-  // provider and fall back to the global SLP configuration when no matching model exists for that provider.
+  // Stage peers fork directly from their owning Lead in the shared worktree, so .slp/peers model
+  // definitions depend on Lead's provider and fall back to global config when mismatched.
   if (role === "peer") {
     const peerDefinition = projectRoleId ? peerRole(projectPrompts, projectRoleId) : projectPrompts.peers[0];
     if (!peerDefinition) throw new Error("No project peer workflow is configured under .slp/peers");
 
-    const basePeerSettings = resolveAgentSettings(
+    const leadSettings = resolveAgentSettings(
       projectPrompts,
-      "base_peer",
+      "master_lead",
       undefined,
       defaults,
       availableProviderModels,
     );
-    const basePeerProviderId = basePeerSettings.provider.split("/", 1)[0];
+    const leadProviderId = leadSettings.provider.split("/", 1)[0];
     const globalFallbackSettings: AgentModelSettings = {
       provider: defaults.provider,
       permissionModeId: defaultPermissionModeId,
@@ -139,13 +139,13 @@ export function resolveAgentSettings(
     };
 
     if (!peerDefinition.model) {
-      // When no model is set in .slp/peers/*.md, stay on base_peer's provider if BASE_PEER.md switched providers;
+      // When no model is set in .slp/peers/*.md, stay on Lead's provider if LEAD.md switched providers;
       // otherwise use the global config model directly.
-      if (basePeerProviderId !== defaultProviderId) {
+      if (leadProviderId !== defaultProviderId) {
         return {
-          provider: basePeerSettings.provider,
-          permissionModeId: basePeerSettings.permissionModeId,
-          thinkingOptionId: peerDefinition.thinking ?? basePeerSettings.thinkingOptionId,
+          provider: leadSettings.provider,
+          permissionModeId: leadSettings.permissionModeId,
+          thinkingOptionId: peerDefinition.thinking ?? leadSettings.thinkingOptionId,
         };
       }
       return globalFallbackSettings;
@@ -153,43 +153,26 @@ export function resolveAgentSettings(
 
     const matchedProviderModel = resolvePeerModelForBasePeerProvider(
       peerDefinition.model,
-      basePeerProviderId,
+      leadProviderId,
       availableProviderModels,
     );
     if (!matchedProviderModel) {
-      // Fallback to global config when the peer's model does not match or exist under base_peer's provider.
+      // Fallback to global config when the peer's model does not match or exist under Lead's provider.
       return globalFallbackSettings;
     }
 
     return {
       provider: matchedProviderModel,
-      permissionModeId: basePeerSettings.permissionModeId,
+      permissionModeId: leadSettings.permissionModeId,
       thinkingOptionId: peerDefinition.thinking ?? defaults.thinkingOptionId,
     };
   }
 
-  // Root orchestration roles (supervisor, master_lead, forked_lead, base_peer) resolve directly against global defaults.
-  const fallbackBasePeerRole = defaultProjectPrompts().basePeer!;
-  const definition =
-    role === "supervisor"
-      ? projectPrompts.supervisor
-      : role === "master_lead"
-        ? projectPrompts.lead
-        : role === "forked_lead"
-          ? (projectPrompts.forkedLead ?? projectPrompts.lead)
-          : (projectPrompts.basePeer ?? fallbackBasePeerRole);
-  const effectiveModel =
-    role === "forked_lead"
-      ? (projectPrompts.forkedLead?.model ?? projectPrompts.lead.model)
-      : definition.model;
-  const effectiveThinking =
-    role === "forked_lead"
-      ? (projectPrompts.forkedLead?.thinking ?? projectPrompts.lead.thinking)
-      : definition.thinking;
-  const modelSourcePath =
-    role === "forked_lead" && !projectPrompts.forkedLead?.model
-      ? projectPrompts.lead.sourcePath
-      : definition.sourcePath;
+  // Root orchestration roles (supervisor, master_lead) resolve directly against global defaults.
+  const definition = role === "supervisor" ? projectPrompts.supervisor : projectPrompts.lead;
+  const effectiveModel = definition.model;
+  const effectiveThinking = definition.thinking;
+  const modelSourcePath = definition.sourcePath;
   // Full provider/model IDs can switch providers for root roles; a short model ID keeps the provider selected in the form.
   const provider = effectiveModel
     ? effectiveModel.includes("/") ? effectiveModel : `${defaultProviderId}/${effectiveModel}`
@@ -222,7 +205,5 @@ export function validateProjectAgentSettings(configuration: ProjectPromptConfig,
   // Catch incompatible provider permission overrides before a run creates any worktree or session.
   resolveAgentSettings(configuration, "supervisor", undefined, supervisorDefaults);
   resolveAgentSettings(configuration, "master_lead", undefined, leadDefaults);
-  resolveAgentSettings(configuration, "forked_lead", undefined, leadDefaults);
-  resolveAgentSettings(configuration, "base_peer", undefined, peerDefaults);
   for (const peer of configuration.peers) resolveAgentSettings(configuration, "peer", peer.role, peerDefaults);
 }

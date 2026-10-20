@@ -31,12 +31,12 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline || run.status !== "running") return false;
-  // A completed pipeline's Forked Lead and Peers stay active to run slp_finalize_pipeline and answer merge-conflict questions.
+  // A completed pipeline's Lead and Peers stay active to run slp_finalize_pipeline and answer merge-conflict questions.
   if (pipeline.status === "completed" && !pipeline.gate) {
     return true;
   }
-  // An integrated pipeline's Forked Lead stays active while sibling pipelines are still running so it can answer cross-pipeline conflict questions.
-  if (pipeline.status === "integrated" && agentRecord.role === "forked_lead") {
+  // An integrated pipeline's Lead stays active while sibling pipelines are still running so it can answer cross-pipeline conflict questions.
+  if (pipeline.status === "integrated" && agentRecord.role === "master_lead") {
     return true;
   }
   const currentStage = pipeline.stages[pipeline.currentStageIndex];

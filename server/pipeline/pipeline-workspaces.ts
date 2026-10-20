@@ -25,7 +25,10 @@ function worktreeLockKey(runId: string, branch: string): string {
   return `${runId}\u0000${branch}`;
 }
 
-function assertWorktreeCreationAllowed(run: Run): void {
+function assertWorktreeCreationAllowed(run: Run, allowDuringDelegation = false): void {
+  if (allowDuringDelegation && (run.status === "delegating" || run.status === "completed")) {
+    return;
+  }
   if (run.status !== "planning" && run.status !== "running") {
     throw new ToolError("Worktrees can be created while planning or running.");
   }
@@ -137,9 +140,14 @@ async function archiveCreatedWorkspace(
   }
 }
 
-function persistOwnedWorkspace(ctx: PipelineContext, runId: string, workspace: PipelineWorkspace): void {
+function persistOwnedWorkspace(
+  ctx: PipelineContext,
+  runId: string,
+  workspace: PipelineWorkspace,
+  allowDuringDelegation = false,
+): void {
   const run = ctx.store.require(runId);
-  assertWorktreeCreationAllowed(run);
+  assertWorktreeCreationAllowed(run, allowDuringDelegation);
   ctx.store.mutate(runId, (mutableRun) => {
     // The per-branch lock handles local races; this guard also protects a record restored during a restart.
     const branchOwner = Object.values(mutableRun.pipelineWorkspaces).find((knownWorkspace) => knownWorkspace.branch === workspace.branch);
@@ -155,16 +163,19 @@ async function recoverRegisteredWorktree(
   runId: string,
   branch: string,
   registeredWorktree: RegisteredWorktree,
+  allowDuringDelegation = false,
 ): Promise<string> {
   const run = ctx.store.require(runId);
-  assertWorktreeCreationAllowed(run);
+  assertWorktreeCreationAllowed(run, allowDuringDelegation);
   const paseo = await ctx.holder.get();
   // Opening the existing checkout avoids asking Git/Paseo to create a branch that already exists after a crash.
   const workspace = await paseo.workspaces.open(registeredWorktree.cwd);
   const directory = await refreshedDirectory(workspace);
   const checkout = await validateCheckout(run, directory, branch);
   // A branch discovered after an SDK error belongs to this generated request; remove it if abort won the race.
-  if (ctx.store.require(runId).status !== "planning" && ctx.store.require(runId).status !== "running") {
+  try {
+    assertWorktreeCreationAllowed(ctx.store.require(runId), allowDuringDelegation);
+  } catch {
     await archiveCreatedWorkspace(ctx, runId, workspace, checkout.branch, "recovered worktree belongs to an aborted run");
     throw new ToolError("Run stopped while the worktree was being recovered.");
   }
@@ -176,7 +187,7 @@ async function recoverRegisteredWorktree(
     // The generated branch is the plugin's idempotency key; external paths passed to definePipeline stay unowned.
     owned: true,
   };
-  persistOwnedWorkspace(ctx, runId, recoveredWorkspace);
+  persistOwnedWorkspace(ctx, runId, recoveredWorkspace, allowDuringDelegation);
   return JSON.stringify(recoveredWorkspace);
 }
 
@@ -185,15 +196,16 @@ async function createPipelineWorktreeLocked(
   runId: string,
   name: string,
   branch: string,
+  allowDuringDelegation = false,
 ): Promise<string> {
   const run = ctx.store.require(runId);
-  assertWorktreeCreationAllowed(run);
+  assertWorktreeCreationAllowed(run, allowDuringDelegation);
   const persistedWorkspace = Object.values(run.pipelineWorkspaces).find((workspace) => workspace.branch === branch);
   if (persistedWorkspace) return JSON.stringify(persistedWorkspace);
 
   // A daemon crash can leave the Git checkout alive even though SQLite never received its workspace id.
   const registeredWorktree = await registeredWorktreeForBranch(run.repoPath, branch);
-  if (registeredWorktree) return recoverRegisteredWorktree(ctx, runId, branch, registeredWorktree);
+  if (registeredWorktree) return recoverRegisteredWorktree(ctx, runId, branch, registeredWorktree, allowDuringDelegation);
 
   const paseo = await ctx.holder.get();
   let createdWorkspace: WorkspaceHandle | null = null;
@@ -207,14 +219,16 @@ async function createPipelineWorktreeLocked(
     } catch (creationError) {
       // The SDK may report an existing branch after its Git operation succeeded; inspect Git before failing the retry.
       const lateRegisteredWorktree = await registeredWorktreeForBranch(run.repoPath, branch);
-      if (lateRegisteredWorktree) return recoverRegisteredWorktree(ctx, runId, branch, lateRegisteredWorktree);
+      if (lateRegisteredWorktree) return recoverRegisteredWorktree(ctx, runId, branch, lateRegisteredWorktree, allowDuringDelegation);
       throw creationError;
     }
 
     const directory = await refreshedDirectory(createdWorkspace);
     const checkout = await validateCheckout(run, directory, branch);
     // abortRun marks the run before archiving known resources, so this check catches a late SDK completion.
-    if (ctx.store.require(runId).status !== "planning" && ctx.store.require(runId).status !== "running") {
+    try {
+      assertWorktreeCreationAllowed(ctx.store.require(runId), allowDuringDelegation);
+    } catch {
       throw new ToolError("Run stopped while the worktree was being created.");
     }
     await configureLocalOnlyPipelineBranch(run.repoPath, checkout.branch);
@@ -224,7 +238,7 @@ async function createPipelineWorktreeLocked(
       branch: checkout.branch,
       owned: true,
     };
-    persistOwnedWorkspace(ctx, runId, ownedWorkspace);
+    persistOwnedWorkspace(ctx, runId, ownedWorkspace, allowDuringDelegation);
     persisted = true;
     return JSON.stringify(ownedWorkspace);
   } finally {
@@ -235,9 +249,15 @@ async function createPipelineWorktreeLocked(
   }
 }
 
-export async function createPipelineWorktree(ctx: PipelineContext, runId: string, name: string): Promise<string> {
+export async function createPipelineWorktree(
+  ctx: PipelineContext,
+  runId: string,
+  name: string,
+  options?: { allowDuringDelegation?: boolean },
+): Promise<string> {
+  const allowDuringDelegation = Boolean(options?.allowDuringDelegation);
   const run = ctx.store.require(runId);
-  assertWorktreeCreationAllowed(run);
+  assertWorktreeCreationAllowed(run, allowDuringDelegation);
   const branch = branchForName(runId, name);
   if (branch === run.integrationBranch || branch === run.baseBranch) {
     throw new ToolError(`Worktree name '${name}' resolves to a protected branch; choose a different name.`);
@@ -248,7 +268,7 @@ export async function createPipelineWorktree(ctx: PipelineContext, runId: string
   const lockKey = worktreeLockKey(runId, branch);
   const existingCreation = creatingBranches.get(lockKey);
   if (existingCreation) return existingCreation;
-  const creation = createPipelineWorktreeLocked(ctx, runId, name, branch);
+  const creation = createPipelineWorktreeLocked(ctx, runId, name, branch, allowDuringDelegation);
   creatingBranches.set(lockKey, creation);
   try {
     return await creation;

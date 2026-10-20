@@ -45,11 +45,9 @@ describe("dynamic stage write permissions", () => {
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("peer", { archived: true })))).toBe(false);
   });
 
-  it("keeps the Forked Lead and Supervisor read-only", () => {
-    for (const role of ["supervisor", "forked_lead"] as const) {
-      expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor(role)))).toBe(false);
-      expect(isAllowed(decidePermission(fileWriteRequest("docs/a.md"), contextFor(role)))).toBe(false);
-    }
+  it("keeps the Supervisor read-only", () => {
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("supervisor")))).toBe(false);
+    expect(isAllowed(decidePermission(fileWriteRequest("docs/a.md"), contextFor("supervisor")))).toBe(false);
   });
 
   it("lets the Master Lead write inside its integration checkout", () => {
@@ -91,7 +89,7 @@ describe("path boundaries", () => {
 });
 
 describe("bus, questions and plans", () => {
-  it.each(["supervisor", "master_lead", "forked_lead", "peer"] as const)("allows bus tools for %s", (role) => {
+  it.each(["supervisor", "master_lead", "peer"] as const)("allows bus tools for %s", (role) => {
     const busRequest = permissionRequest({ name: "mcp__slp-bus__slp_stage_report" });
     expect(isAllowed(decidePermission(busRequest, contextFor(role)))).toBe(true);
   });
@@ -137,9 +135,7 @@ describe("shell boundaries", () => {
   it.each(["rm -rf src", "touch a.txt", "echo hi > out.txt", "sed -i s/a/b/ f", "git commit -am x", "npm install left-pad", "ls | tee log.txt"])(
     "denies mutating command %s to read-only roles",
     (command) => {
-      for (const role of ["supervisor", "forked_lead"] as const) {
-        expect(isAllowed(decidePermission(shellRequest(command), contextFor(role)))).toBe(false);
-      }
+      expect(isAllowed(decidePermission(shellRequest(command), contextFor("supervisor")))).toBe(false);
       expect(isAllowed(decidePermission(shellRequest(command), contextFor("peer", { stageActive: false })))).toBe(false);
     },
   );

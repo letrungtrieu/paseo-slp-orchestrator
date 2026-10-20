@@ -2,15 +2,11 @@
 // Business peer roles are loaded from .slp and therefore do not belong in this enum.
 import { z } from "zod";
 
-// This list deliberately contains orchestration roles only; a Lead-created pipeline can use any
-// project role without requiring a source change or turning that role into a capability enum.
-// base_peer is the pipeline-level discovery peer spawned during peer_understand whose session is
-// later forked into every stage peer in that pipeline.
+// Runtime orchestration roles follow the 3-tier SLP hierarchy: Supervisor -> N Leads -> Peers.
+// Each Lead runs inside its own feature worktree, coordinates with sibling Leads, and forks stage Peers directly.
 export const SLP_ROLES = [
   "supervisor",
   "master_lead",
-  "forked_lead",
-  "base_peer",
   "peer",
 ] as const;
 export const SlpRoleSchema = z.enum(SLP_ROLES);
@@ -36,8 +32,6 @@ export type RunMode = z.infer<typeof RunModeSchema>;
 // Record over SlpRole forces a label whenever a role is added.
 export const ROLE_LABELS: Record<SlpRole, string> = {
   supervisor: "Supervisor",
-  master_lead: "Master Lead",
-  forked_lead: "Forked Lead",
-  base_peer: "Base Peer",
+  master_lead: "Lead",
   peer: "Peer",
 };

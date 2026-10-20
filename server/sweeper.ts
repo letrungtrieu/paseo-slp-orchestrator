@@ -36,10 +36,10 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
     await handleSupervisorArchived(ctx, currentRun.id, supervisorRecord.archivedAt ?? undefined);
     return;
   }
-  // If a Master Lead or Forked Lead was archived while an event was missed, recursively archive its child leads and peers.
+  // If a Lead was archived while an event was missed, recursively archive its child leads and peers.
   const archivedParentLeadRecords = Object.values(currentRun.agents).filter(
     (agentRecord) =>
-      (agentRecord.role === "master_lead" || agentRecord.role === "forked_lead")
+      agentRecord.role === "master_lead"
       && (Boolean(agentRecord.archivedAt) || Boolean(liveStatuses.get(agentRecord.agentId)?.archived))
       && collectDescendantAgentIds(currentRun, agentRecord.agentId).length > 0,
   );

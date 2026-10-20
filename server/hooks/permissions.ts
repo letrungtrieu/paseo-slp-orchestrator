@@ -73,14 +73,10 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
   if (context.archived || !context.stageActive) return false;
   switch (context.role) {
     case "master_lead":
-      // The Master Lead owns the integration checkout.
+      // The Lead owns its feature worktree and integration checkout.
       return true;
-    case "forked_lead":
-      // Forked Lead stays read-only during stage review, but may write when finalizing its pipeline and resolving conflicts.
-      return Boolean(context.finalizingPipeline);
     case "supervisor":
-    case "base_peer":
-      // Supervisor and Base Peer (peer_understand discovery) stay read-only; production edits stay with stage peers or Leads.
+      // Supervisor stays read-only; production edits stay with stage peers or Leads.
       return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;
@@ -122,10 +118,8 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
   const peerMayMutate = context.role === "peer"
     && context.stageActive
     && Boolean(context.pipelineId && context.stageId);
-  const forkedLeadMayMutate = context.role === "forked_lead"
-    && Boolean(context.finalizingPipeline);
   const mayMutate = !context.archived && context.stageActive
-    && (context.role === "master_lead" || peerMayMutate || forkedLeadMayMutate);
+    && (context.role === "master_lead" || peerMayMutate);
   if (!mayMutate && MUTATING_SHELL.test(shellCommand)) {
     return { behavior: "deny", message: `Command looks mutating but ${context.role} is read-only right now.` };
   }
