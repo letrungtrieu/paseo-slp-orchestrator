@@ -140,10 +140,20 @@ export async function retireIntegratedPipelineWorkspace(
   if (!isOwnedPipelineCheckout) return;
 
   const targetWorkspaceId = matchingWorkspaceRecord?.workspaceId ?? integratedPipeline.workspaceId;
+  // Keep the Paseo workspace open while an unarchived Lead still runs inside this checkout so archiving the workspace
+  // does not cascade-archive the Lead mid-turn before it calls slp_report; archiveOwnedWorkspaces retires it at run end.
+  const hasActiveLeadInWorkspace = Object.values(currentRun.agents).some(
+    (agentRecord) =>
+      agentRecord.role === "master_lead" &&
+      !agentRecord.archivedAt &&
+      ((targetWorkspaceId !== null && agentRecord.workspaceId === targetWorkspaceId) ||
+        agentRecord.worktreePath === integratedPipeline.worktree),
+  );
   const canUsePaseoSdk = typeof ctx.holder?.get === "function"
     && (typeof ctx.holder.isReady !== "function" || ctx.holder.isReady());
   if (
-    canUsePaseoSdk
+    !hasActiveLeadInWorkspace
+    && canUsePaseoSdk
     && targetWorkspaceId
     && targetWorkspaceId !== currentRun.supervisorWorkspaceId
     && targetWorkspaceId !== currentRun.devWorkspaceId
@@ -151,14 +161,15 @@ export async function retireIntegratedPipelineWorkspace(
     const paseo = await ctx.holder.get();
     await paseo.workspaces.archive(targetWorkspaceId).catch(() => undefined);
   }
-  // Remove the worktree registration before deleting the local branch because Git blocks deleting a checked-out branch.
+  // Detach HEAD when the Lead stays alive in this directory, or remove the worktree registration before deleting the local branch.
   await removeWorktreeAndDeleteBranch(currentRun.repoPath, {
     worktreePath: integratedPipeline.worktree,
     branchName: integratedPipeline.branch,
     protectedWorktrees: [currentRun.repoPath, currentRun.devCwd],
     protectedBranches: [currentRun.baseBranch, currentRun.integrationBranch],
+    keepWorktreeDirectory: hasActiveLeadInWorkspace,
   });
-  if (targetWorkspaceId && ctx.store.find(runId)) {
+  if (!hasActiveLeadInWorkspace && targetWorkspaceId && ctx.store.find(runId)) {
     try {
       ctx.store.mutate(runId, (mutableRun) => {
         delete mutableRun.pipelineWorkspaces[targetWorkspaceId];
@@ -179,12 +190,28 @@ export async function retireIntegratedPipelineWorkspace(
       .map((candidatePipeline) => candidatePipeline.branch)
       .filter((branchName): branchName is string => Boolean(branchName));
     const activePipelineWorktrees = new Set(activePipelines.map((candidatePipeline) => candidatePipeline.worktree));
+    const activeLeadWorkspaceIds = new Set(
+      latestRun
+        ? Object.values(latestRun.agents)
+            .filter((agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt && agentRecord.workspaceId)
+            .map((agentRecord) => agentRecord.workspaceId as string)
+        : [],
+    );
+    const activeLeadWorktrees = new Set(
+      latestRun
+        ? Object.values(latestRun.agents)
+            .filter((agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt && agentRecord.worktreePath)
+            .map((agentRecord) => agentRecord.worktreePath as string)
+        : [],
+    );
     const unusedOwnedWorkspaces = latestRun
       ? Object.values(latestRun.pipelineWorkspaces).filter(
           (candidateWorkspace) =>
             candidateWorkspace.owned &&
             !activePipelineWorktrees.has(candidateWorkspace.cwd) &&
-            !activePipelineBranches.includes(candidateWorkspace.branch),
+            !activePipelineBranches.includes(candidateWorkspace.branch) &&
+            !activeLeadWorkspaceIds.has(candidateWorkspace.workspaceId) &&
+            !activeLeadWorktrees.has(candidateWorkspace.cwd),
         )
       : [];
     for (const unusedWorkspace of unusedOwnedWorkspaces) {
@@ -327,14 +354,28 @@ export async function handleAgentArchived(
 
     if (isSupervisorTarget) {
       const wasActiveRun = !["completed", "aborted"].includes(initialRun.status);
-      // Persist the aborted status before awaiting SDK archive calls so in-flight creations and sweeper ticks stop immediately.
+      // Persist the archived/aborted status before awaiting SDK archive calls so in-flight creations and sweeper ticks stop immediately.
       ctx.store.mutate(runId, (mutableRun) => {
         const supervisorRecord = mutableRun.agents[archivedAgentId] ?? mutableRun.agents[mutableRun.supervisorAgentId];
         if (supervisorRecord) {
           supervisorRecord.archivedAt ??= effectiveArchivedAt;
         }
         if (!["completed", "aborted"].includes(mutableRun.status)) {
+          // Record the active phase before archiving so SLP Orchestrator can restore the run and alert the user.
+          mutableRun.archivedFromStatus = mutableRun.status;
+          mutableRun.archivedAt = effectiveArchivedAt;
+          mutableRun.archiveWarningPending = true;
           mutableRun.status = "aborted";
+        } else if (mutableRun.status === "aborted") {
+          mutableRun.archivedAt ??= effectiveArchivedAt;
+        }
+        for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
+          if (["queued", "starting", "running"].includes(mutablePipeline.status)) {
+            // Pause active pipelines without deleting their worktrees so restoration can resume the current stage.
+            mutablePipeline.status = "paused";
+            mutablePipeline.pausedReason ??= "SLP run was archived; restore the run in SLP Orchestrator to continue.";
+            mutablePipeline.updatedAt = effectiveArchivedAt;
+          }
         }
         mutableRun.gate = null;
         mutableRun.mailbox = [];
@@ -345,15 +386,15 @@ export async function handleAgentArchived(
           agentRecord.deferredTool = null;
         }
       });
+      // Archive child Leads and Peers so background sessions stop, but keep git worktrees and branches intact for restoration.
       const archivedDescendants = await archiveAgentSubtree(ctx, runId, archivedAgentId);
       if (wasActiveRun || archivedDescendants.length > 0) {
-        await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
         ctx.logEvent(runId, {
           taskId: null,
           from: archivedAgentId || "supervisor",
           to: "pipeline",
           kind: "supervisor.archived",
-          summary: `Supervisor archived; archived ${archivedDescendants.length} dependent lead/peer agent(s)`,
+          summary: `Supervisor archived; archived ${archivedDescendants.length} dependent lead/peer agent(s) and preserved worktrees for restore`,
           outcome: "info",
         });
       }
@@ -383,17 +424,29 @@ export async function handleAgentArchived(
         (queuedMessage) => !affectedAgentIds.has(queuedMessage.toAgentId),
       );
       if (targetRecord.role === "master_lead") {
-        // If a sibling Lead was archived, pause its owned pipeline; if the primary Lead was archived, pause all active pipelines.
+        // Pause pipelines owned by the archived Lead or any child Lead in its archived subtree while leaving sibling Leads' pipelines running.
         const isPrimaryLead = archivedAgentId === mutableRun.masterLeadAgentId;
         for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
           const ownsThisPipeline =
-            isPrimaryLead ||
             mutablePipeline.id === targetRecord.pipelineId ||
-            mutablePipeline.leadAgentId === archivedAgentId;
+            Boolean(mutablePipeline.leadAgentId && affectedAgentIds.has(mutablePipeline.leadAgentId)) ||
+            (!mutablePipeline.leadAgentId && isPrimaryLead);
           if (ownsThisPipeline && ["queued", "starting", "running"].includes(mutablePipeline.status)) {
             mutablePipeline.status = "paused";
             mutablePipeline.pausedReason ??= `Lead (${archivedAgentId}) was archived; dependent peers were archived.`;
             mutablePipeline.updatedAt = effectiveArchivedAt;
+          }
+        }
+        if (isPrimaryLead) {
+          // Promote an unarchived sibling Lead outside the archived subtree when parallel pipelines remain active.
+          const survivingSiblingLead = Object.values(mutableRun.agents).find(
+            (candidateRecord) =>
+              candidateRecord.role === "master_lead" &&
+              !affectedAgentIds.has(candidateRecord.agentId) &&
+              !candidateRecord.archivedAt,
+          );
+          if (survivingSiblingLead) {
+            mutableRun.masterLeadAgentId = survivingSiblingLead.agentId;
           }
         }
       }

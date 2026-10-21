@@ -1,8 +1,10 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { TASK_CARD_KIND, TASK_CARD_VERSION, TaskCardSchema } from "./shared/card";
+import { InterruptedRunWarningModal } from "./client/components/run-warning-dialog";
 import { MonitorPanel } from "./client/monitor-panel";
 import { RunControlScreen } from "./client/run-control-screen";
+import { useUiStyles } from "./client/styles";
 import { TaskCard } from "./client/task-card";
 import { SlpSettingsScreen } from "./client/settings-screen";
 
@@ -10,14 +12,28 @@ import { SlpSettingsScreen } from "./client/settings-screen";
 const RUN_SCREEN_ID = "slp";
 const MONITOR_PANEL_ID = "slp-monitor";
 
-function SlpSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+function SlpSidebarItem({ currentScreen, openScreen, theme, layout }: PluginSidebarItemProps) {
+  const styles = useUiStyles(theme, layout.compact);
+  const isOrchestratorScreenOpen = currentScreen?.screenId === RUN_SCREEN_ID;
+
   return (
-    <SidebarRow
-      icon="Workflow"
-      active={currentScreen?.screenId === RUN_SCREEN_ID}
-      // openScreen replaces the current screen instead of stacking, so repeated clicks on the sidebar row never pile up screens.
-      onPress={() => openScreen({ screenId: RUN_SCREEN_ID })}
-    />
+    <>
+      <SidebarRow
+        icon="Workflow"
+        active={isOrchestratorScreenOpen}
+        // openScreen replaces the current screen instead of stacking, so repeated clicks on the sidebar row never pile up screens.
+        onPress={() => openScreen({ screenId: RUN_SCREEN_ID })}
+      />
+      {/* Render the unexpected-archive warning modal from the persistent sidebar item when the operator is on an agent chat screen. */}
+      {isOrchestratorScreenOpen ? null : (
+        <InterruptedRunWarningModal
+          styles={styles}
+          theme={theme}
+          onRestored={() => openScreen({ screenId: RUN_SCREEN_ID })}
+          onOpenOrchestratorScreen={() => openScreen({ screenId: RUN_SCREEN_ID })}
+        />
+      )}
+    </>
   );
 }
 

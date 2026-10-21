@@ -13,6 +13,16 @@ export const initializeProjectPromptsRpc = defineRpc({
   output: z.object({ directory: z.string(), peers: z.array(ProjectRoleSchema.pick({ role: true, name: true, description: true, model: true, thinking: true, sourcePath: true })) }),
 });
 
+// Provisions or updates the `slp-manager` skill inside the selected project repository.
+export const initSlpManagerSkillRpc = defineRpc({
+  name: "slp.skill.init",
+  input: z.object({ repoPath: z.string().trim().min(1) }),
+  output: z.object({
+    skillName: z.string(),
+    installedPaths: z.array(z.string()),
+  }),
+});
+
 // Compact row for the run picker; the full Run is only fetched for the selected run.
 // Carries only what the picker renders, so a 3 s poll of many runs does not ship whole task tables.
 export const RunSummarySchema = z.object({
@@ -26,6 +36,10 @@ export const RunSummarySchema = z.object({
   openGateCount: z.number(),
   supervisorAgentId: z.string(),
   supervisorWorkspaceId: z.string(),
+  // Exposes archive metadata in the 3 s summary poll so the UI can show the warning dialog and restore list immediately.
+  archivedAt: z.string().nullable().default(null),
+  archivedFromStatus: RunStatusSchema.nullable().default(null),
+  archiveWarningPending: z.boolean().default(false),
   updatedAt: z.string(),
 });
 export type RunSummary = z.infer<typeof RunSummarySchema>;
@@ -108,6 +122,27 @@ export const approveMainRpc = defineRpc({
 
 export const abortRunRpc = defineRpc({
   name: "slp.run.abort",
+  // When archiveOnly is true, the run is paused and stored in the archive list with all worktrees intact for later restoration.
+  input: z.object({ runId: z.string(), archiveOnly: z.boolean().optional() }),
+  output: z.object({ ok: z.boolean() }),
+});
+
+// Restores an archived or interrupted SLP run, re-attaching its worktrees and respawning its Supervisor, Leads, and Peers.
+export const restoreRunRpc = defineRpc({
+  name: "slp.run.restore",
+  input: z.object({ runId: z.string() }),
+  output: z.object({
+    ok: z.boolean(),
+    runId: z.string(),
+    supervisorAgentId: z.string(),
+    supervisorWorkspaceId: z.string(),
+    status: RunStatusSchema,
+  }),
+});
+
+// Clears the unexpected-archive warning banner/modal once the user chooses to keep the run in the archive list.
+export const dismissArchiveWarningRpc = defineRpc({
+  name: "slp.run.dismiss_archive_warning",
   input: z.object({ runId: z.string() }),
   output: z.object({ ok: z.boolean() }),
 });

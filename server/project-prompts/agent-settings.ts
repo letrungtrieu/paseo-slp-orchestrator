@@ -51,7 +51,14 @@ function isModelSupportedByBaseProvider(
   if (normalizedCandidateId === "default") return true;
 
   const inferredProviderFamily = inferModelProviderFamily(normalizedCandidateId);
-  if (inferredProviderFamily && inferredProviderFamily !== basePeerProviderId) {
+  // Kiro CLI exposes Claude model IDs (e.g. claude-sonnet-4.5) under the 'kiro' provider namespace.
+  const acceptsClaudeFamilyModels =
+    basePeerProviderId === "claude" || basePeerProviderId === "kiro" || basePeerProviderId === "kiro-cli";
+  if (
+    inferredProviderFamily &&
+    inferredProviderFamily !== basePeerProviderId &&
+    !(inferredProviderFamily === "claude" && acceptsClaudeFamilyModels)
+  ) {
     return false;
   }
 
@@ -181,8 +188,9 @@ export function resolveAgentSettings(
   // Missing legacy settings mean Full Access, matching the SLP global default.
   let permissionModeId = defaultPermissionModeId;
   if (selectedProviderId !== defaultProviderId) {
+    const defaultUnattendedMode = unattendedModeForProvider(defaultProviderId);
     // Native permission IDs differ by provider. Preserve Full Access intent without passing another provider's ID.
-    if (permissionModeId && permissionModeId !== unattendedModeForProvider(defaultProviderId)) {
+    if (permissionModeId && defaultUnattendedMode && permissionModeId !== defaultUnattendedMode) {
       throw new Error(`${modelSourcePath}: model switches to '${selectedProviderId}', but permission mode '${permissionModeId}' belongs to '${defaultProviderId}'. Select compatible provider permissions in SLP.`);
     }
     permissionModeId = unattendedModeForProvider(selectedProviderId);

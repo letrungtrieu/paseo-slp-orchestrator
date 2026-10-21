@@ -154,6 +154,11 @@ export const RunSchema = z.object({
   // Lead may consult domain experts before tasks exist; those reports belong to the run itself.
   peerReports: z.array(StoredPeerReportSchema).default([]),
   forkDegradedReason: z.string().nullable().default(null),
+  // Preserves when and from which active status a run was archived so SLP Orchestrator can restore it without losing worktrees.
+  archivedAt: z.string().nullable().default(null),
+  archivedFromStatus: RunStatusSchema.nullable().default(null),
+  // Triggers an immediate warning dialog in the UI when an active run is unexpectedly closed via Paseo's sidebar x button.
+  archiveWarningPending: z.boolean().default(false),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

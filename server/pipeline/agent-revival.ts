@@ -256,9 +256,12 @@ export async function recoverMasterLead(
     currentMasterLeadId && currentRun.mailbox.some((queuedMessage) => queuedMessage.toAgentId === currentMasterLeadId),
   );
   // Do not auto-spawn a Master Lead before initial delegation or after it was retired with no remaining obligation.
+  const hasInferredMasterLeadObligation =
+    isMasterLeadObligationActive(currentRun, masterLeadRecord?.awaitingTool ?? null) ||
+    inferMasterLeadObligation(currentRun, masterLeadRecord?.awaitingTool ?? null) !== null;
   if (
     !hasQueuedMasterLeadMail
-    && !isMasterLeadObligationActive(currentRun, masterLeadRecord?.awaitingTool ?? null)
+    && !hasInferredMasterLeadObligation
     && (currentRun.status === "delegating" || Boolean(masterLeadRecord))
   ) {
     return false;

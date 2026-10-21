@@ -65,7 +65,13 @@ export function RunDetail({ styles, theme, selectedRunId, onOpenSupervisor }: Ru
         </View>
       ) : null}
       {/* Controls receive the whole run so gate and status checks use the same snapshot as the task rows below. */}
-      <RunControls styles={styles} theme={theme} run={selectedRun} readOnly={isLegacyRun} />
+      <RunControls
+        styles={styles}
+        theme={theme}
+        run={selectedRun}
+        readOnly={isLegacyRun}
+        onRestored={onOpenSupervisor}
+      />
       {!isLegacyRun && dynamicPipelines.length > 0 ? (
         <PipelineDetail styles={styles} theme={theme} runId={selectedRun.id} pipelines={dynamicPipelines} />
       ) : isLegacyRun ? (

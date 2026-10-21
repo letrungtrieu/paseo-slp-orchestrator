@@ -7,23 +7,28 @@ import {
   approveGateRpc,
   approvePipelineGateRpc,
   approveMainRpc,
+  dismissArchiveWarningRpc,
   getRunRpc,
   listRunsRpc,
+  restoreRunRpc,
   resumeTaskRpc,
   setRunModeRpc,
   startRunRpc,
   tailLogRpc,
   initializeProjectPromptsRpc,
+  initSlpManagerSkillRpc,
   type RunSummary,
 } from "../shared/rpc";
 import type { Run } from "../shared/state";
 import type { PipelineContext } from "./pipeline/context";
 import { abortRun, approveMain, approveRunGate, startRun } from "./pipeline/run-lifecycle";
+import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
 import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
 import { join } from "node:path";
 import { roleRunDefaults } from "./runtime/run-defaults";
+import { ensureSlpManagerSkill } from "./skills/slp-manager-skill";
 
 function summarizeRun(run: Run): RunSummary {
   // Counts are derived on demand so the list follows the dynamic pipeline state after each stage handoff.
@@ -48,6 +53,9 @@ function summarizeRun(run: Run): RunSummary {
       : tasks.filter((task) => task.gate).length + (run.gate ? 1 : 0),
     supervisorAgentId: run.supervisorAgentId,
     supervisorWorkspaceId: run.supervisorWorkspaceId,
+    archivedAt: run.archivedAt ?? null,
+    archivedFromStatus: run.archivedFromStatus ?? null,
+    archiveWarningPending: Boolean(run.archiveWarningPending),
     updatedAt: run.updatedAt,
   };
 }
@@ -60,6 +68,13 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     // Avoid sending workflow bodies to a form that only displays discovery metadata.
     return { directory: join(repoPath, ".slp"), peers: configuration.peers.map(({ role, name, description, model, thinking, sourcePath }) =>
       ({ role, name, description, model, thinking, sourcePath })) };
+  });
+
+  server.handle(initSlpManagerSkillRpc, async ({ repoPath }, { paseo }) => {
+    ctx.holder.capture(paseo);
+    // Validate the selected project before writing project-scoped skill files into its root.
+    await assertGitRepository(repoPath);
+    return ensureSlpManagerSkill(repoPath);
   });
   // Handlers receive the SDK instance, which the entry point never gets, so each one parks it in the holder for the sweeper and pipeline.
   server.handle(listRunsRpc, (_input, { paseo }) => {
@@ -136,10 +151,26 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     return { ok: true, message: await approveMain(ctx, runId) };
   });
 
-  // Aborting archives agents through the SDK, so the holder must be populated first.
-  server.handle(abortRunRpc, async ({ runId }, { paseo }) => {
+  // Aborting or archiving closes agents through the SDK, so the holder must be populated first.
+  server.handle(abortRunRpc, async ({ runId, archiveOnly }, { paseo }) => {
     ctx.holder.capture(paseo);
-    await abortRun(ctx, runId);
+    if (archiveOnly) {
+      await archiveRunSafely(ctx, runId);
+    } else {
+      await abortRun(ctx, runId);
+    }
+    return { ok: true };
+  });
+
+  // Restoring re-opens the run's workspaces and respawns its Supervisor, Leads, and active stage Peers.
+  server.handle(restoreRunRpc, async ({ runId }, { paseo }) => {
+    ctx.holder.capture(paseo);
+    return restoreRun(ctx, runId);
+  });
+
+  server.handle(dismissArchiveWarningRpc, ({ runId }, { paseo }) => {
+    ctx.holder.capture(paseo);
+    dismissArchiveWarning(ctx, runId);
     return { ok: true };
   });
 

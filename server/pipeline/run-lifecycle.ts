@@ -113,6 +113,9 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     supervisorReport: null,
     peerReports: [],
     forkDegradedReason: null,
+    archivedAt: null,
+    archivedFromStatus: null,
+    archiveWarningPending: false,
     createdAt: now,
     updatedAt: now,
   });
@@ -470,6 +473,9 @@ export async function abortRun(ctx: PipelineContext, runId: string): Promise<voi
   // Mark the run closed before any SDK call so an in-flight stage creator sees the abort and stops.
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.status = "aborted";
+    mutableRun.archivedAt = null;
+    mutableRun.archivedFromStatus = null;
+    mutableRun.archiveWarningPending = false;
     mutableRun.mailbox = [];
     for (const agent of Object.values(mutableRun.agents)) {
       agent.awaitingTool = null;

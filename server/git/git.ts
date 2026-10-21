@@ -25,6 +25,14 @@ export async function assertGitRepository(repoPath: string): Promise<void> {
   if (insideWorkTree !== "true") throw new Error(`${repoPath} is not a git work tree`);
 }
 
+// Check whether a local branch ref still exists in refs/heads/ so worktree restoration can re-attach it.
+export async function localBranchExists(repoPath: string, branchName: string): Promise<boolean> {
+  if (!branchName.trim()) return false;
+  return runGit(repoPath, ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`])
+    .then(() => true)
+    .catch(() => false);
+}
+
 // Parses `git status --porcelain=v1 -z`: "XY path\0", where renames add one extra "orig\0" entry.
 function parsePorcelainPaths(porcelainOutput: string): string[] {
   const changedPaths: string[] = [];
@@ -104,11 +112,13 @@ export async function configureLocalOnlyPipelineBranch(
 export interface WorktreeAndBranchCleanupOptions {
   worktreePath?: string | null;
   branchName?: string | null;
+  // When true, detach HEAD in the worktree instead of deleting its directory so an active Lead session in that cwd stays alive.
+  keepWorktreeDirectory?: boolean;
   protectedWorktrees?: readonly string[];
   protectedBranches?: readonly string[];
 }
 
-// Unregister a temporary pipeline worktree before deleting its local branch because Git refuses to delete a branch checked out in an active worktree.
+// Unregister or detach a temporary pipeline worktree before deleting its local branch because Git refuses to delete a checked-out branch.
 export async function removeWorktreeAndDeleteBranch(
   repoPath: string,
   cleanupOptions: WorktreeAndBranchCleanupOptions,
@@ -118,9 +128,14 @@ export async function removeWorktreeAndDeleteBranch(
   );
   const targetWorktreePath = cleanupOptions.worktreePath?.trim() || null;
   if (targetWorktreePath && !protectedWorktreeSet.has(targetWorktreePath)) {
-    // Force-remove the worktree checkout if Paseo has not already removed it, then prune stale git worktree administrative entries.
-    await runGit(repoPath, ["worktree", "remove", "--force", targetWorktreePath]).catch(() => undefined);
-    await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+    if (cleanupOptions.keepWorktreeDirectory) {
+      // Detach HEAD in place so the local slp/* branch can be deleted without destroying the active Lead's working directory.
+      await runGit(targetWorktreePath, ["checkout", "--detach", "HEAD"]).catch(() => undefined);
+    } else {
+      // Force-remove the worktree checkout if Paseo has not already removed it, then prune stale git worktree administrative entries.
+      await runGit(repoPath, ["worktree", "remove", "--force", targetWorktreePath]).catch(() => undefined);
+      await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+    }
   }
   const protectedBranchSet = new Set(
     (cleanupOptions.protectedBranches ?? []).filter((candidateBranch): candidateBranch is string => Boolean(candidateBranch)),

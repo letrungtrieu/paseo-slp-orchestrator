@@ -5,8 +5,10 @@ import {
   approveGateRpc,
   approvePipelineGateRpc,
   approveMainRpc,
+  dismissArchiveWarningRpc,
   getRunRpc,
   listRunsRpc,
+  restoreRunRpc,
   resumeTaskRpc,
   setRunModeRpc,
   startRunRpc,
@@ -64,6 +66,8 @@ export function useRunActions() {
   const resumeTask = useRpc(resumeTaskRpc);
   const approveMain = useRpc(approveMainRpc);
   const abortRun = useRpc(abortRunRpc);
+  const restoreRun = useRpc(restoreRunRpc);
+  const dismissArchiveWarning = useRpc(dismissArchiveWarningRpc);
   // Invalidating the shared ["slp"] prefix is deliberately coarse: a gate approval can change the list badge, the task table and the log in one go.
   const refreshRuns = () => queryClient.invalidateQueries({ queryKey: ["slp"] });
 
@@ -75,6 +79,8 @@ export function useRunActions() {
     resumeTask: useMutation({ mutationFn: resumeTask, onSuccess: refreshRuns }),
     approveMain: useMutation({ mutationFn: approveMain, onSuccess: refreshRuns }),
     abortRun: useMutation({ mutationFn: abortRun, onSuccess: refreshRuns }),
+    restoreRun: useMutation({ mutationFn: restoreRun, onSuccess: refreshRuns }),
+    dismissArchiveWarning: useMutation({ mutationFn: dismissArchiveWarning, onSuccess: refreshRuns }),
   };
 }
 

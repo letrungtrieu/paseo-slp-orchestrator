@@ -297,5 +297,19 @@ export function escalateStage(ctx: PipelineContext, caller: BusCaller, reason: s
     return submitStageReport(ctx, caller, { summary: reason, findings: [], status: "blocked" });
   }
   pausePipeline(ctx, run.id, pipeline.id, `${stage.name}: ${reason}`);
+  // Notify the Supervisor when a Lead escalates a stage so the Supervisor has immediate visibility into blockers.
+  if (run.supervisorAgentId && run.agents[run.supervisorAgentId] && !run.agents[run.supervisorAgentId].archivedAt) {
+    ctx.mailbox.enqueue(
+      run.id,
+      run.supervisorAgentId,
+      `Lead (${caller.agentId}) escalated pipeline '${pipeline.name}' (${pipeline.id}) at stage '${stage.name}':\n${reason}\nInspect slp_get_pipeline({ pipelineId: "${pipeline.id}" }) or wait for the Lead to resume with slp_resume_pipeline.`,
+      {
+        taskId: null,
+        awaitTool: null,
+        from: caller.agentId,
+        summary: `escalation: ${pipeline.name}/${stage.name}`,
+      },
+    );
+  }
   return "Stage escalated. End your turn until a recovery decision arrives.";
 }

@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { Text, View } from "react-native";
 import { usePaseo } from "@getpaseo/plugin/client";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { UiStyles } from "../styles";
 import { ActionButton } from "./action-button";
@@ -22,13 +22,25 @@ export function RepositoryFolderPicker({
   onSelectRepositoryPath,
 }: RepositoryFolderPickerProps) {
   const paseo = usePaseo();
+  const queryClient = useQueryClient();
   const projectQuery = useQuery({
     // A stable key avoids another daemon request when only the run title or mode changes.
     queryKey: ["slp", "paseo-projects"],
     queryFn: () => paseo.projects.list(),
-    // The explicit refresh button is the user's signal that they opened another folder in Paseo.
-    staleTime: 60_000,
+    // A cached list hid projects added after the form first rendered, so always revalidate when it mounts.
+    staleTime: 0,
+    refetchOnMount: "always",
   });
+
+  // Newly opened Paseo projects were invisible until a manual refresh; the daemon pushes
+  // project.update events, so invalidating here keeps the options current without polling.
+  useEffect(
+    () =>
+      paseo.projects.subscribe(() => {
+        void queryClient.invalidateQueries({ queryKey: ["slp", "paseo-projects"] });
+      }),
+    [paseo, queryClient],
+  );
 
   // Runs require git, so non-git folders that Paseo remembers are not offered here.
   const repositoryOptions = useMemo(

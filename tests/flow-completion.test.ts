@@ -343,4 +343,40 @@ describe("pipeline completion and integration", () => {
     }).trim();
     expect(remainingLocalSlpBranches).toBe("");
   });
+
+  it("keeps a Lead's dedicated workspace open during slp_finalize_pipeline until slp_report finishes and flushes the Supervisor report immediately", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
+    const leadAgentId = flow.run(runId).masterLeadAgentId;
+    const pipelineWorkspaceId = flow.pipeline(runId, pipelineId)!.workspaceId!;
+
+    commitPipelineWork(flow, runId, pipelineId);
+    await completePipeline(flow, runId, pipelineId);
+    await flow.deliverMail(runId);
+
+    // Record the Lead's awaitingSince timestamp before slp_finalize_pipeline runs.
+    const finalizeAwaitingSince = flow.run(runId).agents[leadAgentId].awaitingSince;
+    expect(finalizeAwaitingSince).toBeTruthy();
+
+    const finalizeResponse = await flow.callAs(leadAgentId, "slp_finalize_pipeline", {
+      pipelineId,
+      summary: "Pipeline integrated cleanly from Lead worktree.",
+    });
+    expect(finalizeResponse.isError).toBe(false);
+
+    // The Lead's workspace must NOT be archived mid-turn during slp_finalize_pipeline so Paseo does not cascade-archive the Lead before slp_report.
+    expect(flow.paseo.archivedWorkspaceIds).not.toContain(pipelineWorkspaceId);
+    expect(flow.run(runId).agents[leadAgentId].awaitingTool).toBe("slp_report");
+    expect(flow.run(runId).agents[leadAgentId].awaitingSince).toBe(finalizeAwaitingSince);
+
+    // Calling slp_report queues the Supervisor's notification and delivering mail stamps slp_present_to_manager on Supervisor.
+    const reportResponse = await flow.callAs(leadAgentId, "slp_report", {
+      summary: "All tasks integrated and verified for Supervisor.",
+    });
+    expect(reportResponse.isError).toBe(false);
+    const supervisorId = flow.run(runId).supervisorAgentId;
+    expect(flow.mailTo(runId, supervisorId).at(-1)?.awaitTool).toBe("slp_present_to_manager");
+    await flow.deliverMail(runId);
+    expect(flow.run(runId).agents[supervisorId].awaitingTool).toBe("slp_present_to_manager");
+  });
 });

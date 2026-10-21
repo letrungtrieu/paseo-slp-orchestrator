@@ -155,7 +155,7 @@ function RoleProviderField({
             label="Permission"
             value={selectedPermissionModeId}
             options={permissionSelectOptions}
-            placeholder={permissionSelectOptions.length === 0 ? "Provider default" : "Full Access"}
+            placeholder={permissionSelectOptions.length === 0 ? "Auto Accept (Enabled)" : "Full Access"}
             disabled={isLoading || permissionSelectOptions.length === 0}
             onValueChange={(permissionModeId) =>
               onSelectionChange(role, { ...selection, permissionModeId })

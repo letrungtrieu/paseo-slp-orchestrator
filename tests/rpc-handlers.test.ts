@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it } from "vitest";
 import { registerRpcHandlers } from "../server/rpc-handlers";
 import {
-  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, getRunRpc, listRunsRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc,
+  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, dismissArchiveWarningRpc, getRunRpc, listRunsRpc, restoreRunRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc,
 } from "../shared/rpc";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import { DEFAULT_PIPELINE, approveCurrentStage, delegateToLead, reportPeer, startedRunWithPipeline, eventually } from "./helpers/flow-steps";
@@ -29,12 +29,22 @@ async function rpcRun(mode: "FULL_AUTO" | "STEP_BY_STEP_DEBUG" = "FULL_AUTO") {
 describe("RPC registration", () => {
   it("registers one handler per shared RPC contract", async () => {
     const { rpc } = await rpcRun();
-    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, tailLogRpc, initializeProjectPromptsRpc].map((contract) => contract.name).sort();
+    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, restoreRunRpc, dismissArchiveWarningRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc].map((contract) => contract.name).sort();
     expect(rpc.registeredNames()).toEqual(expectedNames);
   });
 });
 
 describe("run RPCs", () => {
+  it("initializes the slp-manager skill inside the selected project repository via RPC", async () => {
+    const { flow, rpc } = await rpcRun();
+    const skillResult = await rpc.call<{ skillName: string; installedPaths: string[] }>(initSlpManagerSkillRpc, { repoPath: flow.repoPath });
+    expect(skillResult.skillName).toBe("slp-manager");
+    expect(skillResult.installedPaths).toEqual([
+      `${flow.repoPath}/.agents/skills/slp-manager/SKILL.md`,
+      `${flow.repoPath}/.claude/skills/slp-manager/SKILL.md`,
+    ]);
+  });
+
   it("initializes role workflows before starting agents", async () => {
     const { flow, rpc } = await rpcRun();
     const configuration = await rpc.call<{ directory: string; peers: Array<{ role: string }> }>(initializeProjectPromptsRpc, { repoPath: flow.repoPath });
@@ -96,6 +106,49 @@ describe("run RPCs", () => {
     const runId = await flow.startRun();
     await rpc.call(abortRunRpc, { runId });
     expect(flow.run(runId).status).toBe("aborted");
+  });
+
+  it("preserves worktrees when archived via x-button or archiveOnly=true, exposes archiveWarningPending, and restores the run via restoreRunRpc", async () => {
+    const { flow, rpc } = await rpcRun();
+    const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
+    const initialPipeline = flow.pipeline(runId, pipelineId)!;
+    const initialSupervisorId = flow.run(runId).supervisorAgentId;
+
+    // Simulate accidental x-button click archiving the Supervisor while the pipeline is running.
+    await flow.gateway.archive(initialSupervisorId);
+    const { handleSupervisorArchived } = await import("../server/pipeline/run-lifecycle");
+    await handleSupervisorArchived(flow.ctx, runId);
+
+    const archivedRun = flow.run(runId);
+    expect(archivedRun.status).toBe("aborted");
+    expect(archivedRun.archivedAt).toBeTruthy();
+    expect(archivedRun.archivedFromStatus).toBe("running");
+    expect(archivedRun.archiveWarningPending).toBe(true);
+    expect(flow.pipeline(runId, pipelineId)!.status).toBe("paused");
+    // Owned pipeline worktrees must NOT be archived/deleted when the Supervisor is closed via the x button.
+    expect(flow.paseo.archivedWorkspaceIds).not.toContain(initialPipeline.workspaceId);
+
+    // Dismissing the archive warning keeps the run in the archive list for later restoration.
+    await rpc.call(dismissArchiveWarningRpc, { runId });
+    expect(flow.run(runId).archiveWarningPending).toBe(false);
+
+    // Restoring the run respawns the Supervisor, Lead, and stage Peers and resumes pipeline execution.
+    const restoreResult = await rpc.call<{
+      ok: boolean;
+      runId: string;
+      supervisorAgentId: string;
+      status: string;
+    }>(restoreRunRpc, { runId });
+    expect(restoreResult.ok).toBe(true);
+    expect(restoreResult.status).toBe("running");
+    expect(restoreResult.supervisorAgentId).not.toBe(initialSupervisorId);
+
+    const restoredRun = flow.run(runId);
+    expect(restoredRun.status).toBe("running");
+    expect(restoredRun.archivedAt).toBeNull();
+    expect(restoredRun.archiveWarningPending).toBe(false);
+    expect(flow.pipeline(runId, pipelineId)!.status).toBe("running");
+    expect(flow.pipeline(runId, pipelineId)!.stages[0].status).toBe("running");
   });
 
   it("tails the SQLite comm log of a run", async () => {

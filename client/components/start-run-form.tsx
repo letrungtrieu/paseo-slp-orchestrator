@@ -11,6 +11,7 @@ import { ActionButton } from "./action-button";
 import { LabeledInput } from "./labeled-input";
 import { AgentDefaultSettings } from "./agent-default-settings";
 import { RepositoryFolderPicker } from "./repository-folder-picker";
+import { SlpSkillInitializer } from "./slp-skill-initializer";
 import { resolvePermissionModeId, resolveProviderModel, resolveThinkingOptionId } from "../models/provider-selection";
 
 interface StartRunFormProps {
@@ -101,6 +102,8 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
             : projectPrompts.isError ? "Project role workflows need correction" : "Loading project role workflows..."}</Text>
           <ActionButton styles={styles} label={projectPrompts.isFetching ? "Loading workflows..." : "Reload role workflows"}
             disabled={projectPrompts.isFetching} onPress={() => { void projectPrompts.refetch(); }} />
+          {/* Project-scoped skill initialization appears only after a repository is selected. */}
+          <SlpSkillInitializer styles={styles} repoPath={repoPath} />
           {projectPrompts.error ? <Text style={styles.dangerText}>{describeRpcError(projectPrompts.error)}</Text> : null}
         </View>
       ) : null}

@@ -27,16 +27,14 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   const agentRecord = run.agents[recipientId];
   // Persisted archive state wins over a stale SDK directory entry after a restart.
   if (!agentRecord || agentRecord.archivedAt) return false;
+  // Supervisor and unarchived Leads coordinate across planning, paused stages, and final integration regardless of stage pointers.
+  if (agentRecord.role === "supervisor" || agentRecord.role === "master_lead") return true;
   if (!agentRecord.pipelineId && !agentRecord.stageId) return true;
   if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline || run.status !== "running") return false;
   // A completed pipeline's Lead and Peers stay active to run slp_finalize_pipeline and answer merge-conflict questions.
   if (pipeline.status === "completed" && !pipeline.gate) {
-    return true;
-  }
-  // An integrated pipeline's Lead stays active while sibling pipelines are still running so it can answer cross-pipeline conflict questions.
-  if (pipeline.status === "integrated" && agentRecord.role === "master_lead") {
     return true;
   }
   const currentStage = pipeline.stages[pipeline.currentStageIndex];

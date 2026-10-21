@@ -5,42 +5,39 @@ import type { Run } from "../../shared/state";
 import type { UiStyles } from "../styles";
 import { describeRpcError, useRunActions } from "../use-run";
 import { ActionButton } from "./action-button";
+import { ConfirmStopRunModal } from "./run-warning-dialog";
 
 interface RunControlsProps {
   styles: UiStyles;
   theme: PluginTheme;
   run: Run;
   readOnly?: boolean;
+  onRestored?: (supervisorAgentId: string) => void;
 }
 
-export function RunControls({ styles, theme, run, readOnly = false }: RunControlsProps) {
-  // Each action keeps its own pending/error state, so retrying a blocked merge never disables or mislabels the abort button.
-  const { approveGate, approveMain, abortRun } = useRunActions();
-  // Abort is destructive and irreversible, so the first press only arms it.
-  const [abortArmed, setAbortArmed] = useState(false);
+export function RunControls({ styles, theme, run, readOnly = false, onRestored }: RunControlsProps) {
+  // Each action keeps its own pending/error state, so retrying a blocked merge never disables or mislabels the stop button.
+  const { approveGate, approveMain, abortRun, restoreRun } = useRunActions();
+  // Stopping a running SLP session opens a warning dialog so an accidental tap cannot wipe active worktrees.
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
 
   // Only the first error is shown: the buttons are mutually exclusive in practice and several stacked messages would be noise.
   const controlErrorMessage = describeRpcError(
-    approveGate.error ?? approveMain.error ?? abortRun.error,
+    approveGate.error ?? approveMain.error ?? abortRun.error ?? restoreRun.error,
   );
   // Runs merge into baseBranch automatically on Supervisor acceptance; this fallback only appears if a dirty base checkout blocked auto-merge.
   const canApproveMain = run.status === "awaiting_user";
   const isRunFinished = run.status === "completed" || run.status === "aborted";
+  const canRestoreRun = run.status === "aborted" && !readOnly;
 
   // Legacy snapshots are historical evidence; exposing their old controls could restart retired work.
   if (readOnly) {
     return <Text style={styles.mutedText}>Legacy task engine · read-only</Text>;
   }
 
-  // Two-step abort: a mistap on a phone must not archive every agent and discard the run, so the second press confirms.
-  const pressAbort = () => {
-    if (!abortArmed) {
-      setAbortArmed(true);
-      return;
-    }
-    // Disarmed before mutating so a slow request cannot leave the button in the confirm state.
-    setAbortArmed(false);
-    abortRun.mutate({ runId: run.id });
+  const handleRestoreRun = async () => {
+    const restoredPayload = await restoreRun.mutateAsync({ runId: run.id });
+    onRestored?.(restoredPayload.supervisorAgentId);
   };
 
   return (
@@ -73,23 +70,40 @@ export function RunControls({ styles, theme, run, readOnly = false }: RunControl
             onPress={() => approveMain.mutate({ runId: run.id })}
           />
         ) : null}
-        {/* Finished runs hide Abort: there is nothing left to archive and the merge cannot be undone anyway. */}
+        {canRestoreRun ? (
+          <ActionButton
+            styles={styles}
+            tone="primary"
+            label={restoreRun.isPending ? "Đang Restore..." : "Khôi phục (Restore)"}
+            accessibilityLabel={`Restore archived SLP run ${run.title}`}
+            disabled={restoreRun.isPending}
+            onPress={() => {
+              void handleRestoreRun();
+            }}
+          />
+        ) : null}
+        {/* Active runs open the warning dialog before stopping so the user can archive safely or confirm cleanup. */}
         {isRunFinished ? null : (
           <ActionButton
             styles={styles}
             tone="danger"
-            label={abortArmed ? "Press again to abort" : "Abort"}
-            accessibilityLabel={abortArmed ? "Confirm abort run" : "Abort run"}
+            label="Dừng / Archive..."
+            accessibilityLabel="Open warning dialog to stop or archive run"
             disabled={abortRun.isPending}
-            onPress={pressAbort}
+            onPress={() => setStopDialogOpen(true)}
           />
         )}
-        {abortArmed ? (
-          // Cancel appears only while armed, giving the operator an explicit way out of the confirm state. *
-          <ActionButton styles={styles} label="Cancel" onPress={() => setAbortArmed(false)} />
-        ) : null}
       </View>
       {controlErrorMessage ? <Text style={styles.dangerText}>{controlErrorMessage}</Text> : null}
+      <ConfirmStopRunModal
+        styles={styles}
+        theme={theme}
+        open={stopDialogOpen}
+        onOpenChange={setStopDialogOpen}
+        runId={run.id}
+        runTitle={run.title}
+        runStatus={run.status}
+      />
     </View>
   );
 }

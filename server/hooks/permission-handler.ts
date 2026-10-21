@@ -4,6 +4,7 @@ import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/
 import type { AgentRecord, Run } from "../../shared/state";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
+import { isKiroProvider } from "../runtime/agent-gateway-helpers";
 
 // requestIds already answered; a second answer to a resolved request would fail in the SDK
 const answeredRequestIds = new Set<string>();
@@ -70,19 +71,36 @@ function buildResponse(
   decision: ReturnType<typeof decidePermission>,
 ): AgentPermissionResponse {
   if (decision.behavior === "deny") return { behavior: "deny", message: decision.message };
-  // plan approvals carry an explicit "implement" action id on providers that offer one
-  const implementAction = request.actions?.find((action) => action.intent === "implement");
-  return implementAction ? { behavior: "allow", selectedActionId: implementAction.id } : { behavior: "allow" };
+  // Plan approvals carry an explicit "implement" action id; ACP providers such as kiro-cli also require
+  // selectedActionId when chooser options or non-standard allow option kinds are returned.
+  const preferredAllowAction =
+    request.actions?.find((action) => action.intent === "implement") ??
+    request.actions?.find((action) => action.behavior === "allow");
+  return preferredAllowAction
+    ? { behavior: "allow", selectedActionId: preferredAllowAction.id }
+    : { behavior: "allow" };
 }
 
 export async function handlePermissionRequest(
   ctx: PipelineContext,
   agentId: string,
   request: AgentPermissionRequest,
+  agentProvider?: string,
 ): Promise<void> {
+  if (answeredRequestIds.has(request.id)) return;
   const lookup = ctx.store.findAgent(agentId);
-  // The event hook and the sweeper can race on one request; remembering the id makes the second caller a no-op.
-  if (!lookup || answeredRequestIds.has(request.id)) return;
+  if (!lookup) {
+    // Standalone kiro-cli sessions outside an SLP run also auto-accept permission prompts when ACP chooser prompts fire.
+    if (!isKiroProvider(agentProvider ?? request.provider)) return;
+    answeredRequestIds.add(request.id);
+    try {
+      await ctx.gateway.respondToPermission(agentId, request.id, buildResponse(request, { behavior: "allow" }));
+    } catch (respondError) {
+      answeredRequestIds.delete(request.id);
+      console.error("[slp] kiro-cli auto-accept permission response failed", respondError);
+    }
+    return;
+  }
   const { run, agentRecord } = lookup;
   // An archived SDK session has no work left to authorize; leaving it unanswered avoids reviving it.
   if (agentRecord.archivedAt) return;

@@ -250,6 +250,11 @@ export async function finalizePipeline(
       mutablePipeline.pausedReason = null;
       mutablePipeline.gate = null;
       mutablePipeline.updatedAt = integratedAt;
+      // Preserve the active turn's obligation timestamp before clearing pipeline-scoped obligations below.
+      const previousPrimaryLeadAwaitingSince =
+        mutableRun.agents[mutableRun.masterLeadAgentId]?.awaitingSince ??
+        mutableRun.agents[caller.agentId]?.awaitingSince ??
+        null;
       // Clear any remaining obligation and queued mail on this pipeline's agents now that integration succeeded.
       for (const agentRecord of Object.values(mutableRun.agents)) {
         if (agentRecord.pipelineId !== pipelineId) continue;
@@ -272,13 +277,22 @@ export async function finalizePipeline(
         !stillPlanning &&
         Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
       if (mutableRun.status === "running" && allIntegrated) {
+        // If the original primary Lead was archived earlier, promote the calling unarchived Lead to deliver slp_report.
+        const currentPrimaryLead = mutableRun.agents[mutableRun.masterLeadAgentId];
+        if (
+          (!currentPrimaryLead || currentPrimaryLead.archivedAt) &&
+          mutableRun.agents[caller.agentId]?.role === "master_lead" &&
+          !mutableRun.agents[caller.agentId]?.archivedAt
+        ) {
+          mutableRun.masterLeadAgentId = caller.agentId;
+        }
         const primaryLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
         if (primaryLeadRecord) {
-          // Reset the primary Lead's pipeline pointer and point its worktreePath to the integration checkout for UAT/reporting.
+          // Detach the completed pipeline pointer while preserving the Lead's live workspace for UAT/reporting.
           primaryLeadRecord.pipelineId = null;
           primaryLeadRecord.stageId = null;
-          primaryLeadRecord.worktreePath = mutableRun.devCwd;
-          primaryLeadRecord.workspaceId = mutableRun.devWorkspaceId;
+          primaryLeadRecord.worktreePath = primaryLeadRecord.worktreePath || mutableRun.devCwd;
+          primaryLeadRecord.workspaceId = primaryLeadRecord.workspaceId || mutableRun.devWorkspaceId;
         }
         if (caller.agentId !== mutableRun.masterLeadAgentId) {
           // Attach the consolidated summaries from all Leads and wake the primary Lead to run UAT or report to Supervisor.
@@ -288,7 +302,7 @@ export async function finalizePipeline(
         } else if (primaryLeadRecord) {
           // Stamp slp_report directly on the calling primary Lead while keeping its active turn timestamp so turn_ended nudges if omitted.
           primaryLeadRecord.awaitingTool = "slp_report";
-          primaryLeadRecord.awaitingSince = primaryLeadRecord.awaitingSince ?? integratedAt;
+          primaryLeadRecord.awaitingSince = previousPrimaryLeadAwaitingSince ?? integratedAt;
           primaryLeadRecord.nudges = 0;
         }
       }
@@ -301,6 +315,7 @@ export async function finalizePipeline(
       summary: `${pipeline.name}: ${mergedCommit}`,
       outcome: "delivered",
     });
-    return integratedResult(ctx.store.require(runId).pipelines[pipelineId], allIntegrated, caller.agentId === initialRun.masterLeadAgentId);
+    const finalRunSnapshot = ctx.store.require(runId);
+    return integratedResult(finalRunSnapshot.pipelines[pipelineId], allIntegrated, caller.agentId === finalRunSnapshot.masterLeadAgentId);
   });
 }

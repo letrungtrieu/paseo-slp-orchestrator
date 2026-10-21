@@ -10,6 +10,7 @@ import { handleAgentArchived } from "../pipeline/run-lifecycle";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { nudgeReminder } from "../prompts/messages";
 import type { AgentLiveStatus } from "../runtime/agent-gateway";
+import { defaultFeatureValuesForProvider } from "../runtime/agent-gateway-helpers";
 import { handlePermissionRequest } from "./permission-handler";
 import { stageMail } from "../pipeline/stage-mail";
 
@@ -153,8 +154,16 @@ function nudgeIfToolMissing(
   const expectedStageTool = stageObligationFor(run, agentRecord);
   // A stale legacy obligation must never nudge a dynamic cohort for the wrong protocol step.
   if (expectedStageTool && agentRecord.awaitingTool !== expectedStageTool) return false;
+  // slp_report is stamped inside slp_finalize_pipeline during an already-running Lead turn, so turn_ended must still nudge if omitted.
+  const stampedWithinActiveTurn = ownsMasterLeadObligation && agentRecord.awaitingTool === "slp_report";
   // a turn that began before the request was sent is not the agent's reply to it
-  if (!owesTool || (!recoveredFromPoll && !turnStartedAt) || (!recoveredFromPoll && turnStartedAt! < (agentRecord.awaitingSince ?? ""))) return false;
+  if (
+    !owesTool ||
+    (!recoveredFromPoll && !turnStartedAt) ||
+    (!recoveredFromPoll && !stampedWithinActiveTurn && turnStartedAt! < (agentRecord.awaitingSince ?? ""))
+  ) {
+    return false;
+  }
   // After NUDGE_LIMIT reminders, a stage participant pauses for Lead review while a crashed or Master Lead session is retired for revival.
   if (agentRecord.nudges >= NUDGE_LIMIT) {
     const reason = `${agentRecord.projectRole ?? agentRecord.role} did not call ${agentRecord.awaitingTool}`;
@@ -242,7 +251,7 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
     // Answered inside the event for low latency; the sweeper repeats this for events that were never delivered.
     server.on("agent.permission_requested", async (event, hookContext) => {
       ctx.holder.capture(hookContext.paseo);
-      await handlePermissionRequest(ctx, event.agent.id, event.request);
+      await handlePermissionRequest(ctx, event.agent.id, event.request, event.agent.provider);
     }),
     // Archiving any parent agent (Supervisor, Master Lead or Forked Lead) recursively archives its child sessions.
     server.on("agent.archived", async (event, hookContext) => {
@@ -253,6 +262,26 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
     }),
   ];
   if (typeof server.before === "function") {
+    // Always enable Paseo's ACP `auto_accept` feature toggle ("Auto accept permission prompts") when creating kiro-cli or ACP agents.
+    removers.push(
+      server.before("agent.create", async ({ request: agentCreateRequest }, hookContext) => {
+        ctx.holder.capture(hookContext.paseo);
+        const nextFeatureValues = defaultFeatureValuesForProvider(
+          agentCreateRequest.config.provider,
+          agentCreateRequest.config.featureValues,
+        );
+        if (nextFeatureValues === agentCreateRequest.config.featureValues) {
+          return undefined;
+        }
+        return {
+          ...agentCreateRequest,
+          config: {
+            ...agentCreateRequest.config,
+            featureValues: nextFeatureValues,
+          },
+        };
+      }),
+    );
     // Plugin/CLI providers such as Antigravity ignore per-session HTTP mcpServers and spawn a stdio bridge
     // from ~/.gemini/config/mcp_config.json instead; inject the agent's private bus token into its process env.
     removers.push(

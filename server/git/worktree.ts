@@ -1,11 +1,39 @@
 // Paseo workspace/worktree creation for a run: the Supervisor's main checkout, the integration
 // ("dev") worktree and one hidden worktree per task.
+import { existsSync } from "node:fs";
 import type { Run, Task } from "../../shared/state";
 import type { PaseoApi } from "../runtime/paseo-holder";
+import { configureLocalOnlyPipelineBranch, localBranchExists, runGit } from "./git";
 
 export interface CreatedWorkspace {
   workspaceId: string;
   cwd: string;
+}
+
+// Re-attaches a git worktree from its local slp/* branch if Paseo's workspace archive removed the directory, then opens it in Paseo.
+export async function reopenOrRestoreWorktreeWorkspace(
+  paseo: PaseoApi,
+  repoPath: string,
+  integrationBranch: string,
+  worktreePath: string,
+  branchName: string | null,
+): Promise<CreatedWorkspace> {
+  if (repoPath && existsSync(repoPath) && worktreePath && !existsSync(worktreePath) && branchName) {
+    await runGit(repoPath, ["worktree", "prune"]).catch(() => undefined);
+    const branchExists = await localBranchExists(repoPath, branchName);
+    if (branchExists) {
+      await runGit(repoPath, ["worktree", "add", worktreePath, branchName]);
+    } else {
+      await runGit(repoPath, ["worktree", "add", "-b", branchName, worktreePath, integrationBranch]);
+    }
+    await configureLocalOnlyPipelineBranch(repoPath, branchName).catch(() => undefined);
+  }
+  const reopenedWorkspace = await paseo.workspaces.open(worktreePath);
+  await reopenedWorkspace.refresh?.();
+  return {
+    workspaceId: reopenedWorkspace.id,
+    cwd: reopenedWorkspace.directory ?? worktreePath,
+  };
 }
 
 // The Supervisor lives in the user's own checkout; `open` reuses an existing workspace for it.

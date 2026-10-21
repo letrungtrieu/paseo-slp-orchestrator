@@ -2,14 +2,31 @@
 // private bus identity, prompt them, read their live status and archive them.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
-import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
-import type { AgentRecord, Run } from "../../shared/state";
+import type { AgentRecord } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
 import { systemPromptFor, type StagePromptContext } from "../prompts/system-prompts";
-import { resolveAgentSettings, unattendedModeForProvider } from "../project-prompts/agent-settings";
+import { resolveAgentSettings } from "../project-prompts/agent-settings";
+import { reopenOrRestoreWorktreeWorkspace } from "../git/worktree";
 import type { RunStore } from "../store/run-store";
-import type { PaseoApi, PaseoHolder } from "./paseo-holder";
+import {
+  defaultFeatureValuesForProvider,
+  fetchActiveShellCallFromTimeline,
+  isActiveMasterLead,
+  isActiveParentCoordinator,
+  isConfirmedMissingAgentError,
+  isCurrentStageAgent,
+  isUnavailableWorkspaceDirectoryError,
+  isUnsupportedPeerModelError,
+  isUnsupportedToolPolicyError,
+  permissionModeFor,
+  PROVIDERS_WITHOUT_TOOL_POLICY,
+  refreshMissingActiveAgent,
+  statusFromSnapshot,
+} from "./agent-gateway-helpers";
+import type { PaseoHolder } from "./paseo-holder";
+
+export { isConfirmedMissingAgentError, permissionModeFor };
 
 export interface AgentLiveStatus {
   agentId: string;
@@ -62,114 +79,6 @@ export interface TurnResult {
   status: "idle" | "error" | "permission" | "timeout";
   lastMessage: string | null;
   error: string | null;
-}
-
-// Only Claude, Codex and OpenCode support exact MCP tool preapproval in Paseo; plugin and ACP
-// providers such as Antigravity reject session.open when toolPolicy is present and rely on decidePermission.
-const PROVIDERS_WITHOUT_TOOL_POLICY = new Set([
-  "antigravity",
-  "muse",
-  "copilot",
-  "cursor",
-  "pi",
-  "omp",
-  "kimi",
-  "kiro",
-  "traecli",
-]);
-
-function isUnsupportedToolPolicyError(error: unknown): boolean {
-  const errorCode = typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code ?? "")
-    : "";
-  if (errorCode === "tool_policy_unsupported") return true;
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  // Both plugin providers ("Provider does not support permission.tool_policy") and built-in
-  // providers without exact preapproval reject toolPolicy before opening the session.
-  return /permission\.tool_policy|tool_policy_unsupported|cannot preapprove exact mcp tools/i.test(errorMessage);
-}
-
-function isUnsupportedPeerModelError(error: unknown): boolean {
-  const errorMessage = error instanceof Error ? error.message : String(error);
-  // Providers reject unknown or unavailable models during session creation with a model-related error message.
-  return /\bmodel\b.*\b(?:not found|unknown|invalid|unsupported|unavailable|does not exist)\b/i.test(errorMessage);
-}
-
-// Older saved runs have no selected mode, so use each supported provider's native unattended mode.
-export function permissionModeFor(providerModel: string): string | undefined {
-  const providerId = providerModel.split("/", 1)[0];
-  // Paseo owns the provider-specific IDs; passing a guessed universal ID can make agent creation fail.
-  return unattendedModeForProvider(providerId);
-}
-
-function statusFromSnapshot(agentSnapshot: AgentSnapshotPayload, persistedRecord?: AgentRecord): AgentLiveStatus {
-  return {
-    agentId: agentSnapshot.id,
-    status: agentSnapshot.status,
-    pendingPermissions: agentSnapshot.pendingPermissions,
-    // Persisted archive state wins while the directory projection catches up after a restart.
-    archived: Boolean(agentSnapshot.archivedAt || persistedRecord?.archivedAt),
-  };
-}
-
-function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean {
-  if (run.status !== "running" || agentRecord.archivedAt || !agentRecord.pipelineId || !agentRecord.stageId) return false;
-  const pipeline = run.pipelines[agentRecord.pipelineId];
-  if (!pipeline) return false;
-  const currentStage = pipeline.stages[pipeline.currentStageIndex];
-  // Only refresh the cohort that can still receive work; archived prior stages should not be revived.
-  return Boolean(
-    ["starting", "running", "paused"].includes(pipeline.status)
-    && currentStage
-    && ["starting", "running", "completing"].includes(currentStage.status)
-    && currentStage.id === agentRecord.stageId,
-  );
-}
-
-// Each Lead owns planning, pause recovery, integration and reporting across its feature pipeline, so directory misses must be verified too.
-function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
-  return (
-    !agentRecord.archivedAt
-    && agentRecord.role === "master_lead"
-    && !["completed", "aborted"].includes(run.status)
-  );
-}
-
-// Verify Supervisor and Lead directory misses so archiving any parent in Paseo always cascades to its child agents.
-function isActiveParentCoordinator(run: Run, agentRecord: AgentRecord): boolean {
-  if (agentRecord.archivedAt || ["completed", "aborted"].includes(run.status)) return false;
-  if (agentRecord.role === "supervisor") return agentRecord.agentId === run.supervisorAgentId;
-  return agentRecord.role === "master_lead";
-}
-
-export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {
-  const errorMessage = (error instanceof Error ? error.message : String(error)).trim().toLowerCase();
-  if (/^agent\s+(?:not found|does not exist)\b/.test(errorMessage) || /^unknown agent\b/.test(errorMessage)) return true;
-  if (errorMessage.includes("is archived") && errorMessage.includes(agentId.toLowerCase())) return true;
-  // Generic SDK/network errors must remain unknown; only an error naming this identity can confirm absence.
-  return errorMessage.includes(agentId.toLowerCase()) && /\b(?:not found|does not exist|unknown|archived)\b/.test(errorMessage);
-}
-
-async function refreshMissingActiveAgent(
-  paseo: PaseoApi,
-  store: RunStore,
-  persistedRecord: AgentRecord,
-): Promise<AgentLiveStatus | null> {
-  try {
-    const refreshed = await paseo.agents.ref(persistedRecord.agentId).refresh();
-    if (!refreshed?.agent) {
-      // A null fetch result is the SDK's explicit missing-agent response, unlike a transport failure.
-      return { agentId: persistedRecord.agentId, status: "closed", pendingPermissions: [], archived: true };
-    }
-    return statusFromSnapshot(refreshed.agent, store.findAgent(persistedRecord.agentId)?.agentRecord);
-  } catch (refreshError) {
-    if (isConfirmedMissingAgentError(refreshError, persistedRecord.agentId)) {
-      // Treat only a confirmed identity miss as archived so transient SDK failures cannot create a new cohort.
-      return { agentId: persistedRecord.agentId, status: "closed", pendingPermissions: [], archived: true };
-    }
-    // An unavailable directory leaves the agent unknown; callers must not infer that it was archived.
-    return null;
-  }
 }
 
 export class AgentGateway {
@@ -230,8 +139,50 @@ export class AgentGateway {
     try {
       // Refresh belongs inside the rollback boundary: a stale workspace is just as much a failed
       // creation as an SDK rejection, and must not leave an authenticated orphan in SQLite.
-      const workspace = paseo.workspaces.ref(spec.workspaceId);
+      let workspace = paseo.workspaces.ref(spec.workspaceId);
       await workspace.refresh();
+      const fallbackWorkspaceDirectory =
+        spec.peerWorktreePath || (spec.role === "supervisor" ? run.repoPath : run.devCwd || run.repoPath);
+      const createAgentInWorkspace = async (
+        creationPayload: Parameters<typeof workspace.agents.create>[0],
+      ): Promise<void> => {
+        try {
+          await workspace.agents.create(creationPayload);
+        } catch (workspaceCreateError) {
+          if (
+            !isUnavailableWorkspaceDirectoryError(workspaceCreateError) ||
+            !fallbackWorkspaceDirectory ||
+            typeof paseo.workspaces.open !== "function"
+          ) {
+            throw workspaceCreateError;
+          }
+          // Re-open or re-attach the checkout path in Paseo when the previous workspace handle was archived via the sidebar x button.
+          const currentRunSnapshot = this.store.require(spec.runId);
+          const matchingBranch =
+            Object.values(currentRunSnapshot.pipelineWorkspaces).find(
+              (candidateWorkspace) => candidateWorkspace.cwd === fallbackWorkspaceDirectory,
+            )?.branch ??
+            Object.values(currentRunSnapshot.pipelines).find(
+              (candidatePipeline) => candidatePipeline.worktree === fallbackWorkspaceDirectory,
+            )?.branch ??
+            null;
+          const restoredWorkspace = await reopenOrRestoreWorktreeWorkspace(
+            paseo,
+            currentRunSnapshot.repoPath,
+            currentRunSnapshot.integrationBranch,
+            fallbackWorkspaceDirectory,
+            matchingBranch,
+          );
+          workspace = paseo.workspaces.ref(restoredWorkspace.workspaceId);
+          await workspace.refresh();
+          this.store.mutate(spec.runId, (mutableRun) => {
+            if (mutableRun.agents[agentId]) {
+              mutableRun.agents[agentId].workspaceId = restoredWorkspace.workspaceId;
+            }
+          });
+          await workspace.agents.create(creationPayload);
+        }
+      };
       const baseAgentCreation = {
         agentId,
         title: spec.title,
@@ -259,10 +210,12 @@ export class AgentGateway {
       };
       const openAgentWithSettings = async (activeModelSettings: typeof modelSettings): Promise<void> => {
         const selectedProviderId = activeModelSettings.provider.split("/", 1)[0];
+        const providerFeatureValues = defaultFeatureValuesForProvider(activeModelSettings.provider);
         const baseSessionConfig = {
           provider: activeModelSettings.provider,
           modeId: activeModelSettings.permissionModeId ?? permissionModeFor(activeModelSettings.provider),
           ...(activeModelSettings.thinkingOptionId ? { thinkingOptionId: activeModelSettings.thinkingOptionId } : {}),
+          ...(providerFeatureValues ? { featureValues: providerFeatureValues } : {}),
           systemPrompt: systemPromptFor(
             spec.role,
             this.store.require(spec.runId).promptConfig,
@@ -280,11 +233,11 @@ export class AgentGateway {
           ...(spec.extraOptions ? { options: spec.extraOptions } : {}),
         };
         if (this.providersWithoutToolPolicy.has(selectedProviderId)) {
-          await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+          await createAgentInWorkspace({ ...baseAgentCreation, config: baseSessionConfig });
           return;
         }
         try {
-          await workspace.agents.create({
+          await createAgentInWorkspace({
             ...baseAgentCreation,
             config: { ...baseSessionConfig, toolPolicy: preapprovedToolPolicy },
           });
@@ -292,7 +245,7 @@ export class AgentGateway {
           if (!isUnsupportedToolPolicyError(toolPolicyError)) throw toolPolicyError;
           // Custom or plugin providers without permission.tool_policy still authorize bus tools via decidePermission.
           this.providersWithoutToolPolicy.add(selectedProviderId);
-          await workspace.agents.create({ ...baseAgentCreation, config: baseSessionConfig });
+          await createAgentInWorkspace({ ...baseAgentCreation, config: baseSessionConfig });
         }
       };
 
@@ -351,49 +304,7 @@ export class AgentGateway {
   // Reads the tail of an agent's timeline so the shell watchdog can track stdout/stderr progress without model tokens.
   async activeShellCall(agentId: string): Promise<ActiveShellCall | null> {
     const paseo = await this.holder.get();
-    try {
-      const timelinePage = await paseo.agents.ref(agentId).timeline.refetch({
-        direction: "tail",
-        limit: 15,
-      });
-      for (let entryIndex = timelinePage.entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
-        const timelineEntry = timelinePage.entries[entryIndex];
-        const timelineItem = timelineEntry?.item;
-        if (!timelineItem || timelineItem.type !== "tool_call" || timelineItem.status !== "running") continue;
-        if (timelineItem.detail.type === "shell") {
-          return {
-            callId: timelineItem.callId,
-            command: timelineItem.detail.command,
-            cwd: timelineItem.detail.cwd ?? null,
-            output: timelineItem.detail.output ?? "",
-            startedAt: timelineEntry.timestamp ?? null,
-          };
-        }
-        // Fallback for custom or ACP providers that surface shell tool calls under 'unknown' detail with a command input string.
-        if (timelineItem.detail.type === "unknown" && /^(bash|sh|shell|exec_command|run_command|terminal)$/i.test(timelineItem.name)) {
-          const rawInput = timelineItem.detail.input;
-          const commandFromInput =
-            rawInput && typeof rawInput === "object" && "command" in rawInput && typeof rawInput.command === "string"
-              ? rawInput.command
-              : null;
-          if (commandFromInput) {
-            return {
-              callId: timelineItem.callId,
-              command: commandFromInput,
-              cwd: rawInput && typeof rawInput === "object" && "cwd" in rawInput && typeof rawInput.cwd === "string"
-                ? rawInput.cwd
-                : null,
-              output: typeof timelineItem.detail.output === "string" ? timelineItem.detail.output : "",
-              startedAt: timelineEntry.timestamp ?? null,
-            };
-          }
-        }
-      }
-      return null;
-    } catch {
-      // Transient timeline read errors must not fail the sweeper tick; the next sweep will re-check.
-      return null;
-    }
+    return fetchActiveShellCallFromTimeline(paseo, agentId);
   }
 
 

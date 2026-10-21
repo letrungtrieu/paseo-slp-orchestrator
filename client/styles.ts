@@ -28,6 +28,7 @@ export function createUiStyles(theme: PluginTheme, compact: boolean) {
     monoText: { color: theme.colors.foregroundMuted, fontSize: 12, fontFamily: "monospace" },
     dangerText: { color: theme.colors.statusDanger, fontSize: 13 },
     warningText: { color: theme.colors.statusWarning, fontSize: 13 },
+    successText: { color: theme.colors.statusSuccess, fontSize: 13 },
     fieldLabel: { color: theme.colors.foregroundMuted, fontSize: 12, marginBottom: 2 },
     // Inputs get taller on compact (touch) layouts so they stay comfortable to hit with a thumb.
     input: {

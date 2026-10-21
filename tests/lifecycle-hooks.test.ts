@@ -101,8 +101,42 @@ describe("hook registration", () => {
     await hooks.fire("agent.turn_started", { agent: { id: "unknown" } });
     unregister();
     expect(hooks.removedEvents.sort()).toEqual(["agent.archived", "agent.permission_requested", "agent.turn_ended", "agent.turn_started"]);
-    expect(hooks.removedBeforeHooks).toEqual(["agent.session_open"]);
+    expect(hooks.removedBeforeHooks).toEqual(["agent.create", "agent.session_open"]);
     expect(fixture.capturedHandles).toHaveLength(1);
+  });
+
+  // Ensure kiro and kiro-cli agent creations always enable Paseo's ACP `auto_accept` feature toggle.
+  it("always enables featureValues.auto_accept in agent.create for kiro and kiro-cli providers", async () => {
+    const fixture = dynamicHookContext();
+    const hooks = fakeServer();
+    registerLifecycleHooks(hooks.server, fixture.ctx as never);
+    const transformedKiroCreate = (await hooks.fireBefore("agent.create", {
+      config: {
+        provider: "kiro/claude-sonnet-4.5",
+        cwd: "/tmp/pipeline-worktree",
+      },
+    })) as { config: { featureValues?: Record<string, unknown> } };
+    expect(transformedKiroCreate.config.featureValues).toEqual({ auto_accept: true });
+
+    const transformedKiroCliCreate = (await hooks.fireBefore("agent.create", {
+      config: {
+        provider: "kiro-cli/auto",
+        cwd: "/tmp/pipeline-worktree",
+        featureValues: { existingFlag: "kept" },
+      },
+    })) as { config: { featureValues?: Record<string, unknown> } };
+    expect(transformedKiroCliCreate.config.featureValues).toEqual({
+      existingFlag: "kept",
+      auto_accept: true,
+    });
+
+    const claudeResult = await hooks.fireBefore("agent.create", {
+      config: {
+        provider: "claude/claude-sonnet-4-5",
+        cwd: "/tmp/pipeline-worktree",
+      },
+    });
+    expect(claudeResult).toBeUndefined();
   });
 
   // Archiving the Supervisor in Paseo must immediately archive all dependent Peers, Forked Leads and Master Lead.
@@ -303,11 +337,33 @@ describe("permission lifecycle events", () => {
     expect(fixture.logs.some((entry) => entry.kind === "permission.Edit" && entry.outcome === "blocked")).toBe(true);
   });
 
-  it("ignores permission requests from agents outside the run", async () => {
+  it("ignores permission requests from agents outside the run unless they use kiro or kiro-cli", async () => {
     const fixture = dynamicHookContext();
     const hooks = fakeServer();
     registerLifecycleHooks(hooks.server, fixture.ctx as never);
-    await hooks.fire("agent.permission_requested", { agent: { id: "stranger" }, request: permissionRequest({ name: "Read" }) });
+    await hooks.fire("agent.permission_requested", { agent: { id: "stranger", provider: "claude" }, request: permissionRequest({ name: "Read" }) });
     expect(fixture.permissionResponses).toEqual([]);
+
+    // Standalone kiro-cli agents auto-accept ACP permission prompts and select the allow optionId.
+    const kiroChooserRequest = {
+      ...permissionRequest({ name: "shell" }),
+      id: "kiro-perm-1",
+      provider: "kiro",
+      actions: [
+        { id: "allow-tool-once", label: "Allow once", behavior: "allow" as const },
+        { id: "deny-tool", label: "Reject", behavior: "deny" as const },
+      ],
+    };
+    await hooks.fire("agent.permission_requested", {
+      agent: { id: "external-kiro-agent", provider: "kiro-cli" },
+      request: kiroChooserRequest,
+    });
+    expect(fixture.permissionResponses).toEqual([
+      {
+        agentId: "external-kiro-agent",
+        requestId: "kiro-perm-1",
+        response: { behavior: "allow", selectedActionId: "allow-tool-once" },
+      },
+    ]);
   });
 });
