@@ -5,6 +5,7 @@ import { readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { BUS_TOOL_DEFINITIONS } from "../server/bus/tool-schemas";
 import { defaultProjectPrompts } from "../server/project-prompts/defaults";
 import { parseRoleMarkdown } from "../server/project-prompts/markdown";
 import { slpManagerSkillFiles } from "../server/skills/slp-manager/skill-files";
@@ -125,15 +126,50 @@ describe("slp-manager project skill provisioning", () => {
     expect(templatePolicy.heavy_resources[0].max_concurrent).toBe(1);
   });
 
-  it("seeds a feature tier on every default peer", () => {
+  it("seeds a tier on every default peer and keeps heavy verification in the QA pipeline", () => {
     const seededPeerTiers = Object.fromEntries(
       defaultProjectPrompts().peers.map((seededPeer) => [seededPeer.role, parseYaml(seededPeer.frontMatter).tier]),
     );
     expect(seededPeerTiers).toEqual({
       "developer": "feature",
-      "qa-engineer": "feature",
+      "qa-engineer": "integration",
       "reviewer": "feature",
       "security-reviewer": "feature",
     });
+  });
+
+  it("only names bus tools that exist, so agents never call a tool the engine rejects", () => {
+    const namedToolNames = new Set(renderSlpManagerSkillMarkdown().match(/\bslp_[a-z]+(?:_[a-z]+)*\b/g) ?? []);
+    const definedToolNames = new Set<string>(Object.keys(BUS_TOOL_DEFINITIONS));
+    expect([...namedToolNames].filter((toolName) => !definedToolNames.has(toolName))).toEqual([]);
+  });
+
+  it("requires a productSpec wherever the skill shows a delegation payload", () => {
+    // Stale examples without productSpec make every generated Supervisor prompt fail at slp_delegate.
+    const delegationLines = renderSlpManagerSkillMarkdown()
+      .split("\n")
+      .filter((line) => line.includes("acceptanceCriteria") && line.includes("slp_delegate"));
+    expect(delegationLines.length).toBeGreaterThan(0);
+    for (const delegationLine of delegationLines) {
+      expect(delegationLine).toContain("productSpec");
+    }
+  });
+
+  it("lists the QA Lead root file among the files the engine injects", () => {
+    const criticalRule = renderSlpManagerSkillMarkdown().split("\n").find((line) => line.includes("CRITICAL RULE")) ?? "";
+    expect(criticalRule).toContain("`.slp/QA_LEAD.md`");
+  });
+
+  it("gives older .slp folders a migration checklist that confirms before deleting UAT content", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    expect(skillMarkdown).toContain("## 6. Upgrading an Existing `.slp` to the Current Structure");
+    expect(skillMarkdown).toContain("Delete the file only after the human confirms");
+  });
+
+  it("keeps the QA engineer as the only seeded integration-tier peer so QA pipelines can run heavy verification", () => {
+    const integrationPeerRoles = defaultProjectPrompts().peers
+      .filter((seededPeer) => parseYaml(seededPeer.frontMatter).tier === "integration")
+      .map((seededPeer) => seededPeer.role);
+    expect(integrationPeerRoles).toEqual(["qa-engineer"]);
   });
 });

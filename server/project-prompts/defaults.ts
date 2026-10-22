@@ -54,7 +54,8 @@ const DEFAULT_ROLES = [
     name: "QA Engineer",
     description: "Analyze edge cases, automated vs manual testing needs, UI impact, and capture screenshot/runtime evidence to verify delivered behavior or report bugs.",
     file: "peers/QA_ENGINEER.md",
-    tier: "feature",
+    // Verification of the merged QA branch happens in the QA pipeline, so this is the seeded integration-tier peer.
+    tier: "integration",
     workflow: [
       "Focus on exercising the delivered behavior, regression coverage, boundary conditions and reproducible verification evidence.",
       "",
@@ -62,7 +63,7 @@ const DEFAULT_ROLES = [
       "1. Logic, Inputs/Outputs & Edge-Case Analysis: For every piece of logic or feature processed in the pipeline, explicitly analyze and state its exact logic, expected inputs, expected outputs/outcomes, and enumerate all potential edge cases that can occur.",
       "2. Automated vs. Manual Test Assessment: Explicitly determine and report which edge cases and flows can be verified via automated tests (and run/write those automated tests) versus which scenarios require manual testing and why.",
       "3. UI / Visual Impact Assessment: Explicitly analyze whether the changes affect the user interface (UI) or visual rendering, and explain how the layout, state, interaction, or rendering is affected.",
-      "4. Mandatory Screenshot / Visual Evidence Capture: Whenever the UI or visual output is affected (or when visual proof applies to the feature/bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., native window/headless screenshot command, browser capture, Xvfb/import/scrot/Playwright or project screenshot tool) and include the captured screenshot path and findings in `slp_stage_report` to prove completion or document a bug. If every available mechanism needs a heavy resource listed in `.slp/standards/TEST_POLICY.md` (engine editor, emulator, simulator, container stack), do not start it in a feature pipeline; list the exact visual checks as integration QA hand-off items instead.",
+      "4. Mandatory Screenshot / Visual Evidence Capture: Whenever the UI or visual output is affected (or when visual proof applies to the feature/bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., native window/headless screenshot command, browser capture, Xvfb/import/scrot/Playwright or project screenshot tool) and include the captured screenshot path and findings in `slp_stage_report` to prove completion or document a bug. You run in the QA pipeline on the merged QA branch, so heavy resources listed in `.slp/standards/TEST_POLICY.md` (engine editor, emulator, simulator, container stack) are allowed here, one at a time, and never while another peer of the same stage uses the same resource.",
       "5. Cross-Stage Clarification: If any upstream logic, input/output contract, or edge-case behavior from an earlier stage is unclear, use `slp_send_peer_message` to question the responsible peer from that earlier stage directly.",
       "",
       DEFAULT_WORKFLOWS.peer.trim(),

@@ -17,7 +17,7 @@ Use this skill whenever the user asks you to explain the SLP (Supervisor–Lead�
 
 > **INVESTIGATE BEFORE YOU GENERATE:** Never generate or regroup \`.slp/peers/\` from generic templates. First run the mandatory project investigation in \`references/PROJECT_INVESTIGATION.md\` (tech stack, how unit tests are written and run, how manual testing is done, which tools are heavy), write \`.slp/standards/TEST_POLICY.md\` from \`references/TEST_POLICY_TEMPLATE.md\`, and only then derive peers from those findings (\`references/STACK_PLAYBOOKS.md\` lists stack-specific starting points).
 
-> **CRITICAL RULE:** At runtime, the SLP engine injects the Markdown body of \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, and \`.slp/peers/**/*.md\` **directly** as the role's \`PROJECT WORKFLOW\` without adding hidden hardcoded contract wrappers. If you edit a \`.slp/*.md\` file and accidentally delete its MCP tool-calling obligations, turn-ending rules, or branch/read-only invariants, **the SLP state machine will stall or break**. Always preserve the mandatory SLP invariants documented below when editing any role.
+> **CRITICAL RULE:** At runtime, the SLP engine injects the Markdown body of \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, \`.slp/QA_LEAD.md\`, and \`.slp/peers/**/*.md\` **directly** as the role's \`PROJECT WORKFLOW\` without adding hidden hardcoded contract wrappers. If you edit a \`.slp/*.md\` file and accidentally delete its MCP tool-calling obligations, turn-ending rules, or branch/read-only invariants, **the SLP state machine will stall or break**. Always preserve the mandatory SLP invariants documented below when editing any role.
 
 ---
 
@@ -29,13 +29,14 @@ SLP orchestrates multi-agent software delivery across three runtime tiers (\`sup
    - The single human-facing agent. It stays strictly **READ-ONLY** on the repository.
    - Clarifies requirements with the human and analyzes whether the request is a single task or \`N\` independent features/waves that can run in parallel.
    - **Owns the product spec:** for every feature it drafts screens/surfaces and their elements, states (empty, loading, success, error, disabled), Given/When/Then interactions, business rules and out-of-scope items, gets the human's explicit approval, and passes it as \`productSpec\` (\`slp_delegate\` rejects features without one). Leads implement it as a contract; the QA Lead turns every scenario into a test case.
-   - Calls \`slp_delegate\` with either \`{ acceptanceCriteria }\` (1 feature) or \`{ tasks: [{ name, acceptanceCriteria, worktree? }], sharedContext? }\` (\`N\` parallel features).
+   - Calls \`slp_delegate\` with the human-approved \`productSpec\` for every feature: \`{ acceptanceCriteria, productSpec }\` for one feature, or \`{ tasks: [{ name, acceptanceCriteria, productSpec, worktree? }], sharedContext? }\` for \`N\` parallel features. The engine rejects the whole delegation if any feature lacks a \`productSpec\` of at least 80 characters.
    - For each delegated feature, SLP immediately creates/opens a dedicated Git worktree (\`slp/*\` branch) and spawns a dedicated **Lead**. Every delegation also creates one **QA worktree** (the run's integration branch) and spawns one **QA Lead** in it.
    - When the QA Lead reports the verified QA branch, the Supervisor audits the integrated branch (\`slp_list_pipelines\`, \`slp_get_pipeline\`, \`git diff\`) and either calls \`slp_request_rework\` (if evidence is incomplete) or \`slp_present_to_manager\` (which merges the QA branch into the base branch and presents to the human). Rework requests go to the QA Lead.
 
 2. **Tier 2 — Lead (\`.slp/LEAD.md\`, runtime role \`master_lead\`):**
    - Runs inside its feature's dedicated Git worktree.
    - Receives the full roster of all sibling Leads and concurrent features being built in parallel (\`agentId\`, \`featureName\`, \`worktreePath\`, \`branch\`, \`acceptanceCriteria\`).
+   - Receives its own human-approved \`productSpec\` as the implementation contract, plus the QA Lead's id and the QA branch it merges into. Implement the spec's screens, states and scenarios exactly; record any deviation with its reason in the \`slp_finalize_pipeline\` summary.
    - **Cross-Lead Alignment:** Uses \`slp_send_peer_message({ toAgentId, message, waitForReply: true })\` to align shared APIs, schemas, routes, and end-to-end flows with sibling Leads during planning, execution, or merge resolution.
    - **Stage Planning:** Receives the **YAML front matter** of every file in \`.slp/peers/**/*.md\` in its \`systemPrompt\` (as the available peer catalog) and calls \`slp_define_pipeline\` to define dynamic stages (\`stages: [{ name, goal, peers: [{ role, task }] }]\`).
    - **Direct Supervision & Forking:** Supervises each stage via \`slp_approve_stage\` or \`slp_stage_rework\`, handles hung peer commands via \`slp_handle_peer_shell\`, and merges its completed feature branch into the QA branch via \`slp_finalize_pipeline\` (resolving merge conflicts there). Feature Leads never report to the Supervisor and never run heavy verification; they are retired once every feature is merged.
@@ -182,7 +183,7 @@ When customizing \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, or peer files (for ex
 ### Mandatory Checklist When Editing \`.slp/SUPERVISOR.md\`
 1. **Front Matter:** Keep \`role: supervisor\` and a non-empty \`description\`. (\`model\` in \`SUPERVISOR.md\` can be a short model ID or a full \`provider/model\` ID).
 2. **Read-Only Invariant:** Supervisor must remain **READ-ONLY** on the repository (it never edits source files or commits code directly).
-3. **Delegation Tool (\`slp_delegate\`):** Preserve instructions to decompose requests into 1 cohesive task (\`{ acceptanceCriteria }\`) or \`N\` parallel features (\`{ tasks: [{ name, acceptanceCriteria }], sharedContext? }\`) via \`slp_delegate\`, passing shared standards/contracts in \`sharedContext\`.
+3. **Delegation Tool (\`slp_delegate\`):** Preserve instructions to decompose requests into 1 cohesive task (\`{ acceptanceCriteria, productSpec }\`) or \`N\` parallel features (\`{ tasks: [{ name, acceptanceCriteria, productSpec }], sharedContext? }\`) via \`slp_delegate\`, passing shared standards/contracts in \`sharedContext\`. Every feature must carry its human-approved \`productSpec\`; a delegation without one is rejected.
 4. **Verification & Completion Tools:** Preserve instructions to inspect pipelines with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_get_run\`, and \`git diff\`, revive stalled agents with \`slp_revive_agent\`, reject incomplete work with \`slp_request_rework\`, and accept verified work with \`slp_present_to_manager\`.
 5. **Product Spec Before Delegation:** Preserve the five-section product spec template (screens and elements, states, Given/When/Then interactions, business rules, out of scope), the rule to get explicit human approval first, and passing it unchanged as \`productSpec\`. Adapt the section names to the project (for example HUD, input and feedback for games; endpoints and payloads for APIs) but keep the scenarios.
 6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_delegate\`, \`slp_request_rework\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
@@ -226,5 +227,18 @@ Whenever you create or modify any file in \`.slp/\`:
 4. Confirm that \`.slp/standards/TEST_POLICY.md\` exists, every command in its \`fast\` tier was actually run during the investigation (with measured time and peak memory), and every heavy resource lists its process signatures.
 5. Confirm that every peer declares \`tier: feature\` or \`tier: integration\`, that no \`feature\` peer is instructed to run an \`engine\` or \`integration\` tier command, and that each peer's test instructions match the conventions recorded in \`TEST_POLICY.md\`.
 6. Confirm that all mandatory \`slp_*\` tool names, \`${BUS_SERVER_NAME}\` transport rules, local-branch hygiene (\`no git push\`), and turn-ending instructions remain intact in the Markdown body.
+
+## 6. Upgrading an Existing \`.slp\` to the Current Structure
+
+Run this checklist when a project's \`.slp\` was generated before the current engine. Old files still load, but their instructions no longer match the flow:
+
+1. **Supervisor:** every \`slp_delegate\` call needs the human-approved \`productSpec\` (see Tier 1). Remove any instruction to call \`slp_report\` or to wait for a feature Lead's report; only the QA Lead reports.
+2. **Lead (\`.slp/LEAD.md\`):** remove every instruction to call \`slp_report\`, to spawn an End-User UAT pipeline, or to merge into the base branch. A feature Lead's last duty is \`slp_finalize_pipeline\` into the QA branch; the engine then hands verification to the QA Lead.
+3. **QA Lead (\`.slp/QA_LEAD.md\`):** the plugin re-seeds this file when it is missing. Customize it in place and keep its two phases; never put QA stages into \`LEAD.md\`.
+4. **Peers:** add \`tier: feature\` or \`tier: integration\` to every peer's front matter, as decided by the investigation. Feature-tier peers may run only the \`fast\` tier of \`TEST_POLICY.md\`.
+5. **Legacy \`.slp/peers/END_USER_UAT.md\`:** read it first and move any project-specific journeys into the QA Lead's plan or into an \`integration\` tier peer. Delete the file only after the human confirms, and remove or rename every reference to the \`end-user\` role with it.
+6. **Standards:** create \`.slp/standards/TEST_POLICY.md\` from the investigation. Without it, feature pipelines have no test-tier boundary.
+
+After the edits, run the verification procedure in section 5 and list every changed file for the human.
 `;
 }
