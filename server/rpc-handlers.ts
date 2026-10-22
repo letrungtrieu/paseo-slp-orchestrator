@@ -102,7 +102,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     // Awaited and returned so a failure while creating worktrees or agents reaches the UI's inline error.
     return startRun(ctx, {
       repoPath: input.repoPath,
-      title: input.title,
+      name: input.name,
       baseBranch: input.baseBranch,
       mode: input.mode ?? defaults.mode,
       // Keep provider models and their thinking preferences together through the run boundary.

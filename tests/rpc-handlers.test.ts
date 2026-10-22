@@ -64,9 +64,10 @@ describe("run RPCs", () => {
   it("starts a run from the UI request and captures the SDK handle", async () => {
     const { flow, rpc } = await rpcRun();
     const started = await rpc.call<{ runId: string }>(startRunRpc, {
-      repoPath: flow.repoPath, mode: "SEMI_AUTO", title: "From UI", supervisorProvider: "claude/sonnet", leadProvider: "claude/opus", peerProvider: "codex/gpt",
+      repoPath: flow.repoPath, mode: "SEMI_AUTO", name: "From UI", supervisorProvider: "claude/sonnet", leadProvider: "claude/opus", peerProvider: "codex/gpt",
     });
-    expect(flow.run(started.runId)).toMatchObject({ title: "From UI", mode: "SEMI_AUTO", providers: { lead: "claude/opus", peer: "codex/gpt" } });
+    // The daemon appends a "#<sequence>" suffix to the submitted name to build the persisted title.
+    expect(flow.run(started.runId)).toMatchObject({ title: "From UI #1", mode: "SEMI_AUTO", providers: { lead: "claude/opus", peer: "codex/gpt" } });
     expect((flow.ctx.holder as unknown as { captures: unknown[] }).captures).toContain(rpc.paseoFromRequest);
   });
 

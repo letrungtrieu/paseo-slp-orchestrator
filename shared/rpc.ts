@@ -62,7 +62,8 @@ export const startRunRpc = defineRpc({
   input: z.object({
     // min(1) rejects an empty path on both ends before any worktree is created.
     repoPath: z.string().min(1),
-    title: z.string().optional(),
+    // Required run name; the daemon appends a "#<sequence>" suffix so repeated names stay distinguishable.
+    name: z.string().min(1),
     baseBranch: z.string().optional(),
     // The handler inherits host-wide settings when a non-UI caller omits its run mode.
     mode: RunModeSchema.optional(),

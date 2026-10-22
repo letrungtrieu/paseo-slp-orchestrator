@@ -138,7 +138,7 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
           repoPath,
           baseBranch,
           mode: options.mode,
-          title: "Flow test",
+          name: "Flow test",
           providers: { supervisor: "claude/sonnet", lead: "claude/sonnet", peer: "claude/sonnet" },
         });
         return startedRun.runId;

@@ -32,7 +32,7 @@ export const DEFAULT_PROVIDER = "claude/claude-sonnet-5-5";
 
 export interface StartRunInput {
   repoPath: string;
-  title?: string;
+  name: string;
   baseBranch?: string;
   mode: RunMode;
   providers: Partial<ProviderChoices>;
@@ -60,12 +60,16 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   // Reject bad Markdown before creating worktrees or agents; all children use this same project-root snapshot.
   const promptConfig = await loadProjectPrompts(input.repoPath);
   const runId = randomUUID();
+  // Sequence numbers are derived from the total run count ever persisted (including archived runs),
+  // so re-running the same project name never collides with a prior run's display title.
+  const runSequence = ctx.store.list().length + 1;
   // Both Supervisor and Master Lead work directly on baseBranch in the main checkout; only pipeline peers use separate worktree branches.
   const runMetadata: Pick<Run, "repoPath" | "baseBranch" | "integrationBranch" | "title"> = {
     repoPath: input.repoPath,
     baseBranch,
     integrationBranch: baseBranch,
-    title: input.title?.trim() || `SLP ${runId.slice(0, 8)}`,
+    // The name is a required field now; the "#<sequence>" suffix keeps repeated run names distinguishable in lists and agent titles.
+    title: `${input.name.trim()} #${runSequence}`,
   };
   // Each role can use a different provider so the user can mix a strong Lead with cheaper peers.
   const providers: ProviderChoices = {

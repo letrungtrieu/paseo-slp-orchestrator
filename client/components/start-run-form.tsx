@@ -24,15 +24,11 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
   const { startRun } = useRunActions();
   // Project and session fields belong to this run; reusable agent defaults come from Paseo settings.
   const [repoPath, setRepoPath] = useState("");
-  const [runTitle, setRunTitle] = useState("");
+  const [runName, setRunName] = useState("");
   const providerCatalog = useProviderCatalog(repoPath);
   const settings = useSlpSettings(providerCatalog);
   const { roles: roleSelections } = settings.configuration;
   const projectPrompts = useProjectPrompts(repoPath);
-
-  // Empty optional fields must be omitted, not sent as "", so the daemon applies its defaults.
-  const omitIfBlank = (optionalInputText: string) =>
-    optionalInputText.trim() === "" ? undefined : optionalInputText.trim();
 
   // Resolve the catalog defaults once so the visible selection and submitted settings cannot diverge.
   const providerModelForRole = (providerRole: ProviderRole) =>
@@ -59,7 +55,7 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
     startRun.mutate(
       {
         repoPath: repoPath.trim(),
-        title: omitIfBlank(runTitle),
+        name: runName.trim(),
         mode: "FULL_AUTO",
         supervisorProvider: roleProviderModels.supervisor?.value,
         leadProvider: roleProviderModels.lead?.value,
@@ -81,6 +77,7 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
   const isStartDisabled =
     !settings.isEditable ||
     repoPath.trim() === "" ||
+    runName.trim() === "" ||
     providerCatalog.isPending ||
     providerCatalog.modelChoices.length === 0 ||
     projectPrompts.isFetching || projectPrompts.isPending || projectPrompts.isError ||
@@ -107,7 +104,7 @@ export function StartRunForm({ styles, theme, onRunStarted }: StartRunFormProps)
           {projectPrompts.error ? <Text style={styles.dangerText}>{describeRpcError(projectPrompts.error)}</Text> : null}
         </View>
       ) : null}
-      <LabeledInput styles={styles} theme={theme} label="Title (optional)" value={runTitle} onChangeText={setRunTitle} />
+      <LabeledInput styles={styles} theme={theme} label="Name" value={runName} onChangeText={setRunName} />
       <AgentDefaultSettings styles={styles} theme={theme} catalog={providerCatalog} settings={settings} />
       <ActionButton
         styles={styles}
