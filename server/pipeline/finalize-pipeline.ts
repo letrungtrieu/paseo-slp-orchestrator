@@ -8,6 +8,10 @@ import type { PipelineContext } from "./context";
 import { requirePipeline } from "./stage-context";
 import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
+import { completedPipeline, requireCleanWorktree } from "./worktree-checks";
+import { applyQaHandover, retireIdleFeatureLeads, retireMergingLeadWhenIdle } from "./qa/qa-handover";
+import { finalizeQaPipeline } from "./qa/qa-pipeline";
+import { allFeaturePipelinesIntegrated, isQaPipeline, runHasQaLead } from "./qa/qa-phase-state";
 
 // Serialize concurrent merge calls per run so parallel Forked Leads finishing at the same time merge sequentially without failing on a lock error.
 const finalizingRunLocks = new Map<string, Promise<unknown>>();
@@ -23,29 +27,6 @@ async function withRunFinalizeLock<ResultType>(runId: string, operation: () => P
       finalizingRunLocks.delete(runId);
     }
   }
-}
-
-async function requireCleanWorktree(
-  worktreePath: string,
-  label: string,
-  includeUntracked = true,
-): Promise<void> {
-  // Pipeline worktrees must commit all untracked files, whereas the main checkout may contain untracked .slp/*.md templates.
-  const untrackedFlag = includeUntracked ? "--untracked-files=all" : "--untracked-files=no";
-  const porcelainStatus = await runGit(worktreePath, ["status", "--porcelain=v1", untrackedFlag]);
-  if (porcelainStatus.trim()) {
-    throw new ToolError(
-      includeUntracked
-        ? `${label} has uncommitted or untracked files.`
-        : `${label} has uncommitted tracked changes.`,
-    );
-  }
-}
-
-function completedPipeline(pipeline: PipelineState): boolean {
-  return pipeline.status === "completed"
-    && pipeline.stages.length > 0
-    && pipeline.stages.every((stage) => stage.status === "completed" && stage.result !== null);
 }
 
 // Build actionable conflict guidance listing pipeline Peers and sibling Leads so the Lead can consult them before resolving.
@@ -110,18 +91,21 @@ function masterLeadIntegrationHandover(run: Run): string {
     integratedPipelineSummaries.join("\n\n"),
     "## Next Action for Lead",
     "1. Review the integrated codebase in the integration branch.",
-    "2. **Optional Autonomous End-User UAT Team**: If end-to-end user acceptance testing across the combined features is warranted before final delivery, spawn an End-User UAT pipeline (`slp_create_worktree` + `slp_define_pipeline` using `end-user` or `qa-engineer` peers) to test the integrated application as a real end user.",
-    "3. Once you have verified that all integrated features work together and meet the overall acceptance criteria, call `slp_report` to hand the result to the Supervisor.",
+    "2. Once you have verified that all integrated features work together and meet the overall acceptance criteria, call `slp_report` to hand the result to the Supervisor.",
   ].join("\n\n");
 }
 
-function integratedResult(pipeline: PipelineState, allIntegrated = true, isPrimaryLeadCaller = true): string {
-  const nextAction = !isPrimaryLeadCaller
+function integratedResult(pipeline: PipelineState, allIntegrated = true, isPrimaryLeadCaller = true, hasQaLead = false): string {
+  // With a QA Lead, a feature Lead's job ends at the merge: verification and reporting belong to the QA Lead.
+  const qaNextAction = allIntegrated
+    ? "Pipeline branch merged into the QA branch. Every feature is merged, so the QA Lead now verifies the combined build and reports to the Supervisor. End your turn."
+    : "Pipeline branch merged into the QA branch. Keep your session idle in case sibling Leads consult you on merge conflicts before every feature is merged.";
+  const nextAction = hasQaLead ? qaNextAction : !isPrimaryLeadCaller
     ? allIntegrated
       ? "Pipeline branch merged into integration. Consolidated summaries have been attached and handed to the primary Lead. End your turn."
       : "Pipeline branch merged into integration. Keep your session idle in case sibling Leads consult you on merge conflicts before all pipelines finish."
     : allIntegrated
-      ? "All defined pipelines are integrated. Verify the combined result (or spawn an End-User UAT pipeline if needed), then call slp_report in this turn."
+      ? "All defined pipelines are integrated. Verify the combined result, then call slp_report in this turn."
       : "Other pipelines still need integration; continue coordinating them before calling slp_report.";
   return JSON.stringify({
     pipelineId: pipeline.id,
@@ -149,19 +133,25 @@ export async function finalizePipeline(
     throw new ToolError(`Lead for pipeline '${callerAgentRecord.pipelineId}' cannot finalize pipeline '${pipelineId}'.`);
   }
   const initialPipeline = requirePipeline(initialRun, pipelineId);
+  // QA pipelines already live on the QA branch, so closing them is a separate path with nothing to merge.
+  if (isQaPipeline(initialPipeline)) {
+    return withRunFinalizeLock(runId, () => finalizeQaPipeline(ctx, caller, pipelineId, summary));
+  }
+  if (callerAgentRecord?.role === "qa_lead") {
+    throw new ToolError("The QA Lead only closes QA pipelines; feature Leads merge their own branches.");
+  }
   const isPrimaryLeadCaller = caller.agentId === initialRun.masterLeadAgentId;
+  const hasQaLead = runHasQaLead(initialRun);
   // Retried tool calls after a successful merge return the durable result instead of creating a
   // second merge commit or sending duplicate completion mail.
   if (initialPipeline.status === "integrated") {
-    const allPipelinesDone = Object.values(initialRun.pipelines).every((candidate) => candidate.status === "integrated");
-    return integratedResult(initialPipeline, allPipelinesDone, isPrimaryLeadCaller);
+    return integratedResult(initialPipeline, allFeaturePipelinesIntegrated(initialRun), isPrimaryLeadCaller, hasQaLead);
   }
   return withRunFinalizeLock(runId, async () => {
     const run = ctx.store.require(runId);
     const pipeline = requirePipeline(run, pipelineId);
     if (pipeline.status === "integrated") {
-      const allPipelinesDone = Object.values(run.pipelines).every((candidate) => candidate.status === "integrated");
-      return integratedResult(pipeline, allPipelinesDone, caller.agentId === run.masterLeadAgentId);
+      return integratedResult(pipeline, allFeaturePipelinesIntegrated(run), caller.agentId === run.masterLeadAgentId, hasQaLead);
     }
     if (run.status !== "running") throw new ToolError(`Cannot finalize a pipeline while run is '${run.status}'.`);
     if (!completedPipeline(pipeline)) throw new ToolError("Every pipeline stage must be completed and approved first.");
@@ -207,17 +197,7 @@ export async function finalizePipeline(
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 
     const preArchiveRun = ctx.store.require(runId);
-    const hasPendingLeadPlanning = Object.values(preArchiveRun.agents).some(
-      (agentRecord) =>
-        agentRecord.role === "master_lead" &&
-        !agentRecord.archivedAt &&
-        agentRecord.awaitingTool === "slp_define_pipeline",
-    );
-    const willAllPipelinesBeIntegrated =
-      !hasPendingLeadPlanning &&
-      Object.values(preArchiveRun.pipelines).every(
-        (candidatePipeline) => candidatePipeline.id === pipelineId || candidatePipeline.status === "integrated",
-      );
+    const willAllPipelinesBeIntegrated = allFeaturePipelinesIntegrated(preArchiveRun, pipelineId);
     const remainingPipelineAgents = Object.values(preArchiveRun.agents).filter(
       (agentRecord) => agentRecord.pipelineId === pipelineId && !agentRecord.archivedAt,
     );
@@ -225,8 +205,10 @@ export async function finalizePipeline(
     for (const peerRecord of remainingPipelineAgents.filter((agentRecord) => agentRecord.role === "peer")) {
       await ctx.gateway.archive(peerRecord.agentId).catch(() => undefined);
     }
-    if (willAllPipelinesBeIntegrated) {
-      // Once the final pipeline integrates, archive all sibling Leads while keeping the primary Lead alive to report or run UAT.
+    if (willAllPipelinesBeIntegrated && hasQaLead) {
+      await retireIdleFeatureLeads(ctx, runId, caller.agentId);
+    } else if (willAllPipelinesBeIntegrated) {
+      // Once the final pipeline integrates, archive all sibling Leads while keeping the primary Lead alive to verify and report.
       const siblingLeadsToArchive = Object.values(ctx.store.require(runId).agents).filter(
         (agentRecord) =>
           agentRecord.role === "master_lead" &&
@@ -267,16 +249,10 @@ export async function finalizePipeline(
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) => mutableRun.agents[queuedMessage.toAgentId]?.pipelineId !== pipelineId,
       );
-      const stillPlanning = Object.values(mutableRun.agents).some(
-        (agentRecord) =>
-          agentRecord.role === "master_lead" &&
-          !agentRecord.archivedAt &&
-          agentRecord.awaitingTool === "slp_define_pipeline",
-      );
-      allIntegrated =
-        !stillPlanning &&
-        Object.values(mutableRun.pipelines).every((candidate) => candidate.status === "integrated");
-      if (mutableRun.status === "running" && allIntegrated) {
+      allIntegrated = allFeaturePipelinesIntegrated(mutableRun);
+      if (mutableRun.status === "running" && allIntegrated && hasQaLead) {
+        applyQaHandover(mutableRun);
+      } else if (mutableRun.status === "running" && allIntegrated) {
         // If the original primary Lead was archived earlier, promote the calling unarchived Lead to deliver slp_report.
         const currentPrimaryLead = mutableRun.agents[mutableRun.masterLeadAgentId];
         if (
@@ -288,14 +264,14 @@ export async function finalizePipeline(
         }
         const primaryLeadRecord = mutableRun.agents[mutableRun.masterLeadAgentId];
         if (primaryLeadRecord) {
-          // Detach the completed pipeline pointer while preserving the Lead's live workspace for UAT/reporting.
+          // Detach the completed pipeline pointer while preserving the Lead's live workspace for verification and reporting.
           primaryLeadRecord.pipelineId = null;
           primaryLeadRecord.stageId = null;
           primaryLeadRecord.worktreePath = primaryLeadRecord.worktreePath || mutableRun.devCwd;
           primaryLeadRecord.workspaceId = primaryLeadRecord.workspaceId || mutableRun.devWorkspaceId;
         }
         if (caller.agentId !== mutableRun.masterLeadAgentId) {
-          // Attach the consolidated summaries from all Leads and wake the primary Lead to run UAT or report to Supervisor.
+          // Attach the consolidated summaries from all Leads and wake the primary Lead to verify and report to Supervisor.
           mutableRun.mailbox.push(
             stageMail(mutableRun.masterLeadAgentId, masterLeadIntegrationHandover(mutableRun), "slp_report"),
           );
@@ -315,7 +291,8 @@ export async function finalizePipeline(
       summary: `${pipeline.name}: ${mergedCommit}`,
       outcome: "delivered",
     });
+    if (allIntegrated && hasQaLead) retireMergingLeadWhenIdle(ctx, runId, caller.agentId);
     const finalRunSnapshot = ctx.store.require(runId);
-    return integratedResult(finalRunSnapshot.pipelines[pipelineId], allIntegrated, caller.agentId === finalRunSnapshot.masterLeadAgentId);
+    return integratedResult(finalRunSnapshot.pipelines[pipelineId], allIntegrated, caller.agentId === finalRunSnapshot.masterLeadAgentId, hasQaLead);
   });
 }

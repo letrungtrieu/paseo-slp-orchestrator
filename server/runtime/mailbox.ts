@@ -1,6 +1,7 @@
 // Queue of prompts waiting for an agent to become idle. Sending to a running agent would
 // interrupt its turn (Paseo cancels the active turn on a new prompt), so delivery waits.
 import { randomUUID } from "node:crypto";
+import { isPipelineLeadRole } from "../../shared/roles";
 import type { MailboxMessage, Run } from "../../shared/state";
 import { isConfirmedMissingAgentError, type AgentGateway, type AgentLiveStatus } from "./agent-gateway";
 import type { RunStore } from "../store/run-store";
@@ -28,7 +29,7 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   // Persisted archive state wins over a stale SDK directory entry after a restart.
   if (!agentRecord || agentRecord.archivedAt) return false;
   // Supervisor and unarchived Leads coordinate across planning, paused stages, and final integration regardless of stage pointers.
-  if (agentRecord.role === "supervisor" || agentRecord.role === "master_lead") return true;
+  if (agentRecord.role === "supervisor" || isPipelineLeadRole(agentRecord.role)) return true;
   if (!agentRecord.pipelineId && !agentRecord.stageId) return true;
   if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];

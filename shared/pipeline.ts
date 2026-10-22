@@ -65,10 +65,16 @@ export const PipelineEnvelopeSchema = z.object({
 });
 export type PipelineEnvelope = z.infer<typeof PipelineEnvelopeSchema>;
 
+// A spec shorter than this cannot describe screens, states and scenarios, so it is treated as missing.
+export const PRODUCT_SPEC_MIN_LENGTH = 80;
+const ProductSpecSchema = z.string().trim().min(PRODUCT_SPEC_MIN_LENGTH);
+
 // Describes one parallel feature track delegated by the Supervisor to a dedicated Lead and worktree.
 export const DelegatedFeatureSchema = z.object({
   name: z.string().trim().min(1),
   acceptanceCriteria: z.string().trim().min(10),
+  // Human-approved screens, states and Given/When/Then interactions; required per feature by DelegationSubmissionSchema.
+  productSpec: ProductSpecSchema.optional(),
   worktree: z.string().trim().min(1).optional(),
 });
 export type DelegatedFeature = z.infer<typeof DelegatedFeatureSchema>;
@@ -77,6 +83,8 @@ export type DelegatedFeature = z.infer<typeof DelegatedFeatureSchema>;
 export const DelegationSubmissionSchema = z
   .object({
     acceptanceCriteria: z.string().trim().min(10).optional(),
+    // Single-feature form: the human-approved product spec for the whole request.
+    productSpec: ProductSpecSchema.optional(),
     sharedContext: z.string().trim().min(1).optional(),
     tasks: z.array(DelegatedFeatureSchema).min(1).optional(),
   })
@@ -86,6 +94,16 @@ export const DelegationSubmissionSchema = z
       Boolean(submission.tasks && submission.tasks.length > 0),
     {
       message: "Provide either acceptanceCriteria (at least 20 characters) or a non-empty tasks array.",
+    },
+  )
+  // Without an approved spec, developers improvise the UI and QA has nothing to verify behavior against.
+  .refine(
+    (submission) =>
+      submission.tasks && submission.tasks.length > 0
+        ? submission.tasks.every((task) => Boolean(task.productSpec))
+        : Boolean(submission.productSpec),
+    {
+      message: `Provide the human-approved productSpec (at least ${PRODUCT_SPEC_MIN_LENGTH} characters: screens and elements, states, Given/When/Then interactions, business rules, out of scope) for every feature before delegating.`,
     },
   );
 export type DelegationSubmission = z.infer<typeof DelegationSubmissionSchema>;
@@ -159,8 +177,15 @@ export const StageStateSchema = PipelineStageDefinitionSchema.extend({
 });
 export type StageState = z.infer<typeof StageStateSchema>;
 
+// Feature pipelines run in a Lead's own worktree and merge into the QA branch; QA pipelines run on the QA branch itself.
+export const PIPELINE_KINDS = ["feature", "qa"] as const;
+export const PipelineKindSchema = z.enum(PIPELINE_KINDS);
+export type PipelineKind = z.infer<typeof PipelineKindSchema>;
+
 export const PipelineStateSchema = PipelineDefinitionSchema.extend({
   id: z.string().min(1),
+  // Older snapshots predate QA pipelines, so a missing kind means a feature pipeline.
+  kind: PipelineKindSchema.default("feature"),
   status: PipelineStatusSchema.default("queued"),
   // Tracks the Lead agent that owns this pipeline's worktree and directly supervises all of its stages.
   leadAgentId: z.string().nullable().default(null),

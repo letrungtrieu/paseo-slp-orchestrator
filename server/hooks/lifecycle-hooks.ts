@@ -1,13 +1,14 @@
 // Lifecycle hooks (events are best effort, so nothing here is load bearing for correctness):
 // capture the SDK handle, answer permissions quickly, and nudge agents that forgot their tool.
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { NUDGE_LIMIT } from "../../shared/roles";
+import { NUDGE_LIMIT, isPipelineLeadRole } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
-import { isMasterLeadObligationActive } from "../pipeline/agent-revival";
+import { isMasterLeadObligationActive } from "../pipeline/master-lead-obligations";
 import type { PipelineContext } from "../pipeline/context";
 import { handleAgentArchived } from "../pipeline/run-lifecycle";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
+import { isQaPhaseActive } from "../pipeline/qa/qa-phase-state";
 import { nudgeReminder } from "../prompts/messages";
 import type { AgentLiveStatus } from "../runtime/agent-gateway";
 import { defaultFeatureValuesForProvider } from "../runtime/agent-gateway-helpers";
@@ -28,7 +29,7 @@ function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline) return false;
   // The pipeline's Lead continues to own the pipeline while merging its branch via slp_finalize_pipeline.
-  if (pipeline.status === "completed" && agentRecord.role === "master_lead") {
+  if (pipeline.status === "completed" && isPipelineLeadRole(agentRecord.role)) {
     return pipeline.leadAgentId === agentRecord.agentId || pipeline.stages.at(-1)?.forkedLeadAgentId === agentRecord.agentId;
   }
   const currentStage = pipeline.stages[pipeline.currentStageIndex];
@@ -43,7 +44,7 @@ function agentOwnsMasterLeadObligation(run: Run, agentRecord: AgentRecord): bool
     run.engineVersion === "dynamic-stages-v1"
     && ["planning", "running"].includes(run.status)
     && !agentRecord.archivedAt
-    && agentRecord.role === "master_lead"
+    && isPipelineLeadRole(agentRecord.role)
     && isMasterLeadObligationActive(run, agentRecord.awaitingTool),
   );
 }
@@ -63,7 +64,7 @@ function agentOwnsSupervisorObligation(run: Run, agentRecord: AgentRecord): bool
 function stageObligationFor(run: Run, agentRecord: AgentRecord): string | null {
   if (agentRecord.deferredTool) return agentRecord.deferredTool;
   if (agentRecord.role === "peer") return "slp_stage_report";
-  if (agentRecord.role === "master_lead" && agentOwnsCurrentStage(run, agentRecord)) {
+  if (isPipelineLeadRole(agentRecord.role) && agentOwnsCurrentStage(run, agentRecord)) {
     const pipeline = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId] : undefined;
     return pipeline?.status === "completed" ? "slp_finalize_pipeline" : "slp_approve_stage";
   }
@@ -73,7 +74,7 @@ function stageObligationFor(run: Run, agentRecord: AgentRecord): string | null {
 function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: string): boolean {
   const currentAgent = run.agents[agentId];
   const isWaitingLeadInPlanning =
-    currentAgent?.role === "master_lead" &&
+    isPipelineLeadRole(currentAgent?.role) &&
     run.status === "planning" &&
     Boolean(currentAgent.waitingForAgentId && currentAgent.awaitingSince);
   if (
@@ -91,7 +92,7 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
   ctx.store.mutate(run.id, (mutableRun) => {
     const mutableAgent = mutableRun.agents[agentId];
     const mutableIsPlanningLead =
-      mutableAgent?.role === "master_lead" &&
+      isPipelineLeadRole(mutableAgent?.role) &&
       mutableRun.status === "planning" &&
       Boolean(mutableAgent.waitingForAgentId && mutableAgent.awaitingSince);
     if (
@@ -103,6 +104,17 @@ function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: stri
     }
     const refreshedStartedAtMs = Date.parse(mutableAgent.awaitingSince);
     if (!Number.isFinite(refreshedStartedAtMs) || Date.now() - refreshedStartedAtMs < DIRECT_REPLY_TIMEOUT_MS) return;
+    // A preparing QA Lead owes no tool; restoring slp_define_pipeline would nudge it into a call the engine rejects.
+    if (mutableAgent.role === "qa_lead" && !isQaPhaseActive(mutableRun)) {
+      mutableAgent.waitingForAgentId = null;
+      mutableAgent.deferredTool = null;
+      mutableAgent.awaitingSince = null;
+      mutableRun.mailbox.push(stageMail(agentId,
+        `No reply was received from ${recipientAgentId} within ${DIRECT_REPLY_TIMEOUT_MS / 1000} seconds. Continue preparing your QA plan without it and end your turn.`,
+        null));
+      queued = true;
+      return;
+    }
     const owningPipeline = mutableAgent.pipelineId ? mutableRun.pipelines[mutableAgent.pipelineId] : undefined;
     const stageName = owningPipeline?.stages.find((candidate) => candidate.id === mutableAgent.stageId)?.name ?? (mutableIsPlanningLead ? "planning" : undefined);
     if (!stageName) return;

@@ -4,7 +4,10 @@
 import { readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
+import { defaultProjectPrompts } from "../server/project-prompts/defaults";
 import { parseRoleMarkdown } from "../server/project-prompts/markdown";
+import { slpManagerSkillFiles } from "../server/skills/slp-manager/skill-files";
 import {
   defaultProjectSkillRoots,
   ensureSlpManagerSkill,
@@ -61,7 +64,9 @@ describe("slp-manager project skill provisioning", () => {
     expect(installedSkillText).toContain("├── quality/");
     expect(installedSkillText).toContain("├── standards/");
     expect(installedSkillText).toContain("## 3. How to Create a New Grouped Peer Role in `.slp/peers/<group>/<ROLE>.md`");
-    expect(installedSkillText).toContain("## 4. Rules for Editing `.slp/SUPERVISOR.md` and `.slp/LEAD.md` Safely");
+    expect(installedSkillText).toContain("## 4. Rules for Editing `.slp/SUPERVISOR.md`, `.slp/LEAD.md` and `.slp/QA_LEAD.md` Safely");
+    // Agents editing .slp must learn that only the QA Lead reports and that it never edits code itself.
+    expect(installedSkillText).toContain("### Mandatory Checklist When Editing `.slp/QA_LEAD.md`");
   });
 
   it("embeds a grouped peer role template in SKILL.md that parses cleanly with parseRoleMarkdown", () => {
@@ -80,5 +85,55 @@ describe("slp-manager project skill provisioning", () => {
     expect(parsedExampleRole.frontMatter).toContain("skills:");
     expect(parsedExampleRole.workflow).toContain("slp_stage_report");
     expect(parsedExampleRole.workflow).toContain("END YOUR TURN");
+    // The template peer must model the tier contract that keeps heavy tools out of feature pipelines.
+    expect(parsedExampleRole.frontMatter).toContain("tier: feature");
+  });
+
+  it("installs every reference file that SKILL.md points agents to", async () => {
+    const fakeProjectDirectory = await createDirectory("slp-skill-references");
+    ensureSlpManagerSkill(fakeProjectDirectory);
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    const referenceFiles = slpManagerSkillFiles().filter((skillFile) => skillFile.relativePath.startsWith("references/"));
+    expect(referenceFiles.map((skillFile) => skillFile.relativePath)).toEqual([
+      "references/PROJECT_INVESTIGATION.md",
+      "references/TEST_POLICY_TEMPLATE.md",
+      "references/STACK_PLAYBOOKS.md",
+    ]);
+    for (const referenceFile of referenceFiles) {
+      // A reference that SKILL.md never names would be dead weight; one it names but never installs would break the procedure.
+      expect(skillMarkdown).toContain(referenceFile.relativePath);
+      const installedReferenceText = await readFile(
+        join(fakeProjectDirectory, ".claude", "skills", SLP_MANAGER_SKILL_NAME, referenceFile.relativePath),
+        "utf8",
+      );
+      expect(installedReferenceText).toBe(referenceFile.content);
+    }
+  });
+
+  it("ships a TEST_POLICY template whose machine-readable block parses and lists heavy resource signatures", () => {
+    const templateReference = slpManagerSkillFiles().find((skillFile) => skillFile.relativePath === "references/TEST_POLICY_TEMPLATE.md");
+    const yamlBlockMatch = /```yaml\n([\s\S]*?)\n```/.exec(templateReference!.content);
+    expect(yamlBlockMatch).not.toBeNull();
+    // Future runtime guards read these keys from generated policies, so the template must stay valid YAML with this shape.
+    const templatePolicy = parseYaml(yamlBlockMatch![1]) as {
+      tiers: Record<string, { where: string }>;
+      heavy_resources: Array<{ id: string; process_signatures: string[]; max_concurrent: number }>;
+    };
+    expect(Object.keys(templatePolicy.tiers)).toEqual(["fast", "engine", "integration"]);
+    expect(templatePolicy.tiers.fast.where).toBe("feature-pipelines");
+    expect(templatePolicy.heavy_resources[0].process_signatures.length).toBeGreaterThan(0);
+    expect(templatePolicy.heavy_resources[0].max_concurrent).toBe(1);
+  });
+
+  it("seeds a feature tier on every default peer", () => {
+    const seededPeerTiers = Object.fromEntries(
+      defaultProjectPrompts().peers.map((seededPeer) => [seededPeer.role, parseYaml(seededPeer.frontMatter).tier]),
+    );
+    expect(seededPeerTiers).toEqual({
+      "developer": "feature",
+      "qa-engineer": "feature",
+      "reviewer": "feature",
+      "security-reviewer": "feature",
+    });
   });
 });

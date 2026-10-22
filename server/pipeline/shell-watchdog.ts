@@ -263,6 +263,11 @@ export async function handlePeerShell(
   }
 
   const callerRecord = currentRun.agents[caller.agentId];
+  // A QA Lead may only steer its own QA peers; feature peers answer to their feature Lead.
+  const peerPipeline = peerRecord.pipelineId ? currentRun.pipelines[peerRecord.pipelineId] : undefined;
+  if (callerRecord?.role === "qa_lead" && peerPipeline?.kind !== "qa") {
+    throw new ToolError(`QA Lead cannot manage peer '${peerRecord.agentId}' of feature pipeline '${peerPipeline?.name ?? "unknown"}'.`);
+  }
   // A pipeline Lead only governs peers inside its own task pipeline; the primary Lead can intervene across any pipeline.
   if (
     caller.agentId !== currentRun.masterLeadAgentId

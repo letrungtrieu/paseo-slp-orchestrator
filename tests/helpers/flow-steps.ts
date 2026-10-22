@@ -47,9 +47,18 @@ export const SECOND_STAGE_PIPELINE: PipelineDefinition = {
 // Polling is needed because stage creation is deliberately detached from the defining tool call.
 export const eventually = (assertion: () => void) => vi.waitFor(assertion, { timeout: 4000, interval: 10 });
 
+// Delegation requires a human-approved product spec, so tests share one that has every template section.
+export const SAMPLE_PRODUCT_SPEC = [
+  "Screens: Billing import page with a file picker, an Import button (disabled until a file is chosen) and a result table.",
+  "States: empty table before import; spinner while importing; error banner when the file is invalid.",
+  "Given a valid CSV When the user clicks Import Then the table lists every imported invoice with its total.",
+  "Rules: totals use two decimals. Out of scope: editing invoices.",
+].join("\n");
+
 export async function delegateToLead(flow: Flow, runId: string): Promise<void> {
   const delegation = await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
     acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
+    productSpec: SAMPLE_PRODUCT_SPEC,
   });
   if (delegation.isError) throw new Error(delegation.text);
 }
@@ -160,3 +169,35 @@ export function pipelineHead(flow: Flow, runId: string, pipelineId: string): str
 }
 
 export type PipelineStory = { runId: string; pipelineId: string; pipeline: PipelineState };
+
+// A one-stage QA pass; worktree is omitted because QA pipelines always run in the QA worktree.
+export const QA_PIPELINE = {
+  name: "qa-verification",
+  description: "Verify the merged QA branch",
+  stages: [{ name: "verify", goal: "Verify the merged build", peers: [{ role: "qa-engineer", task: "Run every suite on the merged build" }] }],
+};
+
+// Drives the QA Lead from handover to report so feature-flow tests can reach the Supervisor quickly.
+export async function verifyAndReportFromQaLead(flow: Flow, runId: string, summary = "QA verified the merged build."): Promise<string> {
+  const qaLeadId = flow.run(runId).qaLeadAgentId;
+  const defined = await flow.callAs(qaLeadId, "slp_define_pipeline", { pipeline: QA_PIPELINE });
+  if (defined.isError) throw new Error(defined.text);
+  const { pipelineId } = JSON.parse(defined.text) as { pipelineId: string };
+  await eventually(() => {
+    if (flow.pipeline(runId, pipelineId)?.status !== "running") throw new Error("QA stage is still starting");
+  });
+  await completePipeline(flow, runId, pipelineId);
+  const closed = await flow.callAs(qaLeadId, "slp_finalize_pipeline", { pipelineId, summary });
+  if (closed.isError) throw new Error(closed.text);
+  const reported = await flow.callAs(qaLeadId, "slp_report", { summary });
+  if (reported.isError) throw new Error(reported.text);
+  return pipelineId;
+}
+
+// The QA branch is the only slp/* branch that must survive feature merges, because QA still runs on it.
+export function localSlpBranches(flow: Flow): string[] {
+  return runGitSync(flow.repoPath, ["branch", "--list", "slp/*"])
+    .split("\n")
+    .map((branchLine) => branchLine.replace(/^[*+ ]+/, "").trim())
+    .filter(Boolean);
+}

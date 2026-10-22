@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, approveCurrentStage, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, TWO_PEER_PIPELINE, approveCurrentStage, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -84,7 +84,12 @@ describe("stage coordination", () => {
     });
     expect(finalization.isError).toBe(false);
     expect(flow.gateway.archivedAgentIds).toContain(reviewerId);
-    expect(flow.run(runId).agents[coordinatorId].awaitingTool).toBe("slp_report");
+    // The feature Lead's job ends at the merge; the QA Lead takes over and owes its QA pipeline next.
+    const handedOverRun = flow.run(runId);
+    expect(handedOverRun.agents[coordinatorId].awaitingTool).toBeNull();
+    expect(handedOverRun.masterLeadAgentId).toBe(handedOverRun.qaLeadAgentId);
+    expect(handedOverRun.status).toBe("planning");
+    expect(flow.mailTo(runId, handedOverRun.qaLeadAgentId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
   });
 
   it("spawns N dedicated Leads in immediate worktrees on parallel slp_delegate, lets sibling Leads align contracts via slp_send_peer_message, and forks stage Peers directly from their owning Lead", async () => {
@@ -99,10 +104,12 @@ describe("stage coordination", () => {
         {
           name: "auth-api",
           acceptanceCriteria: "Implement `/api/auth/session` returning `SessionPayload`.",
+          productSpec: SAMPLE_PRODUCT_SPEC,
         },
         {
           name: "checkout-ui",
           acceptanceCriteria: "Consume `/api/auth/session` in the checkout header component.",
+          productSpec: SAMPLE_PRODUCT_SPEC,
         },
       ],
     });
@@ -228,6 +235,7 @@ describe("stage coordination", () => {
     });
     await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
       acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
+      productSpec: SAMPLE_PRODUCT_SPEC,
     });
     const leadId = flow.run(runId).masterLeadAgentId;
     const defineResponse = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {

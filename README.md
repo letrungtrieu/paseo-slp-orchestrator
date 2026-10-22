@@ -32,6 +32,7 @@ flowchart TD
     User(["Người dùng (Supreme Manager)"])
     Sup["Supervisor<br/>(Read-Only tại Base Repo)<br/>Làm rõ yêu cầu & Nghiệm thu độc lập"]
     ML["Master Lead<br/>(Integration Workspace)<br/>Thiết kế Pipeline, Tạo Worktree & Merge tích hợp"]
+    QA["QA Lead<br/>(Read-Only tại QA Worktree)<br/>Spawn peer test & sửa lỗi, báo cáo Supervisor"]
 
     subgraph PipelineWorktree ["Pipeline Git Worktree (Cô lập theo từng Pipeline)"]
         direction TB
@@ -54,7 +55,9 @@ flowchart TD
     end
 
     User <-->|"Chat trực tiếp"| Sup
-    Sup <-->|"slp_delegate / slp_report / slp_request_rework"| ML
+    Sup -->|"slp_delegate"| ML
+    Sup <-->|"slp_report / slp_request_rework"| QA
+    ML ==>|"slp_finalize_pipeline<br/>(merge vào nhánh QA)"| QA
     ML ==>|"slp_define_pipeline<br/>(Fork phiên làm việc cho từng Stage)"| FL1
     FL2 ==>|"Hoàn tất Stage cuối"| ML
 ```
@@ -66,6 +69,7 @@ flowchart TD
 | **`supervisor`** | 1 / Run | **Read-Only** (Chỉ đọc trên nhánh gốc `baseBranch`) | Đầu mối duy nhất giao tiếp với người dùng. Thu thập yêu cầu, lập bộ tiêu chí nghiệm thu (`Acceptance Criteria`), ủy quyền cho `Master Lead`, tự mình kiểm tra độc lập kết quả cuối cùng trước khi trình bày cho người dùng hoặc yêu cầu làm lại. |
 | **`master_lead`** | 1 / Run | **Read / Write** (Trên nhánh tích hợp `integrationBranch` & quản lý Worktree) | Kiến trúc sư trưởng kiêm người sở hữu nhánh tích hợp. Khảo sát codebase, tạo Git worktree bằng `slp_create_worktree`, thiết kế cấu trúc Pipeline nhiều Stage bằng `slp_define_pipeline`, xử lý các trường hợp bế tắc (`escalate`), kiểm tra & merge kết quả từ pipeline worktree vào nhánh tích hợp (`slp_finalize_pipeline`) và báo cáo cho `Supervisor` (`slp_report`). |
 | **`forked_lead`** | 1 / Stage | **Read-Only** (Trên worktree của Pipeline) | Điều phối viên của **một Stage cụ thể** (được fork từ ngữ cảnh của `Master Lead` hoặc khởi tạo với đầy đủ trạng thái Pipeline). Theo dõi các Peer trong Stage, đối chiếu bằng chứng thực tế trong worktree với mục tiêu Stage (`stage.goal`), quyết định duyệt Stage (`slp_approve_stage`), yêu cầu Peer sửa lại (`slp_stage_rework`), hoặc báo cáo bế tắc lên `Master Lead` (`slp_escalate`). |
+| **`qa_lead`** | 1 / Run | **Read-Only** (Trong QA worktree = nhánh tích hợp `integrationBranch`) | Được spawn cùng lúc với các Lead, nhận cùng yêu cầu và danh sách Lead để chuẩn bị kế hoạch test (unit, automation, manual theo `.slp/standards/TEST_POLICY.md`). Mọi Lead merge nhánh của mình vào nhánh QA và tự giải quyết conflict. Sau khi feature cuối cùng merge xong, QA Lead định nghĩa pipeline QA ngay trong QA worktree, peer fork từ phiên của nó để test và sửa lỗi (QA Lead không tự sửa code), đóng pipeline bằng `slp_finalize_pipeline` rồi là người duy nhất được gọi `slp_report`. Yêu cầu rework của `Supervisor` cũng quay về QA Lead. |
 | **`peer`** | $1..N$ / Stage | **Read / Write** (Chia sẻ chung `pipeline.worktree`) | Chuyên gia thực thi công việc trong một Stage theo đúng quy trình trong `.slp/peers/<ROLE>.md` (ví dụ: `developer`, `reviewer`, `qa-engineer`, `security-reviewer`...). Các Peer trong cùng một Stage có quyền ngang nhau, có thể nhắn tin phản biện trực tiếp qua `slp_send_peer_message` và nộp bằng chứng hoàn thành qua `slp_stage_report`. |
 
 ---
@@ -208,7 +212,7 @@ sequenceDiagram
 | :--- | :--- | :--- | :--- |
 | **User ↔ Supervisor** | 2 chiều | Chat trực tiếp trên Paseo UI + Nút Approve/Reject Gate | Chỉ `Supervisor` mới nói chuyện với người dùng. Khi Run ở trạng thái `awaiting_user`, bạn có thể bấm Approve để đóng Run hoặc nhập phản hồi Rework. |
 | **Supervisor → Master Lead** | Ủy quyền / Yêu cầu làm lại | `slp_delegate`<br/>`slp_request_rework` | Ghi `criteria` vào SQLite, chuyển Run sang `planning`, đẩy tin nhắn vào `mailbox` của `Master Lead` kèm nghĩa vụ `awaitTool = "slp_define_pipeline"`. |
-| **Master Lead → Supervisor** | Báo cáo hoàn thành | `slp_report` | Ghi `finalReport` vào SQLite, chuyển Run sang `reporting`, đẩy báo cáo vào `mailbox` của `Supervisor` kèm nghĩa vụ `awaitTool = "slp_present_to_manager"`. |
+| **QA Lead → Supervisor** | Báo cáo hoàn thành | `slp_report` | Chỉ được chấp nhận sau khi một pipeline QA đã đóng sau lần merge feature cuối cùng. Ghi `finalReport` vào SQLite, chuyển Run sang `reporting`, đẩy báo cáo vào `mailbox` của `Supervisor` kèm nghĩa vụ `awaitTool = "slp_present_to_manager"`. |
 | **Master Lead ↔ Forked Lead** | Khởi tạo Stage / Escalate / Resume | `slp_define_pipeline`<br/>`slp_escalate`<br/>`slp_resume_pipeline` | Khi Stage bị `escalate` (hoặc dừng ở Gate của chế độ `STEP_BY_STEP_DEBUG` / `SEMI_AUTO`), Pipeline chuyển sang `paused` và đánh thức `Master Lead` với nghĩa vụ `slp_resume_pipeline`. |
 | **Forked Lead ↔ Peers** | Giao việc / Báo cáo / Rework | `slp_stage_report`<br/>`slp_stage_rework`<br/>`slp_approve_stage` | Các Peer nộp bằng chứng qua `slp_stage_report`. Khi tất cả Peer hoàn tất, `Forked Lead` mới được đánh thức để duyệt (`slp_approve_stage`) hoặc yêu cầu làm lại (`slp_stage_rework`). |
 | **Peer ↔ Peer (Cùng Stage & Xuyên Stage)** | Thảo luận, Phản biện & Hỏi đáp giữa các công đoạn | `slp_send_peer_message` | Trao đổi trực tiếp giữa các Peer trong cùng một Stage, với `Forked Lead`, hoặc **giữa Peer ở Stage hiện tại với các Peer ở những Stage trước đã hoàn thành** trong cùng Pipeline. Hỗ trợ cả chế độ gửi không chờ (`waitForReply: false`) và chế độ dừng lượt chờ câu trả lời (`waitForReply: true`). |
@@ -290,6 +294,7 @@ Khi bạn chọn một dự án trong SLP, nếu dự án chưa có thư mục `
 .slp/
 ├── SUPERVISOR.md              # Cấu hình & quy trình làm việc của Supervisor
 ├── LEAD.md                    # Cấu hình & quy trình làm việc của Master Lead / Forked Lead
+├── QA_LEAD.md                 # Cấu hình & quy trình làm việc của QA Lead (tự tạo lại nếu thiếu)
 └── peers/                     # Thư mục chứa định nghĩa tất cả các Peer chuyên môn của dự án
     ├── DEVELOPER.md           # role: developer
     ├── REVIEWER.md            # role: reviewer
@@ -425,8 +430,8 @@ Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ th
 | **`slp_create_worktree`** | `{ name: string }` | Tạo một Git worktree mới tách từ nhánh tích hợp của Run và trả về đường dẫn `worktree` + tên `branch`. **Không kết thúc lượt** (gọi tiếp `slp_define_pipeline`). |
 | **`slp_define_pipeline`** | `{ pipeline: PipelineDefinition }` | Đăng ký và khởi chạy ngay một Pipeline động gồm các Stage tuần tự trên worktree đã tạo. **Kết thúc lượt sau khi gọi.** |
 | **`slp_resume_pipeline`** | `{ pipelineId: string, feedback: string }` | Tiếp tục một Pipeline đang ở trạng thái `paused` (do `escalate` hoặc dừng tại cổng Gate) kèm chỉ đạo mới cho Stage hiện tại. **Kết thúc lượt sau khi gọi.** |
-| **`slp_finalize_pipeline`** | `{ pipelineId: string, summary: string }` | Xác nhận Pipeline đã được merge vào nhánh tích hợp (`integrationBranch`), lưu báo cáo tổng kết của Pipeline, đóng worktree và chuyển nghĩa vụ của `Master Lead` sang `slp_report`. **Sau khi gọi thành công, gọi tiếp `slp_report` ngay trong cùng lượt nếu tất cả Pipeline đã tích hợp.** |
-| **`slp_report`** | `{ summary: string }` | Gửi báo cáo tổng kết tích hợp của toàn bộ Run lên cho `Supervisor` kiểm tra nghiệm thu. **Kết thúc lượt sau khi gọi.** |
+| **`slp_finalize_pipeline`** | `{ pipelineId: string, summary: string }` | Lead feature: merge nhánh Pipeline vào nhánh QA (`integrationBranch`); khi feature cuối cùng merge xong, các Lead được lưu trữ và QA Lead nhận bàn giao. QA Lead: đóng pipeline QA ngay trên nhánh QA (không merge) và chuyển nghĩa vụ sang `slp_report`. |
+| **`slp_report`** | `{ summary: string }` | Chỉ QA Lead: gửi kết quả đã xác minh trên nhánh QA lên `Supervisor` nghiệm thu. **Kết thúc lượt sau khi gọi.** |
 
 ### 6.3. Công cụ của `Forked Lead` (Điều phối viên Stage)
 

@@ -11,10 +11,10 @@ import {
 const pipelineIdField = z.string().trim().min(1).describe("Id of the target pipeline");
 
 export const BUS_TOOL_DEFINITIONS = {
-  // Each Lead defines the stage pipeline for its dedicated feature worktree (or additional feature pipelines).
+  // Each Lead defines the stage pipeline for its dedicated feature worktree; the QA Lead defines QA pipelines on the QA branch.
   slp_define_pipeline: {
-    roles: ["master_lead"],
-    description: "Define the stage pipeline(s) for this Lead's feature worktree.",
+    roles: ["master_lead", "qa_lead"],
+    description: "Define the stage pipeline(s) for this Lead's feature worktree, or the QA Lead's verification pipeline on the QA branch.",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -32,20 +32,20 @@ export const BUS_TOOL_DEFINITIONS = {
     description: "Create a worktree for the current run or pipeline and return its path and branch.",
     input: z.object({ name: z.string().trim().min(1) }),
   },
-  // The Lead that owns a completed pipeline verifies and merges its worktree branch into the integration branch.
+  // A feature Lead merges its completed branch into the QA branch; the QA Lead closes its QA pipeline in place.
   slp_finalize_pipeline: {
-    roles: ["master_lead"],
-    description: "Finalize a completed pipeline after verifying and merging its worktree branch into the integration branch.",
+    roles: ["master_lead", "qa_lead"],
+    description: "Finalize a completed pipeline: merge a feature branch into the QA branch, or close the QA Lead's verification pipeline.",
     input: z.object({ pipelineId: pipelineIdField.optional(), summary: z.string().trim().min(1) }),
   },
   slp_resume_pipeline: {
-    roles: ["master_lead"],
+    roles: ["master_lead", "qa_lead"],
     description: "Resume a paused pipeline with a decision or new guidance.",
     input: z.object({ pipelineId: pipelineIdField, feedback: z.string().trim().min(1) }),
   },
   slp_send_peer_message: {
     // Leads can directly message sibling Leads (for cross-feature API/flow alignment) or stage Peers; Peers can message their Lead or sibling stage Peers.
-    roles: ["master_lead", "peer"],
+    roles: ["master_lead", "qa_lead", "peer"],
     description: "Send a direct message to a sibling Lead (to align shared APIs/flows across parallel features) or a stage Peer.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
@@ -60,14 +60,14 @@ export const BUS_TOOL_DEFINITIONS = {
     input: StageReportSubmissionSchema,
   },
   slp_approve_stage: {
-    roles: ["master_lead"],
+    roles: ["master_lead", "qa_lead"],
     description: "Approve the current stage after reviewing peer reports and the worktree diff to advance the pipeline.",
     input: z.object({
       summary: z.string().trim().min(1),
     }),
   },
   slp_stage_rework: {
-    roles: ["master_lead"],
+    roles: ["master_lead", "qa_lead"],
     description: "Request another pass from selected stage peers with concrete feedback.",
     input: z.object({
       agentIds: z.array(z.string().trim().min(1)).default([]),
@@ -83,7 +83,7 @@ export const BUS_TOOL_DEFINITIONS = {
   // decompose features into Lead worktrees and communicate acceptance decisions to the human manager.
   slp_delegate: {
     roles: ["supervisor"],
-    description: "Delegate 1 or N parallel features/tasks to dedicated Lead agents in isolated worktrees with full cross-Lead awareness.",
+    description: "Delegate 1 or N parallel features/tasks to dedicated Lead agents in isolated worktrees with full cross-Lead awareness. Every feature needs the human-approved productSpec (screens, states, Given/When/Then interactions).",
     input: DelegationSubmissionSchema,
   },
   slp_request_rework: {
@@ -96,14 +96,15 @@ export const BUS_TOOL_DEFINITIONS = {
     description: "Declare the result verified and present it to the Supreme Manager for final approval.",
     input: z.object({ report: z.string().trim().min(1) }),
   },
+  // Only the QA Lead reports, so the Supervisor never receives a merged result that nobody verified.
   slp_report: {
-    roles: ["master_lead"],
-    description: "Report the integrated pipeline result to the Supervisor.",
+    roles: ["qa_lead"],
+    description: "Report the verified QA branch result to the Supervisor.",
     input: z.object({ summary: z.string().trim().min(1) }),
   },
   // Enables the Supervisor or Lead to manually respawn dead, archived or stalled sessions on demand.
   slp_revive_agent: {
-    roles: ["supervisor", "master_lead"],
+    roles: ["supervisor", "master_lead", "qa_lead"],
     description: "Revive dead, archived, errored or stalled Lead or stage Peer agents and resume their pending obligation.",
     input: z.object({
       target: z.enum(["auto", "master_lead", "stage_cohort", "agent"]).default("auto"),
@@ -114,7 +115,7 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   // Allows a Lead to either cancel a hung peer shell command with guidance or extend its watchdog timer.
   slp_handle_peer_shell: {
-    roles: ["master_lead"],
+    roles: ["master_lead", "qa_lead"],
     description: "Cancel a hung peer shell command and deliver corrective guidance, or extend its idle-output watchdog timer.",
     input: z.object({
       peerAgentId: z.string().trim().min(1),

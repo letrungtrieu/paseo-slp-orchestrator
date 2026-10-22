@@ -2,11 +2,13 @@
 import { randomUUID } from "node:crypto";
 import type { BusCaller } from "../bus/http-mcp";
 import type { StageReportSubmission } from "../../shared/pipeline";
+import { isPipelineLeadRole } from "../../shared/roles";
 import type { PipelineContext } from "./context";
 import { coordinatorRevivalBriefing } from "./stage-briefings";
 import { pausePipeline, requirePipeline, requireStageLead, stageForCaller } from "./stage-context";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
+import { isQaPhaseActive } from "./qa/qa-phase-state";
 
 export function sendPeerMessage(
   ctx: PipelineContext,
@@ -25,10 +27,10 @@ export function sendPeerMessage(
   // so parallel Leads can align shared APIs, data schemas, and end-to-end user flows across features.
   if (
     ["planning", "running"].includes(run.status)
-    && agent.role === "master_lead"
+    && isPipelineLeadRole(agent.role)
     && recipient
     && !recipient.archivedAt
-    && recipient.role === "master_lead"
+    && isPipelineLeadRole(recipient.role)
     && input.toAgentId !== caller.agentId
   ) {
     const callerPipeline = agent.pipelineId ? run.pipelines[agent.pipelineId] : undefined;
@@ -66,7 +68,11 @@ export function sendPeerMessage(
       }
       if (input.waitForReply) {
         // Preserve whichever obligation (slp_define_pipeline, slp_approve_stage, slp_finalize_pipeline, or slp_report) the Lead owed before consulting its sibling.
-        const defaultLeadObligation = !callerPipeline
+        // A preparing QA Lead owes nothing yet; restoring slp_define_pipeline there would nudge it into a rejected call.
+        const isPreparingQaLead = agent.role === "qa_lead" && !isQaPhaseActive(run);
+        const defaultLeadObligation = isPreparingQaLead
+          ? null
+          : !callerPipeline
           ? "slp_define_pipeline"
           : callerPipeline.status === "completed"
             ? "slp_finalize_pipeline"
@@ -113,7 +119,7 @@ export function sendPeerMessage(
     const callerStageName = pipeline.stages.find((candidate) => candidate.id === agent.stageId)?.name ?? finalStage.name;
     const restoresMergeReply = recipient.waitingForAgentId === caller.agentId;
     const mergeReplyTool = restoresMergeReply ? recipient.deferredTool : null;
-    const mergeDeliveryText = agent.role === "master_lead"
+    const mergeDeliveryText = isPipelineLeadRole(agent.role)
       ? `Merge/conflict question from pipeline '${pipeline.name}' Lead (${caller.agentId}):\n${input.message}\nReply directly to ${caller.agentId} using slp_send_peer_message({ toAgentId: "${caller.agentId}", message: "...", waitForReply: false }) explaining why your code was written this way and how the conflict should be resolved, then end your turn. Do not call slp_stage_report.`
       : `Merge/conflict reply from stage '${callerStageName}' ${agent.projectRole ?? "peer"} (${caller.agentId}):\n${input.message}\nUse this clarification to resolve the conflict and call slp_finalize_pipeline when ready.`;
     ctx.store.mutate(run.id, (mutableRun) => {
@@ -126,7 +132,7 @@ export function sendPeerMessage(
         recipient.waitingForAgentId = null;
         recipient.deferredTool = null;
       }
-      if (input.waitForReply && agent.role === "master_lead") {
+      if (input.waitForReply && isPipelineLeadRole(agent.role)) {
         // Suspend slp_finalize_pipeline nudges while the Lead waits for the peer's conflict explanation.
         agent.waitingForAgentId = input.toAgentId;
         agent.deferredTool = agent.awaitingTool ?? "slp_finalize_pipeline";
@@ -135,7 +141,7 @@ export function sendPeerMessage(
       }
     });
     ctx.logEvent(run.id, { taskId: null, from: caller.agentId, to: input.toAgentId, kind: "stage.message", summary: input.message.slice(0, 240), outcome: "queued" });
-    return input.waitForReply && agent.role === "master_lead"
+    return input.waitForReply && isPipelineLeadRole(agent.role)
       ? "Message saved and queued. End your turn while waiting for the reply."
       : "Message saved and queued. Continue resolving the merge or end your turn.";
   }

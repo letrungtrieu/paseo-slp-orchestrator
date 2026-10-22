@@ -1,6 +1,7 @@
 // Helper predicates, live status reconciliation, and timeline shell inspection for AgentGateway.
 import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import type { AgentRecord, Run } from "../../shared/state";
+import { isPipelineLeadRole } from "../../shared/roles";
 import { unattendedModeForProvider } from "../project-prompts/agent-settings";
 import type { RunStore } from "../store/run-store";
 import type { ActiveShellCall, AgentLiveStatus } from "./agent-gateway";
@@ -126,7 +127,7 @@ export function isCurrentStageAgent(run: Run, agentRecord: AgentRecord): boolean
 export function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean {
   return (
     !agentRecord.archivedAt &&
-    agentRecord.role === "master_lead" &&
+    isPipelineLeadRole(agentRecord.role) &&
     !["completed", "aborted"].includes(run.status)
   );
 }
@@ -135,7 +136,7 @@ export function isActiveMasterLead(run: Run, agentRecord: AgentRecord): boolean 
 export function isActiveParentCoordinator(run: Run, agentRecord: AgentRecord): boolean {
   if (agentRecord.archivedAt || ["completed", "aborted"].includes(run.status)) return false;
   if (agentRecord.role === "supervisor") return agentRecord.agentId === run.supervisorAgentId;
-  return agentRecord.role === "master_lead";
+  return isPipelineLeadRole(agentRecord.role);
 }
 
 export function isConfirmedMissingAgentError(error: unknown, agentId: string): boolean {

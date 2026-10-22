@@ -1,6 +1,7 @@
 // Background loop that keeps dynamic stages moving even when lifecycle events are missed:
 // answers permissions, delivers queued mail and resumes persisted pipeline stages.
 import type { Run } from "../shared/state";
+import { isPipelineLeadRole } from "../shared/roles";
 import { handlePermissionRequest } from "./hooks/permission-handler";
 import { sweepStageNudges } from "./hooks/lifecycle-hooks";
 import { collectDescendantAgentIds, handleAgentArchived, handleSupervisorArchived } from "./pipeline/agent-hierarchy";
@@ -39,7 +40,7 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   // If a Lead was archived while an event was missed, recursively archive its child leads and peers.
   const archivedParentLeadRecords = Object.values(currentRun.agents).filter(
     (agentRecord) =>
-      agentRecord.role === "master_lead"
+      isPipelineLeadRole(agentRecord.role)
       && (Boolean(agentRecord.archivedAt) || Boolean(liveStatuses.get(agentRecord.agentId)?.archived))
       && collectDescendantAgentIds(currentRun, agentRecord.agentId).length > 0,
   );

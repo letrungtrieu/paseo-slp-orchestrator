@@ -1,6 +1,7 @@
 // Wires the dynamic pipeline to a real RunStore, real git and fake Paseo agents. Tests drive
 // the MCP dispatcher so every call follows the same authentication boundary as production.
 import { join } from "node:path";
+import { isPipelineLeadRole } from "../../shared/roles";
 import { afterEach, vi } from "vitest";
 import type { BusCaller, BusToolOutcome } from "../../server/bus/http-mcp";
 import { claudeForker } from "../../server/fork/claude-forker";
@@ -92,14 +93,16 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
       const records = Object.values(currentRun.agents).filter((agent) => !agent.archivedAt);
       const normalizedRole = normalizePipelineRoleId(role);
       const effectiveRole = role === "forked_lead" ? "master_lead" : role;
+      // "forked_lead" means whichever Lead coordinates the stage, which is the QA Lead for QA pipelines.
+      const matchesLeadRole = (agentRole: string) => role === "forked_lead" ? isPipelineLeadRole(agentRole) : agentRole === "master_lead";
       // Leads supervise both run-level pipeline definition and active stage execution in their worktree.
       const stageRecords = stageId === null
-        ? records.filter((agent) => agent.stageId === null || (effectiveRole === "master_lead" && agent.role === "master_lead"))
+        ? records.filter((agent) => agent.stageId === null || (effectiveRole === "master_lead" && matchesLeadRole(agent.role)))
         : records.filter(
             (agent) =>
               agent.stageId === stageId
               || (effectiveRole === "master_lead"
-                && agent.role === "master_lead"
+                && matchesLeadRole(agent.role)
                 && Object.values(currentRun.pipelines).some((pipeline) =>
                   pipeline.stages.some(
                     (stage) =>
@@ -109,7 +112,7 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
                 )),
           );
       const matchingRecord = stageRecords.find((agent) => agent.projectRole === normalizedRole)
-        ?? stageRecords.find((agent) => agent.role === effectiveRole);
+        ?? stageRecords.find((agent) => (role === "forked_lead" ? isPipelineLeadRole(agent.role) : agent.role === effectiveRole));
       if (!matchingRecord) throw new Error(`No ${role} agent for stage ${stageId ?? "(run)"}`);
       return matchingRecord;
     };

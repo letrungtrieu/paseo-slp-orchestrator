@@ -9,16 +9,21 @@ export interface SiblingLeadSummary {
   worktreePath: string | null;
   branch: string | null;
   acceptanceCriteria: string;
+  // Only the QA Lead's roster carries specs; sibling Leads get criteria alone to keep their briefings short.
+  productSpec?: string | null;
 }
 
 export interface DelegatedLeadContext {
   leadAgentId?: string;
   featureName?: string;
   featureCriteria?: string;
+  productSpec?: string;
   worktreePath?: string;
   branch?: string;
   sharedContext?: string | null;
   siblingLeads?: ReadonlyArray<SiblingLeadSummary>;
+  // Absent only for runs created before QA Leads existed.
+  qaLead?: { agentId: string; worktreePath: string; branch: string };
 }
 
 export function delegationMessage(acceptanceCriteria: string, context?: DelegatedLeadContext): string {
@@ -32,6 +37,10 @@ export function delegationMessage(acceptanceCriteria: string, context?: Delegate
         ? `### Your Dedicated Worktree\n- **Worktree**: \`${context.worktreePath}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
         : "",
     `### Acceptance Criteria\n${effectiveCriteria}`,
+    // The human approved this spec, so screens and interactions are a contract rather than a suggestion.
+    context?.productSpec
+      ? `### Human-Approved Product Spec (screens, states, interactions)\n${context.productSpec}\n\nImplement exactly these screens, states and Given/When/Then behaviors; the QA Lead verifies each scenario. You own the technical spec (contracts, data, architecture). If a scenario cannot be built as written, record the deviation and its reason in your slp_finalize_pipeline summary instead of silently changing it.`
+      : "",
     context?.sharedContext ? `### Shared Cross-Feature Context\n${context.sharedContext}` : "",
   ].filter(Boolean);
 
@@ -50,6 +59,18 @@ export function delegationMessage(acceptanceCriteria: string, context?: Delegate
     );
   }
 
+  if (context?.qaLead) {
+    // Naming the merge target and its owner up front stops Leads from running heavy verification themselves.
+    messageSections.push(
+      [
+        "### QA Lead & Merge Target",
+        `- **QA Lead**: \`${context.qaLead.agentId}\` prepares verification of the merged build now and reports the verified result to the Supervisor.`,
+        `- **Merge target**: slp_finalize_pipeline merges your branch into the QA branch \`${context.qaLead.branch}\` (\`${context.qaLead.worktreePath}\`). Resolve any conflict there before the QA Lead starts.`,
+        "- Put every heavy verification you could not run into your slp_finalize_pipeline summary; the QA Lead schedules it.",
+      ].join("\n"),
+    );
+  }
+
   messageSections.push(
     "Follow your configured .slp/LEAD.md workflow and available .slp peer roles to define your pipeline stages with slp_define_pipeline. Every stage peer will run in your worktree and fork directly from your session. Once defined, end your turn.",
   );
@@ -58,7 +79,7 @@ export function delegationMessage(acceptanceCriteria: string, context?: Delegate
 
 export function reportForSupervisor(summary: string, baseBranch: string, integrationBranch: string): string {
   // Calling slp_present_to_manager automatically merges integrationBranch into baseBranch when the base checkout is clean.
-  return `The Lead reports the defined pipelines integrated into ${integrationBranch}:\n${summary}\nRead slp_list_pipelines and slp_get_pipeline, inspect git diff ${baseBranch}...${integrationBranch}, and independently verify acceptance criteria. If satisfied call slp_present_to_manager (which automatically merges ${integrationBranch} into ${baseBranch} and completes the run); otherwise call slp_request_rework.`;
+  return `The Lead reports the verified result on ${integrationBranch}:\n${summary}\nRead slp_list_pipelines and slp_get_pipeline, inspect git diff ${baseBranch}...${integrationBranch}, and independently verify the acceptance criteria and every scenario of the human-approved product spec (slp_get_run productSpec) against the QA Lead's per-scenario results. If satisfied call slp_present_to_manager (which automatically merges ${integrationBranch} into ${baseBranch} and completes the run); otherwise call slp_request_rework.`;
 }
 
 export function reworkNotice(feedback: string): string {
@@ -70,7 +91,7 @@ const TOP_LEVEL_NUDGE_GUIDANCE: Readonly<Record<string, string>> = {
   slp_define_pipeline: "Inspect slp_get_run, create a pipeline worktree with slp_create_worktree if needed, and call slp_define_pipeline.",
   slp_resume_pipeline: "Inspect slp_get_pipeline for the paused pipeline and call slp_resume_pipeline with your recovery decision.",
   slp_finalize_pipeline: "Inspect slp_get_pipeline for the completed pipeline, verify its worktree (resolving any conflicts by consulting Peers or sibling Forked Leads via slp_send_peer_message), and call slp_finalize_pipeline.",
-  slp_report: "Inspect slp_list_pipelines, verify the integrated branch (or spawn a final End-User UAT pipeline with slp_create_worktree + slp_define_pipeline if needed), and call slp_report to hand the result to the Supervisor.",
+  slp_report: "Inspect slp_list_pipelines, verify the integrated branch, and call slp_report to hand the result to the Supervisor.",
   slp_present_to_manager: "Inspect slp_list_pipelines, slp_get_pipeline and git diff, then call slp_present_to_manager if accepted or slp_request_rework if changes are needed.",
 };
 

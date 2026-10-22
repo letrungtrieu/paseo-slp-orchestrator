@@ -8,8 +8,11 @@ import { parseRoleMarkdown } from "./markdown";
 // UI discovery and Start run can race; neither should observe a half-written default catalog.
 const initializingDirectories = new Map<string, Promise<void>>();
 
-// Restrict root-level discovery to the two root orchestration role files so unrelated .slp/*.md files are ignored.
-const ROOT_ROLE_FILENAMES = new Set(["SUPERVISOR.MD", "LEAD.MD"]);
+// Restrict root-level discovery to the root orchestration role files so unrelated .slp/*.md files are ignored.
+const ROOT_ROLE_FILENAMES = new Set(["SUPERVISOR.MD", "LEAD.MD", "QA_LEAD.MD"]);
+const QA_LEAD_FILENAME = "QA_LEAD.md";
+// Root roles are engine contracts rather than optional peers, so their IDs can never be reused by a peer file.
+const RESERVED_ROOT_ROLE_IDS = ["lead", "master-lead", "qa-lead", "supervisor"];
 
 async function rootRoleMarkdownFiles(configurationDirectory: string): Promise<string[]> {
   let directoryEntries;
@@ -65,22 +68,20 @@ async function writeMissingDefaultPromptFile(configurationDirectory: string, rel
 
 async function initializeEmptyConfiguration(configurationDirectory: string): Promise<void> {
   const discoveredRoleFiles = await roleMarkdownFiles(configurationDirectory);
+  // An empty catalog receives every template; once a project has its own roles, the user owns which peers exist.
   if (discoveredRoleFiles.length === 0) {
     for (const promptFile of defaultPromptFiles()) {
       await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
     }
     return;
   }
-  // Upgrade pre-existing .slp folders that were created before END_USER_UAT.md existed on disk.
-  const discoveredRelativePaths = new Set(
-    discoveredRoleFiles.map((filePath) => relative(configurationDirectory, filePath).replace(/\\/g, "/").toUpperCase()),
+  // Every delegation spawns a QA Lead, so projects created before QA_LEAD.md existed still need its root file.
+  const hasQaLeadFile = discoveredRoleFiles.some(
+    (filePath) => relative(configurationDirectory, filePath).toUpperCase() === QA_LEAD_FILENAME.toUpperCase(),
   );
-  if (!discoveredRelativePaths.has("PEERS/END_USER_UAT.MD")) {
-    for (const promptFile of defaultPromptFiles()) {
-      if (promptFile.relativePath === "peers/END_USER_UAT.md") {
-        await writeMissingDefaultPromptFile(configurationDirectory, promptFile.relativePath, promptFile.markdown);
-      }
-    }
+  const qaLeadTemplate = defaultPromptFiles().find((promptFile) => promptFile.relativePath === QA_LEAD_FILENAME);
+  if (!hasQaLeadFile && qaLeadTemplate) {
+    await writeMissingDefaultPromptFile(configurationDirectory, qaLeadTemplate.relativePath, qaLeadTemplate.markdown);
   }
 }
 
@@ -111,10 +112,12 @@ export async function loadProjectPrompts(repoPath: string): Promise<ProjectPromp
         ? "supervisor"
         : relativePath === "LEAD.MD"
           ? "lead"
-          : null;
+          : relativePath === "QA_LEAD.MD"
+            ? "qaLead"
+            : null;
     if (rootRole) {
       // A misplaced role is usually a copied template; reject it instead of silently applying the wrong workflow.
-      const allowedRoles = rootRole === "lead" ? ["lead", "master-lead"] : ["supervisor"];
+      const allowedRoles = rootRole === "lead" ? ["lead", "master-lead"] : rootRole === "qaLead" ? ["qa-lead"] : ["supervisor"];
       if (!allowedRoles.includes(definition.role)) throw new Error(`${sourcePath}: role must be '${allowedRoles[0]}'`);
       if (rootSourcePaths.has(rootRole)) throw new Error(`${sourcePath}: duplicate ${rootRole} configuration`);
       rootSourcePaths.set(rootRole, sourcePath);
@@ -128,7 +131,7 @@ function addPeer(peers: ProjectRole[], definition: ProjectRole, sourcePaths: Map
   const existingPath = sourcePaths.get(definition.role);
   // IDs, not filenames, are the lookup key, so duplicates cannot be resolved by discovery order.
   if (existingPath) throw new Error(`${definition.sourcePath}: duplicate role '${definition.role}' also defined in ${existingPath}`);
-  if (["lead", "master-lead", "supervisor"].includes(definition.role)) {
+  if (RESERVED_ROOT_ROLE_IDS.includes(definition.role)) {
     throw new Error(`${definition.sourcePath}: '${definition.role}' is reserved for a root orchestration role`);
   }
   sourcePaths.set(definition.role, definition.sourcePath);

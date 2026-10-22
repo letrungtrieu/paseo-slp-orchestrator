@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, localSlpBranches, SAMPLE_PRODUCT_SPEC, reportPeer, startedRunWithPipeline, verifyAndReportFromQaLead } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -46,7 +46,10 @@ describe("pipeline completion and integration", () => {
     });
     expect(finalization.isError).toBe(false);
     for (const agentId of firstPeerCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
-    expect(flow.run(runId).agents[owningLeadId].awaitingTool).toBe("slp_report");
+    // The merge ends the feature Lead's duty; the QA Lead now owes its QA pipeline instead of the Lead owing a report.
+    expect(flow.run(runId).agents[owningLeadId].awaitingTool).toBeNull();
+    expect(flow.run(runId).masterLeadAgentId).toBe(flow.run(runId).qaLeadAgentId);
+    expect(flow.mailTo(runId, flow.run(runId).qaLeadAgentId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
   });
 
   it("accepts and integrates a completed Lead-authored pipeline and deletes its local slp/* branch after merge", async () => {
@@ -69,14 +72,13 @@ describe("pipeline completion and integration", () => {
     });
     expect(finalization.isError).toBe(false);
     expect(flow.pipeline(runId, pipelineId)).toMatchObject({ status: "integrated", finalReport: "All declared stages were approved and integrated." });
-    expect(flow.run(runId).agents[flow.run(runId).masterLeadAgentId].awaitingTool).toBe("slp_report");
-    expect(flow.mailTo(runId, flow.run(runId).masterLeadAgentId)).toEqual([]);
-    // Once finalized, the temporary local slp/* branch and worktree are removed so only the merged base branch remains.
-    const remainingSlpBranches = execFileSync("git", ["branch", "--list", "slp/*"], {
-      cwd: flow.repoPath,
-      encoding: "utf8",
-    }).trim();
-    expect(remainingSlpBranches).toBe("");
+    // The feature branch landed on the QA branch, which the QA Lead now owns.
+    const mergedRun = flow.run(runId);
+    expect(execFileSync("git", ["log", "--format=%s", "-1"], { cwd: mergedRun.devCwd, encoding: "utf8" }).trim())
+      .toBe("SLP: merge pipeline integrated-pipeline");
+    expect(mergedRun.masterLeadAgentId).toBe(mergedRun.qaLeadAgentId);
+    // The feature slp/* branch is deleted after merge; only the QA branch survives because QA still runs on it.
+    expect(localSlpBranches(flow)).toEqual([mergedRun.integrationBranch]);
   });
 
   it("rejects integration until every declared stage is approved", async () => {
@@ -92,7 +94,7 @@ describe("pipeline completion and integration", () => {
     expect(flow.pipeline(runId, pipelineId)!.status).not.toBe("integrated");
   });
 
-  it("lets Forked Leads consult Peers and sibling Forked Leads on merge conflicts, hand consolidated summaries to Master Lead, run an End-User UAT pipeline, and auto-merge into baseBranch", async () => {
+  it("lets Forked Leads consult Peers and sibling Forked Leads on merge conflicts, hand consolidated summaries to Master Lead, and auto-merge into baseBranch", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId: firstPipelineId } = await startedRunWithPipeline(flow, {
       name: "feature-auth",
@@ -202,50 +204,24 @@ describe("pipeline completion and integration", () => {
     });
     expect(secondMerge.isError).toBe(false);
 
-    // Sibling Lead is archived once all pipelines integrate while primary Lead stays alive to run UAT or report, and receives the consolidated summary.
-    expect(flow.gateway.archivedAgentIds).toContain(secondForkedLeadId);
-    expect(flow.gateway.archivedAgentIds).not.toContain(firstForkedLeadId);
-    const masterLeadHandover = flow.mailTo(runId, flow.run(runId).masterLeadAgentId).at(-1);
-    expect(masterLeadHandover?.awaitTool).toBe("slp_report");
-    expect(masterLeadHandover?.text).toContain("Auth feature merged");
-    expect(masterLeadHandover?.text).toContain("Billing feature merged");
+    // Every feature Lead is retired once all branches are merged; the QA Lead receives both summaries.
+    expect(flow.gateway.archivedAgentIds).toContain(firstForkedLeadId);
+    await eventually(() => expect(flow.gateway.archivedAgentIds).toContain(secondForkedLeadId));
+    const qaLeadHandover = flow.mailTo(runId, flow.run(runId).qaLeadAgentId).at(-1);
+    expect(qaLeadHandover?.awaitTool).toBe("slp_define_pipeline");
+    expect(qaLeadHandover?.text).toContain("Auth feature merged");
+    expect(qaLeadHandover?.text).toContain("Billing feature merged");
 
-    // Master Lead spawns a final End-User UAT pipeline to verify the combined features before reporting.
-    const uatWorktree = JSON.parse(
-      (await flow.callAsRole(runId, "master_lead", null, "slp_create_worktree", { name: "end-user-uat" })).text,
-    ) as { cwd: string };
-    const uatDefined = JSON.parse(
-      (
-        await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {
-          pipeline: {
-            name: "end-user-uat",
-            version: "1.0.0",
-            worktree: uatWorktree.cwd,
-            description: "Final End-User UAT verification across merged features",
-            stages: [{ name: "uat", goal: "Test combined auth+billing as end user", peers: [{ role: "end-user", task: "Verify mode=auth+billing end-to-end" }] }],
-          },
-        })
-      ).text,
-    ) as { pipelineId: string };
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    await completePipeline(flow, runId, uatDefined.pipelineId);
-    const uatForkedLeadId = flow.pipeline(runId, uatDefined.pipelineId)!.stages[0].forkedLeadAgentId!;
-    const uatMerge = await flow.callAs(uatForkedLeadId, "slp_finalize_pipeline", {
-      summary: "End-User UAT confirmed auth+billing works end-to-end.",
-    });
-    expect(uatMerge.isError).toBe(false);
-
-    // Master Lead reports to Supervisor, and Supervisor's slp_present_to_manager auto-merges into baseBranch and completes the run.
-    const leadReport = await flow.callAsRole(runId, "master_lead", null, "slp_report", {
-      summary: "All features and End-User UAT passed.",
-    });
-    expect(leadReport.isError).toBe(false);
+    // The QA Lead verifies and reports, and Supervisor's slp_present_to_manager merges the QA branch into baseBranch.
+    await verifyAndReportFromQaLead(flow, runId, "Auth and billing features verified together on the QA branch.");
     const firstCycleMasterLeadId = flow.run(runId).masterLeadAgentId;
     const supervisorAccept = await flow.callAsRole(runId, "supervisor", null, "slp_present_to_manager", {
-      report: "Đã kiểm thử UAT và tự động merge vào nhánh gốc.",
+      report: "Đã kiểm tra nhánh tích hợp và tự động merge vào nhánh gốc.",
     });
     expect(supervisorAccept.isError).toBe(false);
     expect(flow.run(runId).status).toBe("completed");
+    // The resolved conflict reached the human's base branch through the QA branch.
+    expect(execFileSync("git", ["show", "HEAD:shared-config.txt"], { cwd: flow.repoPath, encoding: "utf8" })).toBe("mode=auth+billing\n");
     // Only the Supervisor remains alive after completion; the first cycle's Master Lead, Forked Leads and Peers are all archived.
     expect(flow.gateway.archivedAgentIds).not.toContain(flow.run(runId).supervisorAgentId);
     expect(flow.gateway.archivedAgentIds).toContain(firstCycleMasterLeadId);
@@ -253,9 +229,10 @@ describe("pipeline completion and integration", () => {
     expect(flow.paseo.archivedWorkspaceIds).not.toContain(flow.run(runId).supervisorWorkspaceId);
     expect(flow.paseo.archivedWorkspaceIds.length).toBeGreaterThanOrEqual(3);
 
-    // Follow-up requirements in the same session automatically spawn a fresh Master Lead.
+    // Follow-up requirements in the same session automatically spawn a fresh Master Lead and a fresh QA Lead.
     const followUpDelegate = await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
       acceptanceCriteria: "Add audit logging for combined auth and billing actions.",
+      productSpec: SAMPLE_PRODUCT_SPEC,
     });
     expect(followUpDelegate.isError).toBe(false);
     const secondCycleMasterLeadId = flow.run(runId).masterLeadAgentId;
@@ -263,6 +240,8 @@ describe("pipeline completion and integration", () => {
     expect(flow.gateway.archivedAgentIds).not.toContain(secondCycleMasterLeadId);
     expect(flow.run(runId).status).toBe("planning");
     expect(flow.mailTo(runId, secondCycleMasterLeadId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
+    expect(flow.run(runId).agents[flow.run(runId).qaLeadAgentId].role).toBe("qa_lead");
+    expect(flow.run(runId).qaLeadAgentId).not.toBe(firstCycleMasterLeadId);
   });
 
   it("lets Master Lead split a spec into parallel tasks, forks one dedicated Forked Lead per task reused across stages, and serializes concurrent merges", async () => {
@@ -337,14 +316,11 @@ describe("pipeline completion and integration", () => {
     expect(uiMergeResult.isError).toBe(false);
     expect(flow.pipeline(runId, apiPipelineId)?.status).toBe("integrated");
     expect(flow.pipeline(runId, uiPipelineId)?.status).toBe("integrated");
-    const remainingLocalSlpBranches = execFileSync("git", ["branch", "--list", "slp/*"], {
-      cwd: flow.repoPath,
-      encoding: "utf8",
-    }).trim();
-    expect(remainingLocalSlpBranches).toBe("");
+    // Feature and helper branches are swept; the QA branch stays because the QA Lead verifies on it next.
+    expect(localSlpBranches(flow)).toEqual([flow.run(runId).integrationBranch]);
   });
 
-  it("keeps a Lead's dedicated workspace open during slp_finalize_pipeline until slp_report finishes and flushes the Supervisor report immediately", async () => {
+  it("keeps a Lead's dedicated workspace open during slp_finalize_pipeline and flushes the QA Lead's Supervisor report immediately", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
     const leadAgentId = flow.run(runId).masterLeadAgentId;
@@ -364,16 +340,16 @@ describe("pipeline completion and integration", () => {
     });
     expect(finalizeResponse.isError).toBe(false);
 
-    // The Lead's workspace must NOT be archived mid-turn during slp_finalize_pipeline so Paseo does not cascade-archive the Lead before slp_report.
+    // The Lead's workspace must NOT be archived mid-turn during slp_finalize_pipeline so Paseo does not cascade-archive the Lead before its reply.
     expect(flow.paseo.archivedWorkspaceIds).not.toContain(pipelineWorkspaceId);
-    expect(flow.run(runId).agents[leadAgentId].awaitingTool).toBe("slp_report");
-    expect(flow.run(runId).agents[leadAgentId].awaitingSince).toBe(finalizeAwaitingSince);
+    expect(flow.run(runId).agents[leadAgentId].awaitingTool).toBeNull();
+    // The merged feature Lead is retired once idle, so it can neither report nor skip QA.
+    await eventually(() => expect(flow.gateway.archivedAgentIds).toContain(leadAgentId));
+    const featureLeadReport = await flow.callAs(leadAgentId, "slp_report", { summary: "Trying to skip QA." });
+    expect(featureLeadReport.isError).toBe(true);
 
-    // Calling slp_report queues the Supervisor's notification and delivering mail stamps slp_present_to_manager on Supervisor.
-    const reportResponse = await flow.callAs(leadAgentId, "slp_report", {
-      summary: "All tasks integrated and verified for Supervisor.",
-    });
-    expect(reportResponse.isError).toBe(false);
+    // The QA Lead's report queues the Supervisor's notification and delivering mail stamps slp_present_to_manager on Supervisor.
+    await verifyAndReportFromQaLead(flow, runId, "All tasks integrated and verified for Supervisor.");
     const supervisorId = flow.run(runId).supervisorAgentId;
     expect(flow.mailTo(runId, supervisorId).at(-1)?.awaitTool).toBe("slp_present_to_manager");
     await flow.deliverMail(runId);

@@ -1,20 +1,16 @@
 // Run-level lifecycle for model-authored pipelines. Fixed task phases remain readable in old
 // snapshots, but every new run advances through persisted PipelineState records instead.
 import { randomUUID } from "node:crypto";
-import type { DelegatedFeature, DelegationSubmission } from "../../shared/pipeline";
-import { ROLE_LABELS, type RunMode } from "../../shared/roles";
+import { ROLE_LABELS, isPipelineLeadRole, type RunMode } from "../../shared/roles";
 import type { ProviderChoices, Run } from "../../shared/state";
 import { assertGitRepository, currentBranchName, mergeIntegrationIntoBase } from "../git/git";
 import { openSupervisorWorkspace } from "../git/worktree";
 import { loadProjectPrompts } from "../project-prompts/load";
 import { validateProjectAgentSettings } from "../project-prompts/agent-settings";
-import {
-  delegationMessage,
-  reportForSupervisor,
-  reworkNotice,
-  supervisorBriefing,
-  type SiblingLeadSummary,
-} from "../prompts/messages";
+import { reportForSupervisor, reworkNotice, supervisorBriefing } from "../prompts/messages";
+import { qaReworkNotice } from "../prompts/qa-messages";
+import { delegate, ensureActiveMasterLead } from "./delegation";
+import { qaVerificationComplete, runHasQaLead } from "./qa/qa-phase-state";
 import {
   archiveAgentSubtree,
   archiveOwnedWorkspaces,
@@ -22,11 +18,12 @@ import {
   handleSupervisorArchived,
 } from "./agent-hierarchy";
 import { archiveAgentLogged, type PipelineContext } from "./context";
-import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
 
 export { handleAgentArchived, handleSupervisorArchived };
+// Delegation lives in its own module; re-exported so existing callers keep one lifecycle entry point.
+export { delegate } from "./delegation";
 
 export const DEFAULT_PROVIDER = "claude/claude-sonnet-5-5";
 
@@ -100,10 +97,12 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
     providers,
     criteria: null,
     masterSpec: null,
+    productSpec: null,
     promptConfig,
     supervisorAgentId: "",
     supervisorWorkspaceId: supervisorWorkspace.workspaceId,
     masterLeadAgentId: "",
+    qaLeadAgentId: "",
     devWorkspaceId: supervisorWorkspace.workspaceId,
     devCwd: supervisorWorkspace.cwd,
     tasks: {},
@@ -145,209 +144,27 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   return { runId, supervisorAgentId: supervisor.agentId, supervisorWorkspaceId: supervisorWorkspace.workspaceId };
 }
 
-// Normalize single-string or multi-feature Supervisor delegation input into a uniform task list and overall criteria.
-function normalizeDelegationSubmission(
-  run: Run,
-  rawInput: string | DelegationSubmission,
-): { overallCriteria: string; sharedContext?: string; tasks: DelegatedFeature[] } {
-  if (typeof rawInput === "string") {
-    const trimmedCriteria = rawInput.trim();
-    return {
-      overallCriteria: trimmedCriteria,
-      tasks: [{ name: run.title || "feature", acceptanceCriteria: trimmedCriteria }],
-    };
-  }
-  const tasks =
-    rawInput.tasks && rawInput.tasks.length > 0
-      ? rawInput.tasks
-      : [
-          {
-            name: run.title || "feature",
-            acceptanceCriteria: (rawInput.acceptanceCriteria ?? "").trim(),
-          },
-        ];
-  const overallCriteria =
-    rawInput.acceptanceCriteria?.trim()
-    || tasks.map((task) => `${task.name}: ${task.acceptanceCriteria}`).join("\n");
-  return {
-    overallCriteria,
-    sharedContext: rawInput.sharedContext?.trim() || undefined,
-    tasks,
-  };
-}
-
-// Provision or open a dedicated Git worktree for a Lead so the Lead and its stage Peers share the exact same cwd.
-async function provisionLeadWorktree(
-  ctx: PipelineContext,
-  runId: string,
-  featureName: string,
-  explicitWorktreePath?: string,
-) {
-  let targetWorktreePath = explicitWorktreePath?.trim() ?? "";
-  if (!targetWorktreePath) {
-    const createdWorktreePayload = JSON.parse(
-      await createPipelineWorktree(ctx, runId, featureName, { allowDuringDelegation: true }),
-    ) as { cwd: string };
-    targetWorktreePath = createdWorktreePayload.cwd;
-  }
-  const latestRun = ctx.store.require(runId);
-  return openPipelineWorktree(ctx, latestRun, targetWorktreePath);
-}
-
-// Reuse an unarchived Lead when available, or spawn a fresh Lead inside a dedicated worktree when starting or resuming delegation.
-async function ensureActiveMasterLead(
-  ctx: PipelineContext,
-  runId: string,
-  featureName?: string,
-  explicitWorktreePath?: string,
-): Promise<{
-  agentId: string;
-  workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
-}> {
-  const initialRun = ctx.store.require(runId);
-  const existingMasterLeadRecord = initialRun.masterLeadAgentId
-    ? initialRun.agents[initialRun.masterLeadAgentId]
-    : undefined;
-  const workspace = await provisionLeadWorktree(
-    ctx,
-    runId,
-    featureName ?? initialRun.title ?? "feature",
-    explicitWorktreePath,
-  );
-  if (existingMasterLeadRecord && !existingMasterLeadRecord.archivedAt) {
-    return { agentId: existingMasterLeadRecord.agentId, workspace };
-  }
-  const spawnedMasterLead = await ctx.gateway.createAgent({
-    runId,
-    role: "master_lead",
-    taskId: null,
-    provider: initialRun.providers.lead,
-    thinkingOptionId: initialRun.providers.leadThinkingOptionId ?? undefined,
-    permissionModeId: initialRun.providers.leadPermissionModeId ?? undefined,
-    parentAgentId: initialRun.supervisorAgentId || undefined,
-    workspaceId: workspace.workspaceId,
-    peerWorktreePath: workspace.cwd,
-    title: `[${ROLE_LABELS.master_lead}] [${featureName ?? initialRun.title}]`,
-    awaitTool: null,
-  });
-  const latestRun = ctx.store.require(runId);
-  if (latestRun.status === "aborted") {
-    await ctx.gateway.archive(spawnedMasterLead.agentId).catch(() => undefined);
-    throw new ToolError("This run has finished.");
-  }
-  return { agentId: spawnedMasterLead.agentId, workspace };
-}
-
-export async function delegate(
-  ctx: PipelineContext,
-  runId: string,
-  rawInput: string | DelegationSubmission,
-): Promise<string> {
+export function report(ctx: PipelineContext, runId: string, summary: string, callerAgentId?: string): string {
   const run = ctx.store.require(runId);
-  // Delegating twice during an active cycle would reset Leads mid-plan; allow fresh delegation once a prior cycle completed.
-  if (run.criteria !== null && run.status !== "delegating" && run.status !== "completed") {
-    throw new ToolError("The project was already delegated. Use slp_request_rework for changes.");
+  // A QA Lead from a retired cycle must not report on the current cycle's QA branch.
+  if (runHasQaLead(run) && callerAgentId && callerAgentId !== run.qaLeadAgentId) {
+    throw new ToolError("Only this run's current QA Lead can report to the Supervisor.");
   }
-  const { overallCriteria, sharedContext, tasks } = normalizeDelegationSubmission(run, rawInput);
-  const provisionedLeads: Array<{
-    agentId: string;
-    task: DelegatedFeature;
-    workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
-  }> = [];
-
-  for (let taskIndex = 0; taskIndex < tasks.length; taskIndex += 1) {
-    const task = tasks[taskIndex];
-    if (taskIndex === 0 && tasks.length === 1) {
-      const { agentId, workspace } = await ensureActiveMasterLead(ctx, runId, task.name, task.worktree);
-      provisionedLeads.push({ agentId, task, workspace });
-      continue;
-    }
-    const workspace = await provisionLeadWorktree(ctx, runId, task.name, task.worktree);
-    const currentRun = ctx.store.require(runId);
-    const spawnedLead = await ctx.gateway.createAgent({
-      runId,
-      role: "master_lead",
-      taskId: null,
-      provider: currentRun.providers.lead,
-      thinkingOptionId: currentRun.providers.leadThinkingOptionId ?? undefined,
-      permissionModeId: currentRun.providers.leadPermissionModeId ?? undefined,
-      parentAgentId: currentRun.supervisorAgentId || undefined,
-      workspaceId: workspace.workspaceId,
-      peerWorktreePath: workspace.cwd,
-      title: `[${ROLE_LABELS.master_lead}] [${task.name}]`,
-      awaitTool: null,
-    });
-    if (ctx.store.require(runId).status === "aborted") {
-      await ctx.gateway.archive(spawnedLead.agentId).catch(() => undefined);
-      throw new ToolError("This run has finished.");
-    }
-    provisionedLeads.push({ agentId: spawnedLead.agentId, task, workspace });
+  const pipelineStatuses = Object.values(run.pipelines).map((pipeline) => `${pipeline.name}:${pipeline.status}`).join(", ") || "none";
+  // Merged-but-unverified code is exactly what the QA phase exists to prevent from reaching the Supervisor;
+  // checking it first gives the QA Lead the concrete missing step instead of a generic integration error.
+  if (runHasQaLead(run) && (run.status !== "running" || !qaVerificationComplete(run))) {
+    throw new ToolError(`Cannot report until a QA pipeline has verified the QA branch after the last feature merge and been closed with slp_finalize_pipeline. Current pipelines: ${pipelineStatuses}.`);
   }
-
-  ctx.store.mutate(runId, (mutableRun) => {
-    mutableRun.masterLeadAgentId = provisionedLeads[0].agentId;
-    mutableRun.criteria = overallCriteria;
-    mutableRun.status = "planning";
-    for (const { agentId, task, workspace } of provisionedLeads) {
-      if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
-        mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
-      }
-      const leadRecord = mutableRun.agents[agentId];
-      if (leadRecord) {
-        leadRecord.workspaceId = workspace.workspaceId;
-        leadRecord.worktreePath = workspace.cwd;
-        leadRecord.featureName = task.name;
-        leadRecord.featureCriteria = task.acceptanceCriteria;
-      }
-    }
-    // Deliver each Lead's assignment alongside the full roster of sibling Leads so parallel features stay aligned.
-    for (const currentLead of provisionedLeads) {
-      const siblingLeads: SiblingLeadSummary[] = provisionedLeads
-        .filter((candidate) => candidate.agentId !== currentLead.agentId)
-        .map((sibling) => ({
-          agentId: sibling.agentId,
-          featureName: sibling.task.name,
-          worktreePath: sibling.workspace.cwd,
-          branch: sibling.workspace.branch,
-          acceptanceCriteria: sibling.task.acceptanceCriteria,
-        }));
-      const hasMultipleFeatures = provisionedLeads.length > 1 || Boolean(sharedContext);
-      const messageBody = delegationMessage(
-        overallCriteria,
-        hasMultipleFeatures
-          ? {
-              featureName: currentLead.task.name,
-              featureCriteria: currentLead.task.acceptanceCriteria,
-              worktreePath: currentLead.workspace.cwd,
-              branch: currentLead.workspace.branch,
-              sharedContext,
-              siblingLeads,
-            }
-          : {
-              worktreePath: currentLead.workspace.cwd,
-              branch: currentLead.workspace.branch,
-            },
-      );
-      mutableRun.mailbox.push(stageMail(currentLead.agentId, messageBody, "slp_define_pipeline"));
-    }
-  });
-  return provisionedLeads.length === 1
-    ? "Delegated to the Lead in its dedicated worktree. Tell the Supreme Manager in Vietnamese that work has started, then end your turn."
-    : `Delegated ${provisionedLeads.length} parallel features to dedicated Leads in isolated worktrees with cross-Lead awareness. Tell the Supreme Manager in Vietnamese that work has started, then end your turn.`;
-}
-
-export function report(ctx: PipelineContext, runId: string, summary: string): string {
-  const run = ctx.store.require(runId);
   // Reporting before every pipeline is integrated would let the Supervisor approve an incomplete branch.
   if (run.status !== "running" || !allPipelinesIntegrated(run)) {
-    const statuses = Object.values(run.pipelines).map((pipeline) => `${pipeline.name}:${pipeline.status}`).join(", ") || "none";
-    throw new ToolError(`Cannot report until every pipeline is integrated. Current pipelines: ${statuses}.`);
+    throw new ToolError(`Cannot report until every pipeline is integrated. Current pipelines: ${pipelineStatuses}.`);
   }
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.finalReport = summary;
     mutableRun.status = "reporting";
     for (const agentRecord of Object.values(mutableRun.agents)) {
-      if (agentRecord.role === "master_lead" && agentRecord.awaitingTool === "slp_report") {
+      if (isPipelineLeadRole(agentRecord.role) && agentRecord.awaitingTool === "slp_report") {
         agentRecord.awaitingTool = null;
         agentRecord.awaitingSince = null;
         agentRecord.nudges = 0;
@@ -364,6 +181,11 @@ export async function requestRework(ctx: PipelineContext, runId: string, feedbac
   // Allow rework during initial reporting, at the final approval gate, or when follow-up changes are requested after completion.
   if (run.status !== "reporting" && run.status !== "awaiting_user" && run.status !== "completed") {
     throw new ToolError(`Cannot request rework while run is '${run.status}'.`);
+  }
+  // The QA Lead owns the verified QA branch, so fixes and re-verification stay there instead of opening new feature worktrees.
+  if (runHasQaLead(run)) {
+    // After completion the QA branch is merged and deleted, so a follow-up is a new cycle with fresh Leads and a fresh QA Lead.
+    return run.status === "completed" ? delegate(ctx, runId, feedback) : requestQaRework(ctx, runId, feedback);
   }
   const { agentId: activeMasterLeadId, workspace } = await ensureActiveMasterLead(ctx, runId, "rework");
   // Integrated pipelines are immutable history; rework starts a new Lead-authored pipeline instead of reopening a closed stage.
@@ -394,6 +216,31 @@ export async function requestRework(ctx: PipelineContext, runId: string, feedbac
       `${reworkNotice(feedback)}\nYour fresh worktree is \`${workspace.cwd}\` (branch \`${workspace.branch}\`). Define a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
   });
   return "Sent back to the Lead. End your turn while it defines a fresh pipeline.";
+}
+
+function requestQaRework(ctx: PipelineContext, runId: string, feedback: string): string {
+  ctx.store.mutate(runId, (mutableRun) => {
+    // Planning makes slp_define_pipeline the QA Lead's owed tool, which recovery and nudges then enforce.
+    mutableRun.status = "planning";
+    mutableRun.gate = null;
+    mutableRun.masterLeadAgentId = mutableRun.qaLeadAgentId;
+    const qaLeadRecord = mutableRun.agents[mutableRun.qaLeadAgentId];
+    if (qaLeadRecord) {
+      qaLeadRecord.pipelineId = null;
+      qaLeadRecord.stageId = null;
+    }
+    const supervisorRecord = mutableRun.agents[mutableRun.supervisorAgentId];
+    if (supervisorRecord) {
+      supervisorRecord.awaitingTool = null;
+      supervisorRecord.awaitingSince = null;
+      supervisorRecord.nudges = 0;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) => !(queuedMessage.toAgentId === mutableRun.supervisorAgentId && queuedMessage.awaitTool === "slp_present_to_manager"),
+    );
+    mutableRun.mailbox.push(stageMail(mutableRun.qaLeadAgentId, qaReworkNotice(feedback, mutableRun), "slp_define_pipeline"));
+  });
+  return "Sent back to the QA Lead. End your turn while it defines fix and re-verification stages.";
 }
 
 export async function presentToManager(ctx: PipelineContext, runId: string, assessment: string): Promise<string> {
@@ -460,6 +307,12 @@ export async function approveMain(ctx: PipelineContext, runId: string): Promise<
   });
   ctx.logEvent(runId, { taskId: null, from: "manager", to: run.baseBranch, kind: "run.merged_to_base", summary: mergeCommit, outcome: "delivered" });
   await retireRunResources(ctx, runId);
+  // The QA worktree and branch are gone now; point integration back at the base checkout for any later cycle.
+  ctx.store.mutate(runId, (mutableRun) => {
+    mutableRun.integrationBranch = mutableRun.baseBranch;
+    mutableRun.devCwd = mutableRun.repoPath;
+    mutableRun.devWorkspaceId = mutableRun.supervisorWorkspaceId;
+  });
   return `Merged ${run.integrationBranch} into ${run.baseBranch} (${mergeCommit.slice(0, 8)})`;
 }
 

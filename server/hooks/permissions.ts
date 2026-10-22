@@ -78,6 +78,9 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
     case "supervisor":
       // Supervisor stays read-only; production edits stay with stage peers or Leads.
       return false;
+    case "qa_lead":
+      // The QA Lead verifies through the peers it spawns, so every fix on the QA branch has an accountable peer report.
+      return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;
       // An empty scope is the explicit whole-worktree default for a live pipeline peer.

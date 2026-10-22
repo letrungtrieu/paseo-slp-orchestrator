@@ -1,10 +1,12 @@
 // Stage identity is derived from authenticated agent records so peers cannot act on a sibling pipeline.
 import type { BusCaller } from "../bus/http-mcp";
 import type { PipelineState } from "../../shared/pipeline";
+import { isPipelineLeadRole } from "../../shared/roles";
 import type { Run } from "../../shared/state";
 import type { PipelineContext } from "./context";
 import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
+import { fallbackLeadIdFor } from "./qa/qa-phase-state";
 
 export function requirePipeline(run: Run, pipelineId: string): PipelineState {
   const pipeline = Object.hasOwn(run.pipelines, pipelineId) ? run.pipelines[pipelineId] : undefined;
@@ -23,7 +25,7 @@ export function stageForCaller(ctx: PipelineContext, caller: BusCaller) {
     throw new ToolError("Your stage is no longer running. Read slp_get_pipeline for its current state.");
   }
   const belongsToStage =
-    agent.role === "master_lead"
+    isPipelineLeadRole(agent.role)
       ? stage.forkedLeadAgentId === caller.agentId || pipeline.leadAgentId === caller.agentId
       : stage.peerAgentIds.includes(caller.agentId);
   if (!belongsToStage) throw new ToolError("Agent is not a participant of this stage.");
@@ -33,7 +35,7 @@ export function stageForCaller(ctx: PipelineContext, caller: BusCaller) {
 export function requireStageLead(ctx: PipelineContext, caller: BusCaller) {
   const assignment = stageForCaller(ctx, caller);
   // Goal approval belongs only to this stage's Lead, independently of any peer's business role name.
-  if (assignment.agent.role !== "master_lead") throw new ToolError("Only this stage's Lead can decide completion.");
+  if (!isPipelineLeadRole(assignment.agent.role)) throw new ToolError("Only this stage's Lead can decide completion.");
   return assignment;
 }
 
@@ -50,7 +52,7 @@ export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: s
   const pipeline = requirePipeline(run, pipelineId);
   const targetLeadId = pipeline.leadAgentId && !run.agents[pipeline.leadAgentId]?.archivedAt
     ? pipeline.leadAgentId
-    : run.masterLeadAgentId;
+    : fallbackLeadIdFor(run, pipeline);
   ctx.store.mutate(runId, (mutableRun) => {
     const mutablePipeline = mutableRun.pipelines[pipelineId];
     mutablePipeline.status = "paused";

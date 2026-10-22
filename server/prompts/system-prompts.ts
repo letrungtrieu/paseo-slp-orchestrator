@@ -1,7 +1,7 @@
 // Compose the agent system prompt directly from project-authored .slp Markdown files and dynamic stage context.
-import type { SlpRole } from "../../shared/roles";
+import { isPipelineLeadRole, type SlpRole } from "../../shared/roles";
 import type { ProjectPromptConfig } from "../../shared/project-prompts";
-import { defaultProjectPrompts, peerRole } from "../project-prompts/defaults";
+import { defaultProjectPrompts, peerRole, qaLeadDefinition } from "../project-prompts/defaults";
 import { DEFAULT_WORKFLOWS } from "./default-workflows";
 
 // The gateway can pass this shape before or after the shared pipeline schema is introduced.
@@ -26,6 +26,7 @@ function projectDefinition(
 ) {
   if (role === "supervisor") return projectPrompts.supervisor;
   if (role === "master_lead") return projectPrompts.lead;
+  if (role === "qa_lead") return qaLeadDefinition(projectPrompts);
   return peerRole(projectPrompts, projectRoleId ?? "");
 }
 
@@ -54,8 +55,8 @@ export function systemPromptFor(
     `PROJECT ROLE: ${selectedRoleDefinition.name} (${selectedRoleDefinition.role})\n${selectedRoleDefinition.description}\nSOURCE: ${selectedRoleDefinition.sourcePath}`,
     `PROJECT WORKFLOW:\n${configuredWorkflow}`,
   ];
-  if (role === "master_lead") {
-    // Only the summary metadata of .slp/peers agent prompts is injected into Lead so it coordinates stages on its own.
+  if (isPipelineLeadRole(role)) {
+    // Only the summary metadata of .slp/peers agent prompts is injected into both Lead kinds so they coordinate stages on their own.
     promptSections.push("AVAILABLE PROJECT PEERS (.slp/peers summary metadata only; select by role ID):");
     for (const peerDefinition of projectPrompts.peers) {
       promptSections.push(

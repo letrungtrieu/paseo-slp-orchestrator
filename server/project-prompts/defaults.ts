@@ -21,12 +21,21 @@ const DEFAULT_ROLES = [
     file: "LEAD.md",
     workflow: DEFAULT_WORKFLOWS.master_lead.trim(),
   },
+  // The QA Lead owns the QA branch every Lead merges into and verifies it only through peers it spawns.
+  {
+    role: "qa-lead",
+    name: "QA Lead",
+    description: "Prepare verification while features are built, then verify the merged QA branch through spawned peers and report the result to the Supervisor.",
+    file: "QA_LEAD.md",
+    workflow: DEFAULT_WORKFLOWS.qa_lead.trim(),
+  },
   // Developer peers implement scoped code and tests while documenting concrete input/logic/output metrics.
   {
     role: "developer",
     name: "Developer",
     description: "Implement scoped features and fixes with concrete input/logic/output metrics, step-by-step methodological arguments, and verifiable evidence in the shared pipeline worktree.",
     file: "peers/DEVELOPER.md",
+    tier: "feature",
     workflow: [
       "Focus on clean implementation, automated tests, zero redundant system bloat, and verifiable changes in the shared pipeline worktree. Document the exact logic, expected inputs, and expected outputs/metrics (or concrete runtime outcomes) for every function or feature touched.",
       "",
@@ -41,27 +50,11 @@ const DEFAULT_ROLES = [
     ].join("\n"),
   },
   {
-    role: "end-user",
-    name: "End-User UAT Tester",
-    description: "Simulate a real end user to perform final User Acceptance Testing (UAT) across all merged features, verifying end-to-end user journeys, UI behavior, and cross-feature interactions.",
-    file: "peers/END_USER_UAT.md",
-    workflow: [
-      "Act as a real End User performing final User Acceptance Testing (UAT) on the integrated branch.",
-      "Exercise end-to-end user flows across all merged features together, verify that combined functionality works seamlessly, capture concrete runtime/visual evidence, and report any regressions or usability defects via `slp_stage_report`.",
-      "",
-      "MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:",
-      "1. End-to-End User Journeys & Edge Cases: Verify real user workflows across combined features, stating the exact flow, inputs, expected outcomes, and edge cases tested.",
-      "2. Automated vs. Manual Verification: Execute automated end-to-end checks where available and document manual user-journey verifications.",
-      "3. UI / Visual & Screenshot Evidence: When UI or visual behavior is involved, capture concrete screenshot or runtime evidence and cite it in `slp_stage_report`.",
-      "",
-      DEFAULT_WORKFLOWS.peer.trim(),
-    ].join("\n"),
-  },
-  {
     role: "qa-engineer",
     name: "QA Engineer",
     description: "Analyze edge cases, automated vs manual testing needs, UI impact, and capture screenshot/runtime evidence to verify delivered behavior or report bugs.",
     file: "peers/QA_ENGINEER.md",
+    tier: "feature",
     workflow: [
       "Focus on exercising the delivered behavior, regression coverage, boundary conditions and reproducible verification evidence.",
       "",
@@ -69,7 +62,7 @@ const DEFAULT_ROLES = [
       "1. Logic, Inputs/Outputs & Edge-Case Analysis: For every piece of logic or feature processed in the pipeline, explicitly analyze and state its exact logic, expected inputs, expected outputs/outcomes, and enumerate all potential edge cases that can occur.",
       "2. Automated vs. Manual Test Assessment: Explicitly determine and report which edge cases and flows can be verified via automated tests (and run/write those automated tests) versus which scenarios require manual testing and why.",
       "3. UI / Visual Impact Assessment: Explicitly analyze whether the changes affect the user interface (UI) or visual rendering, and explain how the layout, state, interaction, or rendering is affected.",
-      "4. Mandatory Screenshot / Visual Evidence Capture: Whenever the UI or visual output is affected (or when visual proof applies to the feature/bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., native window/headless screenshot command, browser capture, Xvfb/import/scrot/Playwright or project screenshot tool) and include the captured screenshot path and findings in `slp_stage_report` to prove completion or document a bug.",
+      "4. Mandatory Screenshot / Visual Evidence Capture: Whenever the UI or visual output is affected (or when visual proof applies to the feature/bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., native window/headless screenshot command, browser capture, Xvfb/import/scrot/Playwright or project screenshot tool) and include the captured screenshot path and findings in `slp_stage_report` to prove completion or document a bug. If every available mechanism needs a heavy resource listed in `.slp/standards/TEST_POLICY.md` (engine editor, emulator, simulator, container stack), do not start it in a feature pipeline; list the exact visual checks as integration QA hand-off items instead.",
       "5. Cross-Stage Clarification: If any upstream logic, input/output contract, or edge-case behavior from an earlier stage is unclear, use `slp_send_peer_message` to question the responsible peer from that earlier stage directly.",
       "",
       DEFAULT_WORKFLOWS.peer.trim(),
@@ -80,6 +73,7 @@ const DEFAULT_ROLES = [
     name: "Reviewer",
     description: "Review the current stage's design, metrics, data hygiene and implementation, challenging weak assumptions or system bloat.",
     file: "peers/REVIEWER.md",
+    tier: "feature",
     workflow: `Focus on architecture, correctness, maintainability, input/logic/output metrics, and challenging weak assumptions or redundant system garbage with concrete file/line evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
   },
   {
@@ -87,6 +81,7 @@ const DEFAULT_ROLES = [
     name: "Security Reviewer",
     description: "Review vulnerabilities, data handling, trust boundaries and architecture risks.",
     file: "peers/SECURITY_REVIEWER.md",
+    tier: "feature",
     workflow: `Focus on trust boundaries, authentication/authorization, input validation, secret handling and security risks with concrete input/logic/output evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
   },
 ] as const;
@@ -95,7 +90,8 @@ export function defaultPromptFiles(): Array<{ relativePath: string; markdown: st
   return DEFAULT_ROLES.map((definition) => ({
     relativePath: definition.file,
     // Each .slp file is the editable system prompt for that role; peer YAML front matter is the summary injected into the Lead.
-    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n---\n\n# Workflow\n\n${definition.workflow}\n`,
+    // Root roles have no tier; peers declare one so the Lead's catalog shows where each may be scheduled.
+    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n${"tier" in definition ? `tier: ${definition.tier}\n` : ""}---\n\n# Workflow\n\n${definition.workflow}\n`,
   }));
 }
 
@@ -104,21 +100,19 @@ export function defaultProjectPrompts(): ProjectPromptConfig {
     parseRoleMarkdown(definition.markdown, `.slp/${definition.relativePath}`),
   );
   // Root files have a fixed purpose; peer names are discovered solely from their front matter.
-  const [supervisor, lead, ...peers] = roles;
-  return { supervisor, lead, peers };
+  const [supervisor, lead, qaLead, ...peers] = roles;
+  return { supervisor, lead, qaLead, peers };
 }
 
-// Common UAT role aliases map to the project's configured .slp/peers/END_USER_UAT.md role when present.
-const END_USER_UAT_ROLE_ALIASES = new Set(["end-user", "uat", "uat-tester", "end-user-tester"]);
+// Snapshots from before QA_LEAD.md existed have no qaLead, so the built-in workflow keeps those runs usable.
+export function qaLeadDefinition(config: ProjectPromptConfig | null | undefined): ProjectRole {
+  return config?.qaLead ?? defaultProjectPrompts().qaLead!;
+}
 
 export function peerRole(config: ProjectPromptConfig | null | undefined, roleId: string): ProjectRole {
   const peers = (config ?? defaultProjectPrompts()).peers;
   const normalizedRoleId = normalizeRoleId(roleId);
   const selectedRole = peers.find((peer) => peer.role === normalizedRoleId);
   if (selectedRole) return selectedRole;
-  if (END_USER_UAT_ROLE_ALIASES.has(normalizedRoleId)) {
-    const configuredEndUserRole = peers.find((peer) => END_USER_UAT_ROLE_ALIASES.has(peer.role));
-    if (configuredEndUserRole) return configuredEndUserRole;
-  }
   throw new Error(`Unknown project peer role '${roleId}'. Available roles: ${peers.map((peer) => peer.role).join(", ") || "(none)"}`);
 }

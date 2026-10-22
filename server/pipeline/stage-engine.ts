@@ -1,7 +1,7 @@
 // Sequential stages are data authored by Lead; the scheduler only manages cohorts, approval and durable handover.
 import { randomUUID } from "node:crypto";
 import type { PipelineState, StageState } from "../../shared/pipeline";
-import { ROLE_LABELS } from "../../shared/roles";
+import { ROLE_LABELS, isPipelineLeadRole } from "../../shared/roles";
 import type { MailboxMessage } from "../../shared/state";
 import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import { peerRole } from "../project-prompts/defaults";
@@ -14,6 +14,7 @@ import {
   stagePromptContext,
 } from "./stage-briefings";
 import { pausePipeline, requirePipeline } from "./stage-context";
+import { fallbackLeadIdFor, isQaPipeline } from "./qa/qa-phase-state";
 import { stageMail } from "./stage-mail";
 
 // Recovery ticks and an approval tool may arrive together; only one may create or retire a cohort.
@@ -62,9 +63,11 @@ async function forkLeadSessionOptionsForPeer(
   const run = ctx.store.require(runId);
   const pipeline = requirePipeline(run, pipelineId);
   const stage = pipeline.stages[pipeline.currentStageIndex];
-  const owningLeadId = stage?.forkedLeadAgentId ?? pipeline.leadAgentId ?? run.masterLeadAgentId;
+  const owningLeadId = stage?.forkedLeadAgentId ?? pipeline.leadAgentId ?? fallbackLeadIdFor(run, pipeline);
   if (!owningLeadId) return undefined;
-  const leadSettings = resolveAgentSettings(run.promptConfig, "master_lead", undefined, {
+  // QA_LEAD.md may pick a different model than LEAD.md, and the fork must match the session it resumes.
+  const owningLeadRole = isQaPipeline(pipeline) ? "qa_lead" : "master_lead";
+  const leadSettings = resolveAgentSettings(run.promptConfig, owningLeadRole, undefined, {
     provider: run.providers.lead,
     permissionModeId: run.providers.leadPermissionModeId ?? undefined,
     thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
@@ -122,7 +125,7 @@ async function advancePipeline(ctx: PipelineContext, runId: string, pipelineId: 
           mutableRun.mailbox = mutableRun.mailbox.filter(
             (queuedMessage) => !(queuedMessage.toAgentId === finalCoordinatorId && queuedMessage.awaitTool === "slp_finalize_pipeline"),
           );
-          const masterLeadId = mutableRun.masterLeadAgentId;
+          const masterLeadId = fallbackLeadIdFor(mutableRun, mutablePipeline);
           const masterLeadRecord = mutableRun.agents[masterLeadId];
           const masterLeadAlreadyFinalizing = masterLeadRecord?.awaitingTool === "slp_finalize_pipeline"
             || mutableRun.mailbox.some((queuedMessage) => queuedMessage.toAgentId === masterLeadId && queuedMessage.awaitTool === "slp_finalize_pipeline");
@@ -188,13 +191,15 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
   if (!currentAssignment(ctx, runId, pipelineId).stage.forkedLeadAgentId) {
     const current = currentAssignment(ctx, runId, pipelineId);
     // Spawn a replacement Lead directly inside the pipeline's worktree if the owning Lead session was lost.
+    // A QA pipeline's replacement must stay a read-only QA Lead so it cannot start fixing code itself.
+    const coordinatorRole = isQaPipeline(pipeline) ? "qa_lead" : "master_lead";
     const coordinator = await ctx.gateway.createAgent({
-      runId, role: "master_lead", taskId: null, pipelineId, stageId: stage.id,
+      runId, role: coordinatorRole, taskId: null, pipelineId, stageId: stage.id,
       provider: run.providers.lead, thinkingOptionId: run.providers.leadThinkingOptionId ?? undefined,
       permissionModeId: run.providers.leadPermissionModeId ?? undefined,
       workspaceId: pipeline.workspaceId, peerWorktreePath: pipeline.worktree,
       parentAgentId: run.supervisorAgentId || undefined,
-      title: `[${ROLE_LABELS.master_lead}] [${pipeline.name} · ${stage.name}]`, awaitTool: null,
+      title: `[${ROLE_LABELS[coordinatorRole]}] [${pipeline.name} · ${stage.name}]`, awaitTool: null,
       stageContext: stagePromptContext(current.pipeline, current.stage, "Coordinate this stage and approve only when its goal is met."),
     });
     await keepCreatedAgent(ctx, runId, pipelineId, stage.id, coordinator.agentId);
@@ -209,6 +214,11 @@ async function startStage(ctx: PipelineContext, runId: string, pipelineId: strin
       }
       if (previousCoordinatorId === mutableRun.masterLeadAgentId) {
         mutableRun.masterLeadAgentId = coordinator.agentId;
+      }
+      // Reporting and rework address the QA Lead by id, so a replaced QA coordinator must take over that identity.
+      if (coordinatorRole === "qa_lead" && (!previousCoordinatorId || previousCoordinatorId === mutableRun.qaLeadAgentId)) {
+        if (mutableRun.masterLeadAgentId === mutableRun.qaLeadAgentId) mutableRun.masterLeadAgentId = coordinator.agentId;
+        mutableRun.qaLeadAgentId = coordinator.agentId;
       }
     });
     coordinatorCreated = true;
@@ -273,7 +283,7 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
         if (peerIndex >= 0) currentStage.peerAgentIds[peerIndex] = "";
         continue;
       }
-      if (agent.role === "master_lead") {
+      if (isPipelineLeadRole(agent.role)) {
         currentStage.forkedLeadAgentId = agent.agentId;
         currentPipeline.leadAgentId = agent.agentId;
       }
@@ -287,14 +297,16 @@ async function reconcileStageAgents(ctx: PipelineContext, runId: string, pipelin
           ? run.agents[preferredLeadId]
           : undefined) ??
         Object.values(run.agents).find(
-          (agent) => agent.pipelineId === pipeline.id && agent.role === "master_lead" && !agent.archivedAt,
+          (agent) => agent.pipelineId === pipeline.id && isPipelineLeadRole(agent.role) && !agent.archivedAt,
         ) ??
-        (run.masterLeadAgentId &&
-        run.agents[run.masterLeadAgentId] &&
-        !run.agents[run.masterLeadAgentId].archivedAt &&
-        (!run.agents[run.masterLeadAgentId].pipelineId || run.agents[run.masterLeadAgentId].pipelineId === pipeline.id)
-          ? run.agents[run.masterLeadAgentId]
-          : undefined);
+        (() => {
+          const fallbackLeadRecord = run.agents[fallbackLeadIdFor(run, currentPipeline)];
+          return fallbackLeadRecord
+            && !fallbackLeadRecord.archivedAt
+            && (!fallbackLeadRecord.pipelineId || fallbackLeadRecord.pipelineId === pipeline.id)
+            ? fallbackLeadRecord
+            : undefined;
+        })();
       if (existingPipelineLead) {
         if (!live.has(existingPipelineLead.agentId)) {
           throw new Error(`Cannot confirm stage participant '${existingPipelineLead.agentId}'; retry recovery after the directory is available.`);
@@ -401,7 +413,7 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (!stage.result) throw new Error("Stage cannot complete without its Lead approval.");
   const stageAgents = Object.values(run.agents).filter((agent) => agent.pipelineId === pipelineId && agent.stageId === stage.id);
-  for (const coordinator of stageAgents.filter((agent) => agent.role === "master_lead" && !agent.archivedAt)) {
+  for (const coordinator of stageAgents.filter((agent) => isPipelineLeadRole(agent.role) && !agent.archivedAt)) {
     // Approval tools return before this asynchronous boundary, allowing the coordinator's last turn to finish.
     await ctx.gateway.waitForIdle(coordinator.agentId, 60_000);
   }
@@ -454,7 +466,7 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
         ? currentStage.forkedLeadAgentId
         : (currentPipeline.leadAgentId && !mutableRun.agents[currentPipeline.leadAgentId]?.archivedAt
             ? currentPipeline.leadAgentId
-            : mutableRun.masterLeadAgentId);
+            : fallbackLeadIdFor(mutableRun, currentPipeline));
       mutableRun.mailbox.push(
         stageMail(finalizingAgentId, pipelineFinalizationBriefing(mutableRun, currentPipeline), "slp_finalize_pipeline"),
       );

@@ -1,5 +1,6 @@
 // Read projections expose pipeline knowledge while authentication tokens remain private to the daemon.
 import type { BusCaller } from "../bus/http-mcp";
+import { isPipelineLeadRole } from "../../shared/roles";
 import { requirePipeline, publicPipeline } from "./stage-context";
 import type { PipelineContext } from "./context";
 import { ToolError } from "./tool-error";
@@ -8,9 +9,11 @@ export function readRun(ctx: PipelineContext, caller: BusCaller): string {
   const run = ctx.store.require(caller.runId);
   // Explicit projections avoid disclosing agent bus tokens through a generic run read while exposing active Leads for collaboration.
   const leads = Object.values(run.agents)
-    .filter((agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt)
-    .map(({ agentId, featureName, worktreePath, pipelineId }) => ({
+    .filter((agentRecord) => isPipelineLeadRole(agentRecord.role) && !agentRecord.archivedAt)
+    .map(({ agentId, role, featureName, worktreePath, pipelineId }) => ({
       agentId,
+      // Lets Leads tell the QA Lead apart from feature siblings when choosing whom to consult.
+      role,
       featureName,
       worktreePath,
       pipelineId,
@@ -21,16 +24,21 @@ export function readRun(ctx: PipelineContext, caller: BusCaller): string {
     status: run.status,
     mode: run.mode,
     criteria: run.criteria,
+    // The approved spec is the contract every Lead builds and the QA Lead verifies, so any agent can re-read it.
+    productSpec: run.productSpec,
     repoPath: run.repoPath,
     baseBranch: run.baseBranch,
     integrationBranch: run.integrationBranch,
+    // The QA worktree once delegated: the merge target of every feature Lead.
     leadWorktree: run.devCwd,
+    qaLeadAgentId: run.qaLeadAgentId || null,
     finalReport: run.finalReport,
     supervisorReport: run.supervisorReport,
     leads,
-    pipelines: Object.values(run.pipelines).map(({ id, name, status, worktree, leadAgentId, currentStageIndex }) => ({
+    pipelines: Object.values(run.pipelines).map(({ id, name, kind, status, worktree, leadAgentId, currentStageIndex }) => ({
       id,
       name,
+      kind,
       status,
       worktree,
       leadAgentId,
@@ -45,6 +53,7 @@ export function listPipelines(ctx: PipelineContext, caller: BusCaller): string {
     pipelines: Object.values(ctx.store.require(caller.runId).pipelines).map((pipeline) => ({
       id: pipeline.id,
       name: pipeline.name,
+      kind: pipeline.kind,
       version: pipeline.version,
       description: pipeline.description,
       worktree: pipeline.worktree,

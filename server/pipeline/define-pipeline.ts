@@ -17,6 +17,7 @@ import { peerRole } from "../project-prompts/defaults";
 import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspaces";
 import { recoverPipelines } from "./stage-engine";
 import type { PipelineContext } from "./context";
+import { assertQaPipelineDefinitionAllowed, qaPipelineWorkspace } from "./qa/qa-pipeline";
 import { ToolError } from "./tool-error";
 
 // Serialize concurrent pipeline definition calls per run so parallel tool invocations from Leads never collide.
@@ -244,6 +245,9 @@ export async function definePipeline(
     validatePeerRoles(ctx, runId, definitions);
 
     const callerLeadId = caller?.agentId || run.masterLeadAgentId;
+    // QA pipelines verify the merged QA branch in place, so they skip worktree provisioning and Lead spawning below.
+    const isQaDefinition = run.agents[callerLeadId]?.role === "qa_lead";
+    if (isQaDefinition) assertQaPipelineDefinitionAllowed(run, callerLeadId, definitions);
     const preparedPipelines: Array<{
       pipeline: PipelineState;
       workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
@@ -256,7 +260,7 @@ export async function definePipeline(
       const callerRecord = latestRunBeforeWorktree.agents[callerLeadId];
       // Default to the calling Lead's pre-provisioned worktree when available and not yet claimed by an active pipeline.
       let requestedWorktreePath = definition.worktree?.trim() ?? "";
-      if (!requestedWorktreePath) {
+      if (!requestedWorktreePath && !isQaDefinition) {
         const callerWorktree = callerRecord?.worktreePath ?? "";
         const callerWorktreeAlreadyClaimed =
           !callerWorktree ||
@@ -276,7 +280,9 @@ export async function definePipeline(
       }
       // Open and validate the worktree before mutating run state so invalid checkouts fail atomically.
       const latestRun = ctx.store.require(runId);
-      const workspace = await openPipelineWorktree(ctx, latestRun, requestedWorktreePath);
+      const workspace = isQaDefinition
+        ? await qaPipelineWorkspace(latestRun)
+        : await openPipelineWorktree(ctx, latestRun, requestedWorktreePath);
       const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd);
       recheckWorkspaceAndIdentity(
         ctx,
@@ -286,20 +292,23 @@ export async function definePipeline(
         preparedPipelines.map((entry) => entry.pipeline),
       );
       // Bind this pipeline to its dedicated Lead session so stage Peers can fork from that Lead in the same cwd.
-      const owningLeadId = await resolveOrSpawnPipelineLead(
-        ctx,
-        runId,
-        callerLeadId,
-        definition.name,
-        workspace,
-        preparedPipelines.map((entry) => entry.pipeline),
-      );
+      const owningLeadId = isQaDefinition
+        ? callerLeadId
+        : await resolveOrSpawnPipelineLead(
+          ctx,
+          runId,
+          callerLeadId,
+          definition.name,
+          workspace,
+          preparedPipelines.map((entry) => entry.pipeline),
+        );
       const pipelineId = randomUUID();
       const createdAt = new Date().toISOString();
       // Persist all stage definitions in 'pending' state; recoverPipelines transitions Stage 1 to 'starting'.
       const pipeline = PipelineStateSchema.parse({
         ...sanitizedDefinition,
         id: pipelineId,
+        kind: isQaDefinition ? "qa" : "feature",
         status: "queued",
         leadAgentId: owningLeadId,
         currentStageIndex: 0,
@@ -333,7 +342,8 @@ export async function definePipeline(
       for (const { pipeline, workspace, leadAgentId } of preparedPipelines) {
         // External worktrees are never treated as plugin-owned cleanup targets; a previously
         // created slp worktree retains its ownership record from slp_create_worktree.
-        if (!Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
+        // The QA worktree is the run's dev workspace and is retired with the run, never as a pipeline workspace.
+        if (pipeline.kind !== "qa" && !Object.hasOwn(mutableRun.pipelineWorkspaces, workspace.workspaceId)) {
           mutableRun.pipelineWorkspaces[workspace.workspaceId] = { ...workspace, owned: false };
         }
         mutableRun.pipelines[pipeline.id] = pipeline;
@@ -347,7 +357,7 @@ export async function definePipeline(
       }
       mutableRun.status = "running";
       const callerLeadRecord = mutableRun.agents[callerLeadId];
-      // Clear either initial planning (slp_define_pipeline) or post-integration (slp_report) obligation when spawning new or UAT pipelines.
+      // Clear either initial planning (slp_define_pipeline) or post-integration (slp_report) obligation when spawning a new pipeline.
       if (callerLeadRecord?.awaitingTool === "slp_define_pipeline" || callerLeadRecord?.awaitingTool === "slp_report") {
         callerLeadRecord.awaitingTool = null;
         callerLeadRecord.awaitingSince = null;

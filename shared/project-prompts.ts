@@ -19,6 +19,8 @@ export type ProjectRole = z.infer<typeof ProjectRoleSchema>;
 export const ProjectPromptConfigSchema = z.object({
   supervisor: ProjectRoleSchema,
   lead: ProjectRoleSchema,
+  // Optional only so run snapshots taken before QA_LEAD.md existed still load; readers fall back to the built-in default.
+  qaLead: ProjectRoleSchema.optional(),
   // Store a run snapshot so worktrees and plugin restarts agree even if project files change later.
   peers: z.array(ProjectRoleSchema),
 });

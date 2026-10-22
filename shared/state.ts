@@ -24,6 +24,8 @@ export const AgentRecordSchema = z.object({
   worktreePath: z.string().nullable().default(null),
   featureName: z.string().nullable().default(null),
   featureCriteria: z.string().nullable().default(null),
+  // The human-approved product spec this Lead must implement; kept so revived Leads get the same contract.
+  featureSpec: z.string().nullable().default(null),
   // Explicit parent agent reference enables recursive bottom-up archival across separate Paseo worktrees.
   parentAgentId: z.string().nullable().default(null),
   archivedAt: z.string().nullable().default(null),
@@ -130,11 +132,17 @@ export const RunSchema = z.object({
   // Null until the Supervisor delegates, so a run in 'initializing' is still a valid stored object.
   criteria: z.string().nullable().default(null),
   masterSpec: z.string().nullable().default(null),
+  // Every feature's human-approved product spec, which the QA Lead turns into test scenarios.
+  productSpec: z.string().nullable().default(null),
   // Legacy runs retain built-in defaults; new runs snapshot all project-authored role workflows.
   promptConfig: ProjectPromptConfigSchema.nullable().default(null),
   supervisorAgentId: z.string(),
   supervisorWorkspaceId: z.string(),
+  // The Lead currently accountable for the run: a feature Lead while features are built, the QA Lead after handover.
   masterLeadAgentId: z.string(),
+  // Spawned with the feature Leads at delegation; empty for runs created before QA pipelines existed.
+  qaLeadAgentId: z.string().default(""),
+  // The QA worktree once delegated: every feature Lead merges into it and the QA Lead verifies it there.
   devWorkspaceId: z.string(),
   devCwd: z.string(),
   // Defaults let a run be inserted before its tasks, agents or mail exist, and let older state files load.

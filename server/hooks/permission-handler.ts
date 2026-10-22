@@ -2,6 +2,7 @@
 // Called both from the lifecycle event (low latency) and from the sweeper (catches missed events).
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { AgentRecord, Run } from "../../shared/state";
+import { isPipelineLeadRole } from "../../shared/roles";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
 import { isKiroProvider } from "../runtime/agent-gateway-helpers";
@@ -10,7 +11,7 @@ import { isKiroProvider } from "../runtime/agent-gateway-helpers";
 const answeredRequestIds = new Set<string>();
 
 function isFinalizingLead(run: Run, agentRecord: AgentRecord): boolean {
-  if (agentRecord.role !== "master_lead" || !agentRecord.pipelineId || agentRecord.archivedAt) return false;
+  if (!isPipelineLeadRole(agentRecord.role) || !agentRecord.pipelineId || agentRecord.archivedAt) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   return Boolean(
     run.status === "running"
@@ -22,7 +23,7 @@ function isFinalizingLead(run: Run, agentRecord: AgentRecord): boolean {
 function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
   // Archived agents and legacy or aborted runs must never receive new write or shell permissions.
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
-  if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
+  if (run.status === "completed") return agentRecord.role === "supervisor" || isPipelineLeadRole(agentRecord.role);
   if (agentRecord.role === "peer") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];
@@ -40,7 +41,7 @@ function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
 function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean {
   if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
   // Supervisor and Lead stay alive after a cycle completes so the user can issue follow-up requests in the same session.
-  if (run.status === "completed") return agentRecord.role === "supervisor" || agentRecord.role === "master_lead";
+  if (run.status === "completed") return agentRecord.role === "supervisor" || isPipelineLeadRole(agentRecord.role);
   if (agentRecord.role === "peer") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;
     const pipeline = run.pipelines[agentRecord.pipelineId];
@@ -53,8 +54,8 @@ function pipelineIsRunningForAgent(run: Run, agentRecord: AgentRecord): boolean 
 }
 
 function workingDirectoryOf(run: Run, agentRecord: AgentRecord): string {
-  // Each Lead operates inside its dedicated feature worktree (or the integration checkout).
-  if (agentRecord.role === "master_lead") {
+  // Each Lead operates inside its dedicated feature worktree; the QA Lead inside the QA worktree.
+  if (isPipelineLeadRole(agentRecord.role)) {
     return (
       agentRecord.worktreePath
       ?? (agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId]?.worktree : undefined)

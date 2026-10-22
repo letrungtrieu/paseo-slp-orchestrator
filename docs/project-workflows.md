@@ -6,11 +6,11 @@ Selecting a repository in SLP prepares `.slp` before any agents are created. A m
 .slp/
 ├── SUPERVISOR.md
 ├── LEAD.md
+├── QA_LEAD.md
 ├── FORKED_LEAD.md
 ├── BASE_PEER.md
 └── peers/
     ├── DEVELOPER.md
-    ├── END_USER_UAT.md
     ├── REVIEWER.md
     ├── QA_ENGINEER.md
     └── SECURITY_REVIEWER.md

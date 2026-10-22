@@ -3,6 +3,7 @@ import type { BusCaller } from "../bus/http-mcp";
 import type { PipelineContext } from "./context";
 import { pipelineFinalizationBriefing } from "./stage-briefings";
 import { requirePipeline, requireStageLead } from "./stage-context";
+import { fallbackLeadIdFor } from "./qa/qa-phase-state";
 import { recoverPipelines } from "./stage-engine";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
@@ -39,13 +40,13 @@ export function resumePipeline(ctx: PipelineContext, runId: string, pipelineId: 
   if (pipeline.gate) throw new ToolError("This pipeline is waiting for the human approval selected by its run mode.");
   const stage = pipeline.stages[pipeline.currentStageIndex];
   if (!stage) throw new ToolError("Pipeline has no stage to resume.");
-  const targetLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? run.masterLeadAgentId;
+  const targetLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? fallbackLeadIdFor(run, pipeline);
   ctx.store.mutate(runId, () => {
     pipeline.status = stage.status === "pending" ? "queued" : "running";
     pipeline.pausedReason = null;
     pipeline.updatedAt = new Date().toISOString();
     // The recovery decision is attached to the stage so replacement Lead sessions can read it after a partial startup.
-    stage.messages.push({ id: `decision-${pipeline.updatedAt}`, fromAgentId: run.masterLeadAgentId,
+    stage.messages.push({ id: `decision-${pipeline.updatedAt}`, fromAgentId: fallbackLeadIdFor(run, pipeline),
       toAgentId: targetLeadId || "stage-coordinator", message: feedback, createdAt: pipeline.updatedAt });
     if (stage.status === "running" && targetLeadId) {
       // A persisted resume must carry its recovery direction through the same restart boundary.
@@ -73,7 +74,7 @@ export function approvePipelineGate(ctx: PipelineContext, runId: string, pipelin
       const finalStageCoordinatorId = pipeline.stages.at(-1)?.forkedLeadAgentId ?? pipeline.leadAgentId;
       const finalizingAgentId = finalStageCoordinatorId && !run.agents[finalStageCoordinatorId]?.archivedAt
         ? finalStageCoordinatorId
-        : run.masterLeadAgentId;
+        : fallbackLeadIdFor(run, pipeline);
       run.mailbox.push(stageMail(finalizingAgentId, pipelineFinalizationBriefing(run, pipeline), "slp_finalize_pipeline"));
     }
   });

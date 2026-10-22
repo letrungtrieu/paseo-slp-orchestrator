@@ -52,7 +52,6 @@ describe("run RPCs", () => {
     expect(configuration.directory).toBe(`${flow.repoPath}/.slp`);
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
       "developer",
-      "end-user",
       "qa-engineer",
       "reviewer",
       "security-reviewer",

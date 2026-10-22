@@ -11,6 +11,8 @@ import { archiveAgentLogged, type PipelineContext } from "./context";
 import { recoverPipelines } from "./stage-engine";
 import { stageMail } from "./stage-mail";
 import { ToolError } from "./tool-error";
+import { reviveQaLeadForPreparation } from "./qa/qa-lead-provisioning";
+import { isQaPhaseActive, qaPipelinesOf, qaVerificationComplete } from "./qa/qa-phase-state";
 
 export interface RestoreRunResult {
   ok: boolean;
@@ -45,6 +47,11 @@ export function inferRestoredRunStatus(run: Run): RunStatus {
   }
   if (run.finalReport !== null || savedActiveStatus === "reporting") {
     return "reporting";
+  }
+  // Right after the QA handover (or a rework) the QA Lead still owes its QA pipeline, which only planning makes it owe.
+  const hasActiveQaPipeline = qaPipelinesOf(run).some((pipeline) => !["integrated", "failed"].includes(pipeline.status));
+  if (isQaPhaseActive(run) && !hasActiveQaPipeline && !qaVerificationComplete(run)) {
+    return "planning";
   }
   return "running";
 }
@@ -182,7 +189,10 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
 
   // Re-open the main repository workspace so the Supervisor session is attached to a live Paseo workspace handle.
   let supervisorWorkspaceId = initialRun.supervisorWorkspaceId;
-  let supervisorWorkspaceCwd = initialRun.devCwd || initialRun.repoPath;
+  // Once delegated, devCwd is the QA worktree, which must never become the Supervisor's checkout.
+  let supervisorWorkspaceCwd = initialRun.devWorkspaceId === initialRun.supervisorWorkspaceId
+    ? initialRun.devCwd || initialRun.repoPath
+    : initialRun.repoPath;
   if (canUseLivePaseoWorkspaces(ctx) && existsSync(initialRun.repoPath)) {
     const paseo = await ctx.holder.get();
     if (typeof paseo?.workspaces?.open === "function") {
@@ -267,6 +277,25 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
       if (mutableLead) {
         mutableLead.workspaceId = restoredLeadWorkspace.workspaceId;
         mutableLead.worktreePath = restoredLeadWorkspace.cwd;
+      }
+    });
+  }
+
+  // The QA worktree is every feature Lead's merge target, so it must be live before any finalize or QA stage resumes.
+  const qaPhaseSnapshot = ctx.store.require(runId);
+  if (qaPhaseSnapshot.qaLeadAgentId && qaPhaseSnapshot.devWorkspaceId !== qaPhaseSnapshot.supervisorWorkspaceId) {
+    const restoredQaWorkspace = await ensureRestoredWorktreeWorkspace(
+      ctx,
+      runId,
+      qaPhaseSnapshot.devCwd,
+      qaPhaseSnapshot.integrationBranch,
+      qaPhaseSnapshot.devWorkspaceId,
+    );
+    ctx.store.mutate(runId, (mutableRun) => {
+      mutableRun.devWorkspaceId = restoredQaWorkspace.workspaceId;
+      mutableRun.devCwd = restoredQaWorkspace.cwd;
+      for (const agentRecord of Object.values(mutableRun.agents)) {
+        if (agentRecord.role === "qa_lead") agentRecord.workspaceId = restoredQaWorkspace.workspaceId;
       }
     });
   }
@@ -376,6 +405,7 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
           replacementRecord.worktreePath = siblingWorkspace.cwd;
           replacementRecord.featureName = archivedSiblingLead.featureName;
           replacementRecord.featureCriteria = archivedSiblingLead.featureCriteria;
+          replacementRecord.featureSpec = archivedSiblingLead.featureSpec;
         }
         const matchedBranch =
           Object.values(mutableRun.pipelineWorkspaces).find((candidate) => candidate.cwd === siblingWorkspace.cwd)
@@ -386,6 +416,7 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
             `${delegationMessage(mutableRun.criteria ?? "", {
               featureName: archivedSiblingLead.featureName ?? undefined,
               featureCriteria: archivedSiblingLead.featureCriteria ?? undefined,
+              productSpec: archivedSiblingLead.featureSpec ?? undefined,
               worktreePath: siblingWorkspace.cwd,
               branch: matchedBranch,
             })}\nYour Lead session was restored in SLP Orchestrator. Call slp_define_pipeline now.`,
@@ -398,6 +429,8 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
     await reviveMasterLead(ctx, runId, "SLP run restored by the Supreme Manager", liveStatuses);
     await recoverPipelines(ctx, runId);
   }
+  // A QA Lead archived while features were still being built is not the accountable Lead, so reviveMasterLead skips it.
+  await reviveQaLeadForPreparation(ctx, runId, liveStatuses);
 
   // Inform a newly spawned Supervisor that the interrupted SLP run has been restored and is continuing.
   if (isSupervisorDead && ["planning", "running", "awaiting_user"].includes(restoredRunStatus)) {

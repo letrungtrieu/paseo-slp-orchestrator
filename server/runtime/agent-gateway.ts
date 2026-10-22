@@ -121,6 +121,7 @@ export class AgentGateway {
       worktreePath: spec.peerWorktreePath ?? null,
       featureName: null,
       featureCriteria: null,
+      featureSpec: null,
       archivedAt: null,
       token: randomBytes(24).toString("base64url"),
       // Direct stage messages can temporarily defer an agent's normal report obligation.

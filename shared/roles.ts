@@ -2,15 +2,24 @@
 // Business peer roles are loaded from .slp and therefore do not belong in this enum.
 import { z } from "zod";
 
-// Runtime orchestration roles follow the 3-tier SLP hierarchy: Supervisor -> N Leads -> Peers.
-// Each Lead runs inside its own feature worktree, coordinates with sibling Leads, and forks stage Peers directly.
+// Runtime orchestration roles follow the 3-tier SLP hierarchy: Supervisor -> N Leads + 1 QA Lead -> Peers.
+// Each feature Lead runs inside its own feature worktree; the QA Lead owns the QA worktree that every Lead merges into.
 export const SLP_ROLES = [
   "supervisor",
   "master_lead",
+  "qa_lead",
   "peer",
 ] as const;
 export const SlpRoleSchema = z.enum(SLP_ROLES);
 export type SlpRole = z.infer<typeof SlpRoleSchema>;
+
+// Both Lead kinds own pipelines, approve stages and fork stage peers; only their merge target and write access differ.
+export const PIPELINE_LEAD_ROLES = ["master_lead", "qa_lead"] as const satisfies readonly SlpRole[];
+export type PipelineLeadRole = (typeof PIPELINE_LEAD_ROLES)[number];
+
+export function isPipelineLeadRole(role: SlpRole | string | null | undefined): role is PipelineLeadRole {
+  return (PIPELINE_LEAD_ROLES as readonly string[]).includes(role ?? "");
+}
 
 // Name under which the plugin-hosted MCP server is registered inside every agent session.
 export const BUS_SERVER_NAME = "slp-bus";
@@ -33,5 +42,6 @@ export type RunMode = z.infer<typeof RunModeSchema>;
 export const ROLE_LABELS: Record<SlpRole, string> = {
   supervisor: "Supervisor",
   master_lead: "Lead",
+  qa_lead: "QA Lead",
   peer: "Peer",
 };

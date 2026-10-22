@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalizePipelineRoleId, type PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, currentStage, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, currentStage, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -14,7 +14,6 @@ describe("project business roles", () => {
     // Recursive discovery reads .slp/peers/ in lexicographical filename order.
     expect(configuration.peers.map((peer) => peer.role)).toEqual([
       "developer",
-      "end-user",
       "qa-engineer",
       "reviewer",
       "security-reviewer",
@@ -49,6 +48,7 @@ describe("project business roles", () => {
     const runId = await flow.startRun();
     await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
       acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
+      productSpec: SAMPLE_PRODUCT_SPEC,
     });
     const response = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", { pipeline: {
       ...DEFAULT_PIPELINE,

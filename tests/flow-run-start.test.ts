@@ -24,7 +24,15 @@ describe("dynamic pipeline startup", () => {
     const delegatedRun = flow.run(runId);
     expect(delegatedRun.status).toBe("planning");
     expect(delegatedRun.masterLeadAgentId).toBeTruthy();
-    expect(Object.values(delegatedRun.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "supervisor"]);
+    // A QA Lead is spawned with the feature Lead so it can prepare verification while features are built.
+    expect(Object.values(delegatedRun.agents).map((agent) => agent.role).sort()).toEqual(["master_lead", "qa_lead", "supervisor"]);
+    // The QA worktree becomes the integration branch every feature Lead merges into.
+    expect(delegatedRun.qaLeadAgentId).toBeTruthy();
+    expect(delegatedRun.integrationBranch).not.toBe(delegatedRun.baseBranch);
+    expect(delegatedRun.devWorkspaceId).not.toBe(delegatedRun.supervisorWorkspaceId);
+    expect(delegatedRun.agents[delegatedRun.qaLeadAgentId].worktreePath).toBe(delegatedRun.devCwd);
+    // Preparation owes no tool, so the QA Lead is never nudged into a pipeline definition that would be rejected.
+    expect(flow.mailTo(runId, delegatedRun.qaLeadAgentId).at(-1)?.awaitTool).toBeNull();
     // Supervisor runs in the base workspace, while the Lead is immediately spawned inside its dedicated feature worktree.
     const supervisorSpec = flow.gateway.createdAgents.find(({ record }) => record.role === "supervisor")?.spec;
     const leadSpec = flow.gateway.createdAgents.find(({ record }) => record.role === "master_lead")?.spec;

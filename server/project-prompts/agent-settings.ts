@@ -3,7 +3,7 @@ import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
 import type { SlpRole } from "../../shared/roles";
 import type { ProjectPromptConfig } from "../../shared/project-prompts";
 import type { ProviderChoices } from "../../shared/state";
-import { defaultProjectPrompts, peerRole } from "./defaults";
+import { defaultProjectPrompts, peerRole, qaLeadDefinition } from "./defaults";
 
 export interface AgentModelSettings {
   provider: string;
@@ -175,8 +175,10 @@ export function resolveAgentSettings(
     };
   }
 
-  // Root orchestration roles (supervisor, master_lead) resolve directly against global defaults.
-  const definition = role === "supervisor" ? projectPrompts.supervisor : projectPrompts.lead;
+  // Root orchestration roles (supervisor and both Lead kinds) resolve directly against global defaults.
+  const definition = role === "supervisor"
+    ? projectPrompts.supervisor
+    : role === "qa_lead" ? qaLeadDefinition(projectPrompts) : projectPrompts.lead;
   const effectiveModel = definition.model;
   const effectiveThinking = definition.thinking;
   const modelSourcePath = definition.sourcePath;
@@ -213,5 +215,7 @@ export function validateProjectAgentSettings(configuration: ProjectPromptConfig,
   // Catch incompatible provider permission overrides before a run creates any worktree or session.
   resolveAgentSettings(configuration, "supervisor", undefined, supervisorDefaults);
   resolveAgentSettings(configuration, "master_lead", undefined, leadDefaults);
+  // The QA Lead shares the Lead provider choices but may override its model in QA_LEAD.md.
+  resolveAgentSettings(configuration, "qa_lead", undefined, leadDefaults);
   for (const peer of configuration.peers) resolveAgentSettings(configuration, "peer", peer.role, peerDefaults);
 }

@@ -1,5 +1,6 @@
 // Recursive parent-child agent hierarchy traversal and bottom-up cascade archival across Paseo worktrees.
 import type { AgentRecord, Run } from "../../shared/state";
+import { isPipelineLeadRole } from "../../shared/roles";
 import { deleteRunLocalPipelineBranches, removeWorktreeAndDeleteBranch } from "../git/git";
 import { archiveAgentLogged, type PipelineContext } from "./context";
 
@@ -10,11 +11,12 @@ const archivingSubtreeKeys = new Set<string>();
 const ROLE_ARCHIVE_PRIORITY: Readonly<Record<string, number>> = {
   peer: 0,
   master_lead: 1,
+  qa_lead: 1,
   supervisor: 2,
 };
 
 function hasMasterLeadRecord(run: Run): boolean {
-  return Object.values(run.agents).some((agentRecord) => agentRecord.role === "master_lead");
+  return Object.values(run.agents).some((agentRecord) => isPipelineLeadRole(agentRecord.role));
 }
 
 function hasStageLeadRecord(run: Run, peerRecord: AgentRecord): boolean {
@@ -23,7 +25,7 @@ function hasStageLeadRecord(run: Run, peerRecord: AgentRecord): boolean {
   // A stage peer is only considered orphaned when no Lead record exists for its pipeline or stage.
   return Object.values(run.agents).some(
     (candidateRecord) =>
-      candidateRecord.role === "master_lead"
+      isPipelineLeadRole(candidateRecord.role)
       && candidateRecord.pipelineId === peerPipelineId
       && (candidateRecord.stageId === peerRecord.stageId || run.pipelines[peerPipelineId]?.leadAgentId === candidateRecord.agentId),
   );
@@ -33,7 +35,7 @@ function hasStageLeadRecord(run: Run, peerRecord: AgentRecord): boolean {
 export function directChildAgentsOf(run: Run, parentAgentId: string): AgentRecord[] {
   const parentRecord = run.agents[parentAgentId];
   const isSupervisorParent = parentRecord?.role === "supervisor" || run.supervisorAgentId === parentAgentId;
-  const isMasterLeadParent = parentRecord?.role === "master_lead" || run.masterLeadAgentId === parentAgentId;
+  const isMasterLeadParent = isPipelineLeadRole(parentRecord?.role) || run.masterLeadAgentId === parentAgentId;
   const directChildren: AgentRecord[] = [];
   const seenChildIds = new Set<string>();
 
@@ -53,7 +55,7 @@ export function directChildAgentsOf(run: Run, parentAgentId: string): AgentRecor
     if (isSupervisorParent) {
       // Lead sessions belong directly under the Supervisor even in older snapshots without parentAgentId.
       if (
-        candidateRecord.role === "master_lead"
+        isPipelineLeadRole(candidateRecord.role)
         && (!candidateRecord.parentAgentId || !run.agents[candidateRecord.parentAgentId])
       ) {
         registerChild(candidateRecord);
@@ -144,7 +146,7 @@ export async function retireIntegratedPipelineWorkspace(
   // does not cascade-archive the Lead mid-turn before it calls slp_report; archiveOwnedWorkspaces retires it at run end.
   const hasActiveLeadInWorkspace = Object.values(currentRun.agents).some(
     (agentRecord) =>
-      agentRecord.role === "master_lead" &&
+      isPipelineLeadRole(agentRecord.role) &&
       !agentRecord.archivedAt &&
       ((targetWorkspaceId !== null && agentRecord.workspaceId === targetWorkspaceId) ||
         agentRecord.worktreePath === integratedPipeline.worktree),
@@ -193,14 +195,14 @@ export async function retireIntegratedPipelineWorkspace(
     const activeLeadWorkspaceIds = new Set(
       latestRun
         ? Object.values(latestRun.agents)
-            .filter((agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt && agentRecord.workspaceId)
+            .filter((agentRecord) => isPipelineLeadRole(agentRecord.role) && !agentRecord.archivedAt && agentRecord.workspaceId)
             .map((agentRecord) => agentRecord.workspaceId as string)
         : [],
     );
     const activeLeadWorktrees = new Set(
       latestRun
         ? Object.values(latestRun.agents)
-            .filter((agentRecord) => agentRecord.role === "master_lead" && !agentRecord.archivedAt && agentRecord.worktreePath)
+            .filter((agentRecord) => isPipelineLeadRole(agentRecord.role) && !agentRecord.archivedAt && agentRecord.worktreePath)
             .map((agentRecord) => agentRecord.worktreePath as string)
         : [],
     );
@@ -423,7 +425,7 @@ export async function handleAgentArchived(
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) => !affectedAgentIds.has(queuedMessage.toAgentId),
       );
-      if (targetRecord.role === "master_lead") {
+      if (isPipelineLeadRole(targetRecord.role)) {
         // Pause pipelines owned by the archived Lead or any child Lead in its archived subtree while leaving sibling Leads' pipelines running.
         const isPrimaryLead = archivedAgentId === mutableRun.masterLeadAgentId;
         for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
@@ -437,7 +439,8 @@ export async function handleAgentArchived(
             mutablePipeline.updatedAt = effectiveArchivedAt;
           }
         }
-        if (isPrimaryLead) {
+        // An archived QA Lead is revived by recoverMasterLead; promoting a feature Lead would hand QA to the wrong role.
+        if (isPrimaryLead && targetRecord.role === "master_lead") {
           // Promote an unarchived sibling Lead outside the archived subtree when parallel pipelines remain active.
           const survivingSiblingLead = Object.values(mutableRun.agents).find(
             (candidateRecord) =>
@@ -453,7 +456,7 @@ export async function handleAgentArchived(
     });
 
     const archivedDescendants = await archiveAgentSubtree(ctx, runId, archivedAgentId);
-    if (targetRecord.role === "master_lead") {
+    if (isPipelineLeadRole(targetRecord.role)) {
       ctx.logEvent(runId, {
         taskId: null,
         from: archivedAgentId,

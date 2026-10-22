@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadProjectPrompts } from "../server/project-prompts/load";
@@ -14,14 +14,14 @@ describe("project prompt initialization", () => {
     const configuration = await loadProjectPrompts(repoPath);
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
       "developer",
-      "end-user",
       "qa-engineer",
       "reviewer",
       "security-reviewer",
     ]);
     expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toContain("# Workflow");
     expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
-    expect(await readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).toContain("role: end-user");
+    // Merged-build verification belongs to the QA Lead, so no separate UAT peer is seeded.
+    await expect(readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).rejects.toThrow();
     // Business-role metadata must not prescribe a permanent pipeline kind.
     expect(await readFile(join(repoPath, ".slp/peers/QA_ENGINEER.md"), "utf8")).not.toContain("kind:");
   });
@@ -44,7 +44,7 @@ describe("project prompt initialization", () => {
     await mkdir(join(repoPath, ".slp"));
     await writeFile(join(repoPath, ".slp/comm-log.jsonl"), "historic log");
     await writeFile(join(repoPath, ".slp/MASTER_SPEC.md"), "historic spec without YAML");
-    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(5);
+    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(4);
     expect(await readFile(join(repoPath, ".slp/comm-log.jsonl"), "utf8")).toBe("historic log");
   });
 
@@ -52,7 +52,32 @@ describe("project prompt initialization", () => {
     const repoPath = await createDirectory("project-prompts");
     const configurations = await Promise.all([loadProjectPrompts(repoPath), loadProjectPrompts(repoPath)]);
     expect(configurations[0]).toEqual(configurations[1]);
-    expect(configurations[0].peers).toHaveLength(5);
+    expect(configurations[0].peers).toHaveLength(4);
+  });
+});
+
+describe("QA Lead root role", () => {
+  it("adds QA_LEAD.md to a project created before it existed without touching existing roles", async () => {
+    const repoPath = await createDirectory("project-prompts");
+    await loadProjectPrompts(repoPath);
+    const customLeadMarkdown = "---\nrole: master-lead\ndescription: Custom lead.\n---\nCustom lead workflow.";
+    await writeFile(join(repoPath, ".slp/LEAD.md"), customLeadMarkdown);
+    // Simulate an older project by removing the QA Lead file the first load created.
+    await rm(join(repoPath, ".slp/QA_LEAD.md"));
+
+    const configuration = await loadProjectPrompts(repoPath);
+    // Every delegation spawns a QA Lead, so its root file must come back while user edits stay intact.
+    expect(configuration.qaLead?.role).toBe("qa-lead");
+    expect(await readFile(join(repoPath, ".slp/QA_LEAD.md"), "utf8")).toContain("ROLE: QA Lead");
+    expect(await readFile(join(repoPath, ".slp/LEAD.md"), "utf8")).toBe(customLeadMarkdown);
+    expect(systemPromptFor("qa_lead", configuration)).toContain("AVAILABLE PROJECT PEERS");
+  });
+
+  it("reserves the qa-lead ID for the root QA Lead file", async () => {
+    const repoPath = await createDirectory("project-prompts");
+    await loadProjectPrompts(repoPath);
+    await writeFile(join(repoPath, ".slp/peers/QA_COPY.md"), "---\nrole: qa-lead\ndescription: Copied by mistake.\n---\nWorkflow.");
+    await expect(loadProjectPrompts(repoPath)).rejects.toThrow("reserved for a root orchestration role");
   });
 });
 
@@ -81,7 +106,6 @@ describe("Markdown role discovery", () => {
     expect(configuration.lead.role).toBe("master-lead");
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
       "developer",
-      "end-user",
       "qa-engineer",
       "reviewer",
       "security-reviewer",

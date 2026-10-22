@@ -124,7 +124,21 @@ export function peerRosterUpdateNotice(stage: StageState, revivedPeerIndices: Re
 }
 
 // Provide the pipeline's Lead with peer and sibling-Lead contacts so it can merge autonomously and consult on conflicts.
+// A QA pipeline already lives on the QA branch, so its closing step is a clean-tree check and the report, never a merge.
+function qaPipelineClosingBriefing(run: Run, pipeline: PipelineState): string {
+  return [
+    `QA pipeline '${pipeline.name}' (${pipeline.id}) completed all stages on the QA branch \`${run.integrationBranch}\` (\`${run.devCwd}\`).`,
+    [
+      "### Closing Instructions",
+      "1. Confirm with slp_get_pipeline that every fix made by your peers is committed; you cannot commit yourself, so send any uncommitted work back with slp_stage_rework before closing.",
+      `2. Call \`slp_finalize_pipeline({ pipelineId: "${pipeline.id}", summary })\` to close the QA pipeline (nothing is merged).`,
+      "3. Call slp_report with the tested scope, results with metrics, evidence paths and known issues.",
+    ].join("\n"),
+  ].join("\n\n");
+}
+
 export function pipelineFinalizationBriefing(run: Run, pipeline: PipelineState): string {
+  if (pipeline.kind === "qa") return qaPipelineClosingBriefing(run, pipeline);
   const pipelinePeerLines = pipeline.stages.flatMap((completedStage) =>
     completedStage.peerAgentIds.flatMap((peerAgentId, peerIndex) => {
       if (!peerAgentId || run.agents[peerAgentId]?.archivedAt) return [];
