@@ -11,12 +11,22 @@ import { createPipelineWorktree } from "./pipeline-workspaces";
 import { delegate, presentToManager, report, requestRework } from "./run-lifecycle";
 import { listPipelines, readPipeline, readRun } from "./read-tools";
 import { approveStage, resumePipeline } from "./stage-control";
-import { escalateStage, requestStageRework, sendPeerMessage, submitStageReport } from "./stage-messages";
+import { answerQuestion } from "./peer-messaging/answer-question";
+import { askQuestion } from "./peer-messaging/ask-question";
+import { awaitAnswer } from "./peer-messaging/await-answer";
+import { notifyAgent } from "./peer-messaging/notify";
+import { escalateStage, requestStageRework, submitStageReport } from "./stage-messages";
 import { handlePeerShell } from "./shell-watchdog";
 import { ToolError } from "./tool-error";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
-type ToolHandler<Name extends BusToolName> = (ctx: PipelineContext, caller: BusCaller, input: ToolInput<Name>) => string | Promise<string>;
+// The abort signal fires when the agent's HTTP connection closes, which only matters to handlers that block (slp_ask).
+type ToolHandler<Name extends BusToolName> = (
+  ctx: PipelineContext,
+  caller: BusCaller,
+  input: ToolInput<Name>,
+  abortSignal?: AbortSignal,
+) => string | Promise<string>;
 
 // A complete mapped type makes every exposed tool require an implementation at compile time.
 const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
@@ -26,7 +36,10 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_get_pipeline: (ctx, caller, input) => readPipeline(ctx, caller, input.pipelineId),
   slp_finalize_pipeline: (ctx, caller, input) => finalizePipeline(ctx, caller, input.pipelineId, input.summary),
   slp_resume_pipeline: (ctx, caller, input) => resumePipeline(ctx, caller.runId, input.pipelineId, input.feedback),
-  slp_send_peer_message: (ctx, caller, input) => sendPeerMessage(ctx, caller, input),
+  slp_notify: (ctx, caller, input) => notifyAgent(ctx, caller, input),
+  slp_ask: (ctx, caller, input, abortSignal) => askQuestion(ctx, caller, input, abortSignal),
+  slp_await_answer: (ctx, caller, input, abortSignal) => awaitAnswer(ctx, caller, input, abortSignal),
+  slp_answer: (ctx, caller, input) => answerQuestion(ctx, caller, input),
   slp_stage_report: (ctx, caller, input) => submitStageReport(ctx, caller, input),
   slp_approve_stage: (ctx, caller, input) => approveStage(ctx, caller, input.summary),
   slp_stage_rework: (ctx, caller, input) => requestStageRework(ctx, caller, input),
@@ -52,7 +65,7 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
       return { runId: run.id, agentId: agentRecord.agentId, role: agentRecord.role,
         projectRole: agentRecord.projectRole, taskId: null };
     },
-    async dispatch(caller: BusCaller, toolName: string, rawArguments: unknown): Promise<BusToolOutcome> {
+    async dispatch(caller: BusCaller, toolName: string, rawArguments: unknown, abortSignal?: AbortSignal): Promise<BusToolOutcome> {
       const logCall = (outcome: "delivered" | "blocked" | "error", reason?: string) => {
         const argumentsText = JSON.stringify(rawArguments ?? {});
         ctx.logEvent(caller.runId, { taskId: null, from: `${caller.role}:${caller.agentId.slice(0, 8)}`,
@@ -74,7 +87,7 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
         if (!parsedInput.success) throw new ToolError(parsedInput.error.message);
         // The same catalogue selects the schema and handler; the cast only bridges their mapped-type correlation.
         const invoke = TOOL_HANDLERS[toolName] as ToolHandler<typeof toolName>;
-        const text = await invoke(ctx, caller, parsedInput.data);
+        const text = await invoke(ctx, caller, parsedInput.data, abortSignal);
         const refreshedRun = ctx.store.require(caller.runId);
         const callerRecord = refreshedRun.agents[caller.agentId];
         const hasSatisfiedMail = refreshedRun.mailbox.some(

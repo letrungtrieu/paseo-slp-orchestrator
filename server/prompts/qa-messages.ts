@@ -11,7 +11,7 @@ export interface QaLeadBriefingContext {
   featureLeads: ReadonlyArray<SiblingLeadSummary>;
 }
 
-// Agent ids are included verbatim because the QA Lead needs them for slp_send_peer_message.
+// Agent ids are included verbatim because the QA Lead needs them for slp_ask and slp_notify.
 function featureLeadRoster(featureLeads: ReadonlyArray<SiblingLeadSummary>): string {
   return featureLeads
     .map(
@@ -28,7 +28,7 @@ export function qaLeadPreparationBriefing(context: QaLeadBriefingContext): strin
     `### Your QA Worktree\n- **Worktree**: \`${context.qaWorktreePath}\` (branch \`${context.qaBranch}\`)\n- Every feature Lead merges its finished branch into this branch with slp_finalize_pipeline and resolves merge conflicts before you start.`,
     `### Overall Acceptance Criteria\n${context.acceptanceCriteria}`,
     context.sharedContext ? `### Shared Cross-Feature Context\n${context.sharedContext}` : "",
-    `### Feature Leads Building in Parallel (reachable via slp_send_peer_message)\n${featureLeadRoster(context.featureLeads)}`,
+    `### Feature Leads Building in Parallel (reachable via slp_ask / slp_notify)\n${featureLeadRoster(context.featureLeads)}`,
     [
       "### What To Do Now (Preparation Phase)",
       "1. Read `.slp/standards/TEST_POLICY.md` and study how this project tests: unit tests, automation/E2E suites, manual-test checklists and critical journeys.",

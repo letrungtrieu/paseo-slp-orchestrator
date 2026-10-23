@@ -336,9 +336,9 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
   }
   const createdAt = new Date().toISOString();
   const promptMessage = (toAgentId: string, text: string, awaitTool: string | null): MailboxMessage => ({
-    id: randomUUID(), toAgentId, text, taskId: null, awaitTool, isReminder: false, createdAt,
+    id: randomUUID(), toAgentId, text, taskId: null, awaitTool, isReminder: false, questionId: null, createdAt,
   });
-  // Map dead identities to their newly spawned replacements so pending waits and stale mail can be reconciled.
+  // Map dead identities to their newly spawned replacements so stale mail and parent links can be reconciled.
   const replacementByDeadAgentId = new Map<string, string>();
   if (activationChanges.previousCoordinatorId && activationChanges.previousCoordinatorId !== stage.forkedLeadAgentId) {
     replacementByDeadAgentId.set(activationChanges.previousCoordinatorId, stage.forkedLeadAgentId);
@@ -376,9 +376,6 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
       // Drop unread mail addressed to dead stage sessions because their replacements receive a full stage briefing.
       mutableRun.mailbox = mutableRun.mailbox.filter((queuedMessage) => !replacementByDeadAgentId.has(queuedMessage.toAgentId));
       for (const participantRecord of Object.values(mutableRun.agents)) {
-        if (participantRecord.waitingForAgentId && replacementByDeadAgentId.has(participantRecord.waitingForAgentId)) {
-          participantRecord.waitingForAgentId = replacementByDeadAgentId.get(participantRecord.waitingForAgentId) ?? null;
-        }
         // Re-parent surviving children when their stage coordinator was replaced during revival.
         if (participantRecord.parentAgentId && replacementByDeadAgentId.has(participantRecord.parentAgentId)) {
           participantRecord.parentAgentId = replacementByDeadAgentId.get(participantRecord.parentAgentId) ?? participantRecord.parentAgentId;
@@ -437,8 +434,6 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
       pipelineAgent.awaitingTool = null;
       pipelineAgent.awaitingSince = null;
       pipelineAgent.nudges = 0;
-      pipelineAgent.waitingForAgentId = null;
-      pipelineAgent.deferredTool = null;
     }
     mutableRun.mailbox = mutableRun.mailbox.filter(
       (message) => mutableRun.agents[message.toAgentId]?.pipelineId !== pipelineId,

@@ -37,7 +37,7 @@ SLP orchestrates multi-agent software delivery across three runtime tiers (\`sup
    - Runs inside its feature's dedicated Git worktree.
    - Receives the full roster of all sibling Leads and concurrent features being built in parallel (\`agentId\`, \`featureName\`, \`worktreePath\`, \`branch\`, \`acceptanceCriteria\`).
    - Receives its own human-approved \`productSpec\` as the implementation contract, plus the QA Lead's id and the QA branch it merges into. Implement the spec's screens, states and scenarios exactly; record any deviation with its reason in the \`slp_finalize_pipeline\` summary.
-   - **Cross-Lead Alignment:** Uses \`slp_send_peer_message({ toAgentId, message, waitForReply: true })\` to align shared APIs, schemas, routes, and end-to-end flows with sibling Leads during planning, execution, or merge resolution.
+   - **Cross-Lead Alignment:** Uses \`slp_ask({ toAgentId, question })\` (blocking; the answer is returned by the call) to align shared APIs, schemas, routes, and end-to-end flows with sibling Leads during planning, execution, or merge resolution.
    - **Stage Planning:** Receives the **YAML front matter** of every file in \`.slp/peers/**/*.md\` in its \`systemPrompt\` (as the available peer catalog) and calls \`slp_define_pipeline\` to define dynamic stages (\`stages: [{ name, goal, peers: [{ role, task }] }]\`).
    - **Direct Supervision & Forking:** Supervises each stage via \`slp_approve_stage\` or \`slp_stage_rework\`, handles hung peer commands via \`slp_handle_peer_shell\`, and merges its completed feature branch into the QA branch via \`slp_finalize_pipeline\` (resolving merge conflicts there). Feature Leads never report to the Supervisor and never run heavy verification; they are retired once every feature is merged.
 
@@ -49,7 +49,7 @@ SLP orchestrates multi-agent software delivery across three runtime tiers (\`sup
 
 3. **Tier 3 — Stage Peers (\`.slp/peers/**/*.md\`, runtime role \`peer\`):**
    - Every stage Peer runs in the **exact same worktree** as its owning Lead (feature Lead or QA Lead) and **forks directly from that Lead's session**, inheriting the Lead's codebase discovery, sibling-Lead contract agreements, and prior stage outcomes without re-investigating from scratch.
-   - Peers remain alive across stages of their pipeline so downstream peers (e.g., QA, reviewers, security/performance auditors) can question upstream peers (e.g., architects, engineers) directly via \`slp_send_peer_message\`.
+   - Peers remain alive across stages of their pipeline so downstream peers (e.g., QA, reviewers, security/performance auditors) can question upstream peers (e.g., architects, engineers) directly via \`slp_ask\`.
    - Each Peer executes its assigned stage task and submits structured evidence via \`slp_stage_report\` (or escalates blockers via \`slp_escalate\`).
 
 ---
@@ -145,7 +145,7 @@ ROLE: Pipeline peer (Backend & API Engineer). Apply this domain workflow to your
 - Keep domain logic modular, strongly typed, and unit-testable in isolation from transport or UI layers.
 - TEST TIER: You are a \`tier: feature\` peer. Write unit tests following the conventions in \`.slp/standards/TEST_POLICY.md\` and run ONLY its \`fast\` tier commands. Never start a heavy resource listed there (engine editor, emulator, container stack, browser E2E); record anything that needs one as a hand-off item for the integration QA pipeline in \`slp_stage_report\`.
 - Work only in the pipeline worktree and only within the permission mode granted to this stage.
-- Coordinate shared-file edits and commits directly with fellow peers via \`slp_send_peer_message\`; report any work that remains uncommitted.
+- Coordinate shared-file edits and commits directly with fellow peers via \`slp_ask\` / \`slp_notify\`; report any work that remains uncommitted.
 
 ## 2. Method Contract (Mandatory in \`slp_stage_report\`)
 1. Chosen Method & Problem Mapping: State technique/algorithm/pattern A chosen to solve problem B.
@@ -157,8 +157,8 @@ ROLE: Pipeline peer (Backend & API Engineer). Apply this domain workflow to your
 - Do not approve the stage yourself. The Lead independently decides whether the evidence meets the goal and either approves or requests rework.
 - Communicate with other agents only through MCP tools from server "${BUS_SERVER_NAME}". Never use the paseo CLI, curl, or an external messaging path.
 - Pipeline definitions, stage reports and communication history live in SQLite. Read them with the available \`slp_\` tools; read-only queries do not end your turn.
-- STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE (MANDATORY): Every technical communication (\`slp_send_peer_message\`, \`slp_stage_report\`) MUST be backed by concrete metrics and technical data. For every function, feature or logic block discussed or delivered, explicitly state: (1) the exact logic/mechanism, (2) the expected input parameters/data/preconditions, and (3) the expected output data/metrics (or exact observable runtime outcome/state transition). Vague prose without concrete input/logic/output or runtime outcome evidence is strictly prohibited.
-- CROSS-STAGE PEER LIFECYCLE: Stage peers remain alive across all stages of a pipeline until integration. Use \`slp_send_peer_message\` to question peers from current or earlier stages or your Lead when upstream contracts are unclear.
+- STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE (MANDATORY): Every technical communication (\`slp_ask\`, \`slp_answer\`, \`slp_notify\`, \`slp_stage_report\`) MUST be backed by concrete metrics and technical data. For every function, feature or logic block discussed or delivered, explicitly state: (1) the exact logic/mechanism, (2) the expected input parameters/data/preconditions, and (3) the expected output data/metrics (or exact observable runtime outcome/state transition). Vague prose without concrete input/logic/output or runtime outcome evidence is strictly prohibited.
+- CROSS-STAGE PEER LIFECYCLE: Stage peers remain alive across all stages of a pipeline until integration. Use \`slp_ask\` to question peers from current or earlier stages or your Lead when upstream contracts are unclear.
 - LOCAL BRANCH HYGIENE & NO REMOTE PUSH: Pipeline branches (\`slp/*\`) are strictly temporary local branches. Never run \`git push\` or publish temporary branches to any remote.
 - After \`slp_stage_report\` or \`slp_escalate\` succeeds, END YOUR TURN.
 \`\`\`
@@ -190,7 +190,7 @@ When customizing \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, or peer files (for ex
 
 ### Mandatory Checklist When Editing \`.slp/LEAD.md\`
 1. **Front Matter:** Keep \`role: master-lead\` (or \`role: lead\`) and a non-empty \`description\`. Note that changing \`model\` in \`LEAD.md\` to another provider switches the Lead's provider (and affects which peer models are compatible when forking).
-2. **Sibling Lead Alignment:** Preserve instructions to inspect concurrent sibling features and align shared contracts/APIs/routes with sibling Leads via \`slp_send_peer_message({ toAgentId, message, waitForReply: true })\`.
+2. **Sibling Lead Alignment:** Preserve instructions to inspect concurrent sibling features and align shared contracts/APIs/routes with sibling Leads via \`slp_ask({ toAgentId, question })\`.
 3. **Pipeline Definition (\`slp_define_pipeline\`):** Preserve instructions to define stages using role IDs from the \`.slp/peers\` catalog (\`{ pipeline: { name, version, description, stages: [{ name, goal, peers: [{ role, task }] }] } }\`), without inventing a \`systemPrompt\` field inside stage definitions. You can recommend project-specific stage shapes (e.g., \`design-contracts\` -> \`implement\` -> \`verify-and-review\`) referencing your grouped peer role IDs!
 4. **Stage Supervision & Lifecycle Tools:** Preserve instructions for:
    - \`slp_approve_stage\` and \`slp_stage_rework\` (reviewing peer reports and diffs),
@@ -211,7 +211,7 @@ When customizing \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, or peer files (for ex
 ### Mandatory Checklist When Editing Any \`.slp/peers/<group>/*.md\` File
 1. **Front Matter:** Ensure \`role\` is unique across all group folders, lowercase-hyphenated compatible, not a reserved root role (\`supervisor\`, \`lead\`, \`master-lead\`, \`qa-lead\`), and has a clear \`description\`.
 2. **Fork Awareness:** Remind the peer that it forks directly from its Lead in the shared feature worktree and should build on the Lead's investigation rather than re-scanning the entire repo from scratch.
-3. **MCP Tool Obligations:** Ensure the workflow instructs the peer to submit its findings via \`slp_stage_report\` (or \`slp_escalate\` when blocked), collaborate with peers/Lead via \`slp_send_peer_message\`, and **never** attempt to approve the stage itself.
+3. **MCP Tool Obligations:** Ensure the workflow instructs the peer to submit its findings via \`slp_stage_report\` (or \`slp_escalate\` when blocked), collaborate with peers/Lead via \`slp_ask\` / \`slp_notify\` and answer incoming questions with \`slp_answer\`, and **never** attempt to approve the stage itself.
 4. **Metrics & Evidence Contract:** Keep the requirement to provide concrete Input / Logic / Output metrics (and visual/screenshot evidence for UI/QA roles, or step-by-step methodology + rejected alternatives for engineering roles).
 5. **Test Tier:** Ensure \`tier\` is \`feature\` or \`integration\` and that the workflow names the exact test commands, folders and conventions from \`.slp/standards/TEST_POLICY.md\` allowed for that tier.
 6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_stage_report\` or \`slp_escalate\` succeeds, END YOUR TURN."*

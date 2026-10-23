@@ -66,10 +66,10 @@ function formatMergeConflictGuidance(
     });
   const consultationHints = [
     pipelinePeerContacts.length > 0
-      ? `Pipeline Peers to ask if you need context on this pipeline's changes (via slp_send_peer_message): ${pipelinePeerContacts.join(", ")}.`
+      ? `Pipeline Peers to ask if you need context on this pipeline's changes (via slp_ask): ${pipelinePeerContacts.join(", ")}.`
       : null,
     siblingLeadContacts.length > 0
-      ? `Sibling Leads to ask if the conflict involves another feature pipeline (via slp_send_peer_message): ${siblingLeadContacts.join(", ")}.`
+      ? `Sibling Leads to ask if the conflict involves another feature pipeline (via slp_ask): ${siblingLeadContacts.join(", ")}.`
       : null,
     `Resolution workflow: consult relevant Peers or sibling Leads if any conflicting logic is unclear, merge '${run.integrationBranch}' into '${pipeline.branch}' inside '${pipeline.worktree}', resolve conflicts and commit cleanly, then call slp_finalize_pipeline again.`,
   ].filter(Boolean).join(" ");
@@ -243,8 +243,6 @@ export async function finalizePipeline(
         agentRecord.awaitingTool = null;
         agentRecord.awaitingSince = null;
         agentRecord.nudges = 0;
-        agentRecord.waitingForAgentId = null;
-        agentRecord.deferredTool = null;
       }
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) => mutableRun.agents[queuedMessage.toAgentId]?.pipelineId !== pipelineId,

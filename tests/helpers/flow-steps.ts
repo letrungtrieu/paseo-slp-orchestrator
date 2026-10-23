@@ -3,6 +3,7 @@
 // role checks and the same asynchronous stage handoffs used by real agents.
 import { vi } from "vitest";
 import type { PipelineDefinition, PipelineState, StageState } from "../../shared/pipeline";
+import type { BusToolOutcome } from "../../server/bus/http-mcp";
 import type { Flow } from "./flow-fixture";
 import { commitFiles, runGitSync } from "./git-fixture";
 
@@ -200,4 +201,26 @@ export function localSlpBranches(flow: Flow): string[] {
     .split("\n")
     .map((branchLine) => branchLine.replace(/^[*+ ]+/, "").trim())
     .filter(Boolean);
+}
+
+// Runs a blocking slp_ask to completion: the asker is left waiting inside its tool call, the recipient
+// answers through slp_answer, and the outcome the asker's call returned is handed back for assertions.
+export async function askAndAnswer(
+  flow: Flow,
+  askerId: string,
+  recipientId: string,
+  question: string,
+  answer: string,
+): Promise<{ askOutcome: BusToolOutcome; questionId: string }> {
+  const runId = flow.store.findAgent(askerId)!.run.id;
+  // Not awaited yet: the call must stay open while the recipient answers it.
+  const pendingAsk = flow.callAs(askerId, "slp_ask", { toAgentId: recipientId, question });
+  const questionId = await vi.waitFor(() => {
+    const askedQuestion = flow.store.questions.listPendingForRecipient(runId, recipientId).find((candidate) => candidate.question === question);
+    if (!askedQuestion) throw new Error("question not recorded yet");
+    return askedQuestion.questionId;
+  });
+  const answerOutcome = await flow.callAs(recipientId, "slp_answer", { questionId, answer });
+  if (answerOutcome.isError) throw new Error(`slp_answer failed: ${answerOutcome.text}`);
+  return { askOutcome: await pendingAsk, questionId };
 }

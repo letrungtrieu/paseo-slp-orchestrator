@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, localSlpBranches, SAMPLE_PRODUCT_SPEC, reportPeer, startedRunWithPipeline, verifyAndReportFromQaLead } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, approveCurrentStage, askAndAnswer, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, localSlpBranches, SAMPLE_PRODUCT_SPEC, reportPeer, startedRunWithPipeline, verifyAndReportFromQaLead } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -158,35 +158,26 @@ describe("pipeline completion and integration", () => {
     expect(conflictAttempt.text).toContain(firstForkedLeadId);
 
     // Second Forked Lead asks its developer Peer why mode=billing-only was written, and also consults the first Forked Lead.
-    const askOwnPeer = await flow.callAs(secondForkedLeadId, "slp_send_peer_message", {
-      toAgentId: secondDeveloperPeerId,
-      message: "Why did you set mode=billing-only in shared-config.txt?",
-      waitForReply: true,
-    });
-    expect(askOwnPeer.isError).toBe(false);
-    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
-    const peerReply = await flow.callAs(secondDeveloperPeerId, "slp_send_peer_message", {
-      toAgentId: secondForkedLeadId,
-      message: "Billing needs billing enabled; we can combine it as mode=auth+billing.",
-      waitForReply: false,
-    });
-    expect(peerReply.isError).toBe(false);
-    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
+    const ownPeerExchange = await askAndAnswer(
+      flow,
+      secondForkedLeadId,
+      secondDeveloperPeerId,
+      "Why did you set mode=billing-only in shared-config.txt?",
+      "Billing needs billing enabled; we can combine it as mode=auth+billing.",
+    );
+    expect(ownPeerExchange.askOutcome.isError).toBe(false);
+    expect(ownPeerExchange.askOutcome.text).toContain("mode=auth+billing");
+    expect(flow.store.questions.require(ownPeerExchange.questionId).scope).toBe("merge");
 
-    const askSiblingLead = await flow.callAs(secondForkedLeadId, "slp_send_peer_message", {
-      toAgentId: firstForkedLeadId,
-      message: "Can we combine our shared-config.txt modes into mode=auth+billing?",
-      waitForReply: true,
-    });
-    expect(askSiblingLead.isError).toBe(false);
-    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
-    const siblingLeadReply = await flow.callAs(firstForkedLeadId, "slp_send_peer_message", {
-      toAgentId: secondForkedLeadId,
-      message: "Confirmed, mode=auth+billing preserves auth behavior.",
-      waitForReply: false,
-    });
-    expect(siblingLeadReply.isError).toBe(false);
-    expect(await flow.deliverMail(runId)).toBeGreaterThanOrEqual(1);
+    const siblingLeadExchange = await askAndAnswer(
+      flow,
+      secondForkedLeadId,
+      firstForkedLeadId,
+      "Can we combine our shared-config.txt modes into mode=auth+billing?",
+      "Confirmed, mode=auth+billing preserves auth behavior.",
+    );
+    expect(siblingLeadExchange.askOutcome.isError).toBe(false);
+    expect(siblingLeadExchange.askOutcome.text).toContain("Confirmed");
 
     // Second Forked Lead resolves the conflict in its worktree by merging integrationBranch and committing the combined config.
     const integrationBranch = flow.run(runId).integrationBranch;

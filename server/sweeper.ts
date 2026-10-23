@@ -6,6 +6,7 @@ import { handlePermissionRequest } from "./hooks/permission-handler";
 import { sweepStageNudges } from "./hooks/lifecycle-hooks";
 import { collectDescendantAgentIds, handleAgentArchived, handleSupervisorArchived } from "./pipeline/agent-hierarchy";
 import { recoverMasterLead } from "./pipeline/agent-revival";
+import { sweepPeerQuestions } from "./pipeline/peer-messaging/question-sweep";
 import type { PipelineContext } from "./pipeline/context";
 import { sweepPeerShellWatchdog } from "./pipeline/shell-watchdog";
 import { recoverPipelines } from "./pipeline/stage-engine";
@@ -83,6 +84,8 @@ async function sweepRun(ctx: PipelineContext, run: Run): Promise<void> {
   }
   // Respawn a vanished or archived Master Lead before flushing so its transferred or inferred mail delivers immediately.
   await recoverMasterLead(ctx, activeRun.id, liveStatuses);
+  // Expire stale questions and queue anything the in-process wake-ups missed, so the flush below delivers it on this very tick.
+  sweepPeerQuestions(ctx, activeRun.id, liveStatuses);
   // Mail flushes only to agents the poll shows idle/closed/error, which is why replies from tools can return immediately and still be delivered safely.
   await ctx.mailbox.flush(activeRun.id, liveStatuses);
   // A delivery failure confirming a missing recipient marks it archived; re-run Master Lead recovery if that happened.

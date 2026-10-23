@@ -5,6 +5,7 @@ import { z } from "zod";
 import { RunModeSchema } from "./roles";
 import { CommLogEntrySchema, RunSchema, RunStatusSchema } from "./state";
 import { ProjectRoleSchema } from "./project-prompts";
+import { PeerQuestionMetricsSchema, PeerQuestionStatusSchema, PeerQuestionViewSchema } from "./peer-questions";
 
 export const initializeProjectPromptsRpc = defineRpc({
   name: "slp.project.prompts.init",
@@ -153,4 +154,16 @@ export const tailLogRpc = defineRpc({
   // Bounded by 500 so one request cannot read an unbounded log file; the UI asks for 200.
   input: z.object({ runId: z.string(), limit: z.number().int().min(1).max(500).default(100) }),
   output: z.object({ entries: z.array(CommLogEntrySchema) }),
+});
+
+// Audit of agent-to-agent questions: every ask/answer plus aggregate metrics for judging communication quality.
+export const listPeerQuestionsRpc = defineRpc({
+  name: "slp.questions.list",
+  input: z.object({
+    runId: z.string(),
+    status: PeerQuestionStatusSchema.optional(),
+    // Newest first; the cap keeps a long run's ledger from being shipped to the UI in one response.
+    limit: z.number().int().min(1).max(2000).default(500),
+  }),
+  output: z.object({ questions: z.array(PeerQuestionViewSchema), metrics: PeerQuestionMetricsSchema }),
 });

@@ -73,8 +73,8 @@ describe("dispatch validation", () => {
     expect(logEvent).toHaveBeenCalledWith("run-1", expect.objectContaining({ kind: "slp_stage_report", outcome: "blocked" }));
   });
 
-  it("rejects direct messages to a peer outside the current stage", async () => {
-    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_send_peer_message", { toAgentId: "missing", message: LONG_MESSAGE });
+  it("rejects notifications to a peer outside the current stage", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_notify", { toAgentId: "missing", message: LONG_MESSAGE });
     expect(outcome.isError).toBe(true);
     expect(store.require("run-1").mailbox).toHaveLength(0);
   });
@@ -82,7 +82,7 @@ describe("dispatch validation", () => {
 
 describe("stage dispatch and bookkeeping", () => {
   it("delivers a direct peer message through the stage mailbox", async () => {
-    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_send_peer_message", { toAgentId: "peer-2", message: LONG_MESSAGE });
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_notify", { toAgentId: "peer-2", message: LONG_MESSAGE });
     expect(outcome.isError).toBe(false);
     expect(outcome.text).toContain("queued");
     expect(store.require("run-1").mailbox.at(-1)).toMatchObject({
@@ -102,6 +102,7 @@ describe("stage dispatch and bookkeeping", () => {
         taskId: null,
         awaitTool: "slp_stage_report",
         isReminder: false,
+        questionId: null,
         createdAt: "2026-01-01T00:00:00.000Z",
       });
     });

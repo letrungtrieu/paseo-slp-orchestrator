@@ -72,8 +72,6 @@ export async function reviveMasterLead(
         deadLeadRecord.archivedAt ??= revivedAt;
         deadLeadRecord.awaitingTool = null;
         deadLeadRecord.awaitingSince = null;
-        deadLeadRecord.waitingForAgentId = null;
-        deadLeadRecord.deferredTool = null;
       }
       const replacementRecord = mutableRun.agents[replacementMasterLead.agentId];
       if (replacementRecord && deadLeadRecord) {
@@ -210,8 +208,6 @@ export async function markStageParticipantForRevival(
     mutableParticipant.archivedAt ??= archivedAt;
     mutableParticipant.awaitingTool = null;
     mutableParticipant.awaitingSince = null;
-    mutableParticipant.waitingForAgentId = null;
-    mutableParticipant.deferredTool = null;
     const targetPipeline = mutableRun.pipelines[mutableParticipant.pipelineId];
     if (!targetPipeline) return;
     const currentStage = targetPipeline.stages[targetPipeline.currentStageIndex];

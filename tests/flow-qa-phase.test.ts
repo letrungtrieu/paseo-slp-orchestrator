@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { sweepStageNudges } from "../server/hooks/lifecycle-hooks";
 import { decidePermission } from "../server/hooks/permissions";
+import { sweepPeerQuestions } from "../server/pipeline/peer-messaging/question-sweep";
 import { inferRestoredRunStatus } from "../server/pipeline/run-restore";
 import { useFlowFixture, type Flow } from "./helpers/flow-fixture";
 import {
@@ -145,23 +146,26 @@ describe("QA phase", () => {
     const runId = await flow.startRun();
     await delegateToLead(flow, runId);
     const { qaLeadAgentId, masterLeadAgentId } = flow.run(runId);
-    const asked = await flow.callAs(qaLeadAgentId, "slp_send_peer_message", {
+    // Nobody answers: the blocking call returns a pending notice after its wait window instead of hanging.
+    const asked = await flow.callAs(qaLeadAgentId, "slp_ask", {
       toAgentId: masterLeadAgentId,
-      message: "Which engine tests cover the save flow?",
-      waitForReply: true,
+      question: "Which engine tests cover the save flow?",
     });
     expect(asked.isError).toBe(false);
-    // Age the wait past the reply timeout so the sweeper treats the question as unanswered.
-    flow.store.mutate(runId, (mutableRun) => {
-      mutableRun.agents[qaLeadAgentId].awaitingSince = new Date(Date.now() - 10 * 60_000).toISOString();
-    });
+    expect(asked.text).toContain("slp_await_answer");
+    // Let the question outlive its lifetime so the sweeper expires it and tells the asker to carry on.
+    flow.ctx.questionTiming.questionTtlMs = 0;
     flow.gateway.markEveryAgentIdle();
+    sweepPeerQuestions(flow.ctx, runId, await flow.gateway.liveStatuses(runId));
     sweepStageNudges(flow.ctx, runId, await flow.gateway.liveStatuses(runId));
 
     const qaLeadRecord = flow.run(runId).agents[qaLeadAgentId];
-    expect(qaLeadRecord.waitingForAgentId).toBeNull();
+    // Expiry is plain information mail: it owes no pipeline tool, so a preparing QA Lead is never nudged into slp_define_pipeline.
     expect(qaLeadRecord.awaitingTool).toBeNull();
-    expect(flow.mailTo(runId, qaLeadAgentId).at(-1)?.awaitTool).toBeNull();
+    const expiryMail = flow.mailTo(runId, qaLeadAgentId).at(-1);
+    expect(expiryMail?.awaitTool).toBeNull();
+    expect(expiryMail?.text).toContain("expired");
+    expect(flow.store.questions.listForRun(runId, 5)[0]).toMatchObject({ status: "expired", expireReason: "timeout" });
   });
 
   it("restores a run archived right after the QA handover into planning so the QA Lead owes its pipeline", async () => {

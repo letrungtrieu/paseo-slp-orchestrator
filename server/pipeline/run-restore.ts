@@ -148,8 +148,6 @@ export async function archiveRunSafely(ctx: PipelineContext, runId: string): Pro
     for (const agentRecord of Object.values(mutableRun.agents)) {
       agentRecord.awaitingTool = null;
       agentRecord.awaitingSince = null;
-      agentRecord.waitingForAgentId = null;
-      agentRecord.deferredTool = null;
     }
   });
 

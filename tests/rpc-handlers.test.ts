@@ -2,10 +2,11 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it } from "vitest";
 import { registerRpcHandlers } from "../server/rpc-handlers";
 import {
-  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, dismissArchiveWarningRpc, getRunRpc, listRunsRpc, restoreRunRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc,
+  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, dismissArchiveWarningRpc, getRunRpc, listPeerQuestionsRpc, listRunsRpc, restoreRunRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc,
 } from "../shared/rpc";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, delegateToLead, reportPeer, startedRunWithPipeline, eventually } from "./helpers/flow-steps";
+import type { PeerQuestionMetrics, PeerQuestionView } from "../shared/peer-questions";
+import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, approveCurrentStage, askAndAnswer, currentStage, delegateToLead, reportPeer, startedRunWithPipeline, eventually } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -29,8 +30,38 @@ async function rpcRun(mode: "FULL_AUTO" | "STEP_BY_STEP_DEBUG" = "FULL_AUTO") {
 describe("RPC registration", () => {
   it("registers one handler per shared RPC contract", async () => {
     const { rpc } = await rpcRun();
-    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, restoreRunRpc, dismissArchiveWarningRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc].map((contract) => contract.name).sort();
+    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, restoreRunRpc, dismissArchiveWarningRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc, listPeerQuestionsRpc].map((contract) => contract.name).sort();
     expect(rpc.registeredNames()).toEqual(expectedNames);
+  });
+});
+
+describe("peer question audit RPC", () => {
+  it("lists answered exchanges with labels and metrics, and filters by status", async () => {
+    const { flow, rpc } = await rpcRun();
+    const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
+    const stage = currentStage(flow, runId, pipelineId);
+    const reviewerId = flow.agentId(runId, "reviewer", stage.id);
+    const developerId = flow.agentId(runId, "developer", stage.id);
+    await askAndAnswer(flow, reviewerId, developerId, "Which retry cap applies?", "3 attempts.");
+    await flow.callAs(reviewerId, "slp_ask", { toAgentId: developerId, question: "Still open?" });
+
+    const audit = await rpc.call<{ questions: PeerQuestionView[]; metrics: PeerQuestionMetrics }>(listPeerQuestionsRpc, { runId, limit: 50 });
+    expect(audit.questions).toHaveLength(2);
+    expect(audit.questions.find((view) => view.question === "Which retry cap applies?")).toMatchObject({
+      status: "answered", answer: "3 attempts.", fromLabel: "reviewer", toLabel: "developer",
+    });
+    expect(audit.metrics).toMatchObject({ total: 2, answered: 1, pending: 1, answerRate: 1 });
+
+    const pendingOnly = await rpc.call<{ questions: PeerQuestionView[]; metrics: PeerQuestionMetrics }>(listPeerQuestionsRpc, { runId, status: "pending", limit: 50 });
+    expect(pendingOnly.questions.map((view) => view.question)).toEqual(["Still open?"]);
+    expect(pendingOnly.metrics.total).toBe(1);
+  });
+
+  it("answers an unknown run with an empty audit instead of failing", async () => {
+    const { rpc } = await rpcRun();
+    const audit = await rpc.call<{ questions: PeerQuestionView[]; metrics: PeerQuestionMetrics }>(listPeerQuestionsRpc, { runId: "nope", limit: 5 });
+    expect(audit.questions).toEqual([]);
+    expect(audit.metrics.total).toBe(0);
   });
 });
 

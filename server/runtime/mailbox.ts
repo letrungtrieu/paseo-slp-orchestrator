@@ -12,6 +12,8 @@ export interface EnqueueOptions {
   awaitTool: string | null;
   // Reminder mail continues the same obligation, so delivery must preserve its nudge count.
   isReminder?: boolean;
+  // Ledger row this mail carries (a question for its recipient, or the answer for its asker).
+  questionId?: string;
   // label of the sender for the audit log
   from: string;
   summary: string;
@@ -42,7 +44,7 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   // Closed or paused cohorts must not receive late reports or direct messages.
   if (pipeline.status !== "running" || currentStage?.status !== "running") return false;
   if (currentStage.id === agentRecord.stageId) return true;
-  // Prior-stage peers remain alive across stages in a running pipeline so active stage participants can consult them via slp_send_peer_message.
+  // Prior-stage peers remain alive across stages in a running pipeline so active stage participants can consult them via slp_ask.
   if (agentRecord.role === "peer") {
     return pipeline.stages
       .slice(0, pipeline.currentStageIndex)
@@ -70,6 +72,7 @@ export class Mailbox {
       taskId: options.taskId,
       awaitTool: options.awaitTool,
       isReminder: options.isReminder ?? false,
+      questionId: options.questionId ?? null,
       createdAt: new Date().toISOString(),
     };
     // Persisted in the run so queued mail survives a plugin reload; the sweeper flushes it when the plugin comes back.
@@ -168,6 +171,11 @@ export class Mailbox {
       this.store.mutate(runId, (run) => {
         run.mailbox = run.mailbox.filter((message) => !deliveredIds.has(message.id));
       });
+      // The ledger records the hand-off only now: a question counts as delivered when Paseo accepted the prompt, not when it was queued.
+      const deliveredQuestionIds = messages.flatMap((message) => (message.questionId ? [message.questionId] : []));
+      if (deliveredQuestionIds.length > 0) {
+        this.store.questions.markDeliveredTo(recipientId, deliveredQuestionIds, new Date().toISOString());
+      }
       this.logMail(runId, {
         taskId: messages[0].taskId,
         from: "mailbox",

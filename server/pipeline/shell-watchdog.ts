@@ -335,7 +335,7 @@ export async function handlePeerShell(
   const coordinatorGuidance =
     input.guidance?.trim()
     || "Avoid interactive prompts, watch-mode flags, or un-detached background daemons. Run a non-interactive alternative or add an explicit timeout.";
-  const expectedPeerTool = peerRecord.awaitingTool ?? peerRecord.deferredTool ?? "slp_stage_report";
+  const expectedPeerTool = peerRecord.awaitingTool ?? "slp_stage_report";
 
   const interruptPromptLines = [
     `## Shell Command Canceled by Lead (\`${caller.agentId}\`)`,
@@ -350,13 +350,7 @@ export async function handlePeerShell(
   ctx.store.mutate(currentRun.id, (mutableRun) => {
     const mutablePeer = mutableRun.agents[peerRecord.agentId];
     if (!mutablePeer) return;
-    if (!mutablePeer.awaitingTool && mutablePeer.deferredTool) {
-      mutablePeer.awaitingTool = mutablePeer.deferredTool;
-      mutablePeer.deferredTool = null;
-      mutablePeer.waitingForAgentId = null;
-    } else if (!mutablePeer.awaitingTool) {
-      mutablePeer.awaitingTool = "slp_stage_report";
-    }
+    if (!mutablePeer.awaitingTool) mutablePeer.awaitingTool = "slp_stage_report";
     mutablePeer.awaitingSince = new Date().toISOString();
     mutablePeer.nudges = 0;
   });

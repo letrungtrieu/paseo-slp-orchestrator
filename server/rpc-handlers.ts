@@ -9,6 +9,7 @@ import {
   approveMainRpc,
   dismissArchiveWarningRpc,
   getRunRpc,
+  listPeerQuestionsRpc,
   listRunsRpc,
   restoreRunRpc,
   resumeTaskRpc,
@@ -21,6 +22,7 @@ import {
 } from "../shared/rpc";
 import type { Run } from "../shared/state";
 import type { PipelineContext } from "./pipeline/context";
+import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
 import { abortRun, approveMain, approveRunGate, startRun } from "./pipeline/run-lifecycle";
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
 import { approvePipelineGate } from "./pipeline/stage-control";
@@ -179,5 +181,15 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     ctx.holder.capture(paseo);
     const run = ctx.store.find(runId);
     return { entries: run ? ctx.store.tailLog(runId, limit) : [] };
+  });
+
+  // Metrics cover every returned row, so the optional status filter narrows the table and the numbers together.
+  server.handle(listPeerQuestionsRpc, async ({ runId, status, limit }, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const run = ctx.store.find(runId);
+    if (!run) return { questions: [], metrics: computePeerQuestionMetrics([]) };
+    const ledgerQuestions = ctx.store.questions.listForRun(runId, limit).filter((question) => !status || question.status === status);
+    const questionViews = buildPeerQuestionViews(run, ledgerQuestions);
+    return { questions: questionViews, metrics: computePeerQuestionMetrics(questionViews) };
   });
 }

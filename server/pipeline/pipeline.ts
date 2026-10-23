@@ -7,6 +7,7 @@ import { Mailbox } from "../runtime/mailbox";
 import type { PaseoHolder } from "../runtime/paseo-holder";
 import type { RunStore } from "../store/run-store";
 import type { PipelineContext } from "./context";
+import { DEFAULT_QUESTION_TIMING, WaitRegistry, type QuestionTiming } from "./peer-messaging/wait-registry";
 
 export interface PipelineDependencies {
   store: RunStore;
@@ -15,6 +16,8 @@ export interface PipelineDependencies {
   holder: PaseoHolder;
   stateDirectory?: string;
   getSettings?: () => SlpSettings | Promise<SlpSettings>;
+  // Tests shorten the wait window and lifetime; production uses the defaults.
+  questionTiming?: Partial<QuestionTiming>;
 }
 
 
@@ -34,5 +37,12 @@ export function createPipeline(dependencies: PipelineDependencies): PipelineCont
     logEvent(runId, mailEntry),
   );
   // The context exposes only live dependencies and durable services; stage control owns its state transitions.
-  return { ...dependencies, mailbox, logEvent };
+  const { questionTiming: questionTimingOverrides, ...contextDependencies } = dependencies;
+  return {
+    ...contextDependencies,
+    mailbox,
+    logEvent,
+    questionWaits: new WaitRegistry(),
+    questionTiming: { ...DEFAULT_QUESTION_TIMING, ...questionTimingOverrides },
+  };
 }

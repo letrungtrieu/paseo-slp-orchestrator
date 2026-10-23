@@ -99,8 +99,6 @@ export async function finalizeQaPipeline(
       agentRecord.awaitingTool = null;
       agentRecord.awaitingSince = null;
       agentRecord.nudges = 0;
-      agentRecord.waitingForAgentId = null;
-      agentRecord.deferredTool = null;
     }
     mutableRun.mailbox = mutableRun.mailbox.filter(
       (queuedMessage) => mutableRun.agents[queuedMessage.toAgentId]?.pipelineId !== pipelineId,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, TWO_PEER_PIPELINE, approveCurrentStage, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, TWO_PEER_PIPELINE, approveCurrentStage, askAndAnswer, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -25,28 +25,34 @@ describe("stage coordination", () => {
     expect(reviewBriefing).toContain("slp_approve_stage");
   });
 
-  it("lets peers send direct messages and releases a waiting peer when the recipient submits slp_stage_report", async () => {
+  it("lets a peer ask a blocking question and keeps the report obligation untouched", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const reviewerId = flow.agentId(runId, "reviewer", stage.id);
     const developerId = flow.agentId(runId, "developer", stage.id);
+    const reviewerObligationBefore = flow.run(runId).agents[reviewerId].awaitingTool;
 
-    const message = await flow.callAs(reviewerId, "slp_send_peer_message", {
-      toAgentId: developerId,
-      message: "The import boundary needs an idempotency check.",
-      waitForReply: true,
-    });
-    expect(message.isError).toBe(false);
-    expect(flow.pipeline(runId, pipelineId)!.stages[0].messages.at(-1)?.message).toContain("idempotency");
-    expect(flow.mailTo(runId, developerId).at(-1)?.text).toContain("idempotency");
-    expect(flow.run(runId).agents[reviewerId].waitingForAgentId).toBe(developerId);
+    const { askOutcome, questionId } = await askAndAnswer(
+      flow,
+      reviewerId,
+      developerId,
+      "The import boundary needs an idempotency check.",
+      "Added: duplicate import ids return { ok: true, duplicate: true } without a second write.",
+    );
+    expect(askOutcome.isError).toBe(false);
+    expect(askOutcome.text).toContain("duplicate: true");
+    // Both sides of the exchange appear in the stage history next to the peer reports.
+    const stageMessages = flow.pipeline(runId, pipelineId)!.stages[0].messages;
+    expect(stageMessages.map((entry) => entry.message)).toEqual([
+      "The import boundary needs an idempotency check.",
+      expect.stringContaining("duplicate: true"),
+    ]);
+    // Waiting on a question is not a deferred obligation: the asker still owes exactly what it owed before.
+    expect(flow.run(runId).agents[reviewerId].awaitingTool).toBe(reviewerObligationBefore);
+    expect(flow.store.questions.require(questionId).status).toBe("answered");
 
-    // When developer submits its stage report instead of sending a direct reply, reviewer's wait is released immediately.
     await reportPeer(flow, runId, pipelineId, "developer", "Idempotency check added and verified.");
-    expect(flow.run(runId).agents[reviewerId].waitingForAgentId).toBeNull();
-    expect(flow.mailTo(runId, reviewerId).at(-1)?.awaitTool).toBe("slp_stage_report");
-
     await reportPeer(flow, runId, pipelineId, "reviewer", "Boundary and retry behavior reviewed.");
     expect(currentStage(flow, runId, pipelineId).reports).toHaveLength(2);
     expect(currentStage(flow, runId, pipelineId).status).toBe("running");
@@ -141,22 +147,16 @@ describe("stage coordination", () => {
     expect(checkoutDelegationText).toContain("auth-api");
 
     // During planning (before defining pipelines), Checkout Lead contacts Auth Lead directly via slp_send_peer_message to align the exact schema.
-    const alignQuestion = await flow.callAs(checkoutLead.agentId, "slp_send_peer_message", {
-      toAgentId: authLead.agentId,
-      message: "Let's confirm: will `/api/auth/session` return `{ token: string, expiresAt: string }`?",
-      waitForReply: true,
-    });
-    expect(alignQuestion.isError).toBe(false);
-    expect(flow.run(runId).agents[checkoutLead.agentId].waitingForAgentId).toBe(authLead.agentId);
-
-    const alignReply = await flow.callAs(authLead.agentId, "slp_send_peer_message", {
-      toAgentId: checkoutLead.agentId,
-      message: "Confirmed: `{ token: string, expiresAt: string }` with status 200.",
-      waitForReply: false,
-    });
-    expect(alignReply.isError).toBe(false);
-    expect(flow.run(runId).agents[checkoutLead.agentId].waitingForAgentId).toBeNull();
-    expect(flow.mailTo(runId, checkoutLead.agentId).at(-1)?.text).toContain("Confirmed: `{ token: string, expiresAt: string }`");
+    const alignExchange = await askAndAnswer(
+      flow,
+      checkoutLead.agentId,
+      authLead.agentId,
+      "Let's confirm: will `/api/auth/session` return `{ token: string, expiresAt: string }`?",
+      "Confirmed: `{ token: string, expiresAt: string }` with status 200.",
+    );
+    expect(alignExchange.askOutcome.isError).toBe(false);
+    expect(alignExchange.askOutcome.text).toContain("Confirmed: `{ token: string, expiresAt: string }`");
+    expect(flow.store.questions.require(alignExchange.questionId)).toMatchObject({ scope: "cross_lead", status: "answered" });
 
     // Both Leads now define their pipelines in their own pre-created worktrees (without needing slp_create_worktree).
     const authDefineResponse = await flow.callAs(authLead.agentId, "slp_define_pipeline", {

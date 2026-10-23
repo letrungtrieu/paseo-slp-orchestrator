@@ -34,7 +34,7 @@ export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageSta
   const previousStageLines = completedStages.map((previousStage) =>
     `- **${previousStage.name}** (${previousStage.goal}): ${previousStage.result?.summary ?? "Approved"}`,
   );
-  // Expose live peers from earlier completed stages so downstream peers can directly question them via slp_send_peer_message.
+  // Expose live peers from earlier completed stages so downstream peers can directly question them via slp_ask.
   const priorStagePeerLines = completedStages.flatMap((previousStage) =>
     previousStage.peerAgentIds.flatMap((priorPeerAgentId, priorPeerIndex) => {
       if (!priorPeerAgentId || run.agents[priorPeerAgentId]?.archivedAt) return [];
@@ -68,7 +68,7 @@ export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageSta
   }
   if (priorStagePeerLines.length > 0) {
     sections.push(
-      `### Prior Stage Peers (Available for Cross-Stage Questions via slp_send_peer_message)\n${priorStagePeerLines.join("\n")}`,
+      `### Prior Stage Peers (Available for Cross-Stage Questions via slp_ask)\n${priorStagePeerLines.join("\n")}`,
     );
   }
   return sections.join("\n\n");
@@ -78,12 +78,12 @@ export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: Stag
   const assignment = stage.peers[peerIndex];
   const hasPriorStagePeers = pipeline.currentStageIndex > 0;
   const crossStageHint = hasPriorStagePeers
-    ? " Peers from earlier stages remain active in this pipeline—if you need clarification on upstream logic or assumptions, message them directly via `slp_send_peer_message` using their IDs from **Prior Stage Peers**."
+    ? " Peers from earlier stages remain active in this pipeline—if you need clarification on upstream logic or assumptions, ask them directly via `slp_ask` using their IDs from **Prior Stage Peers**."
     : "";
   // Tailor collaboration instructions so a single peer does not waste a turn looking for sibling peers to message.
   const coordinationGuidance = stage.peers.length === 1
     ? `You are the sole peer in this stage.${crossStageHint} Apply your configured \`.slp\` workflow in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). The Lead decides when this stage is complete.`
-    : `All stage peers are equal participants. Stay focused on the shared goal, collaborate with current-stage or prior-stage peers via \`slp_send_peer_message\` when needed, apply your configured \`.slp\` workflow, and submit evidence with \`slp_stage_report\`. The Lead decides when this stage is complete.`;
+    : `All stage peers are equal participants. Stay focused on the shared goal, collaborate with current-stage or prior-stage peers via \`slp_ask\` (needs an answer) or \`slp_notify\` (information only) when needed, apply your configured \`.slp\` workflow, and submit evidence with \`slp_stage_report\`. The Lead decides when this stage is complete.`;
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,
@@ -95,7 +95,7 @@ export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: Stag
 export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
   // The Lead judges the goal according to its configured .slp/LEAD.md workflow.
   return [
-    "You are the **Lead** controlling this stage from its start until closure. Apply your configured `.slp` workflow to direct peers through `slp_send_peer_message` or `slp_stage_rework`, inspect their evidence and the worktree, and decide when the result is acceptable with `slp_approve_stage({summary})` (or use `slp_escalate` if blocked beyond your authority).",
+    "You are the **Lead** controlling this stage from its start until closure. Apply your configured `.slp` workflow to direct peers through `slp_ask`, `slp_notify` or `slp_stage_rework`, inspect their evidence and the worktree, and decide when the result is acceptable with `slp_approve_stage({summary})` (or use `slp_escalate` if blocked beyond your authority).",
     stageBriefing(run, pipeline, stage),
   ].join("\n\n");
 }
@@ -169,14 +169,14 @@ export function pipelineFinalizationBriefing(run: Run, pipeline: PipelineState):
       "### Merge & Finalization Instructions",
       `1. Inspect \`${pipeline.worktree}\` (branch \`${pipeline.branch}\`) and commit any remaining valid stage work so the worktree is clean.`,
       `2. Call \`slp_finalize_pipeline({ pipelineId: "${pipeline.id}", summary })\` with a consolidated summary of all delivered changes and verified metrics to merge \`${pipeline.branch}\` into \`${run.integrationBranch}\` (\`${run.devCwd}\`).`,
-      `3. If \`slp_finalize_pipeline\` reports a merge conflict: inspect the conflicting files. If you do not fully understand why a conflicting change was made, message the responsible **Peer** in this pipeline or the sibling **Lead** of the related feature pipeline via \`slp_send_peer_message({ toAgentId, message, waitForReply: true })\`. Then merge \`${run.integrationBranch}\` into \`${pipeline.branch}\` inside \`${pipeline.worktree}\`, resolve the conflicts cleanly, commit, and call \`slp_finalize_pipeline\` again.`,
+      `3. If \`slp_finalize_pipeline\` reports a merge conflict: inspect the conflicting files. If you do not fully understand why a conflicting change was made, ask the responsible **Peer** in this pipeline or the sibling **Lead** of the related feature pipeline via \`slp_ask({ toAgentId, question })\`. Then merge \`${run.integrationBranch}\` into \`${pipeline.branch}\` inside \`${pipeline.worktree}\`, resolve the conflicts cleanly, commit, and call \`slp_finalize_pipeline\` again.`,
     ].join("\n"),
   ];
   if (pipelinePeerLines.length > 0) {
-    briefingSections.push(`### Pipeline Peers (Available for Merge/Conflict Questions via slp_send_peer_message)\n${pipelinePeerLines.join("\n")}`);
+    briefingSections.push(`### Pipeline Peers (Available for Merge/Conflict Questions via slp_ask)\n${pipelinePeerLines.join("\n")}`);
   }
   if (siblingLeadLines.length > 0) {
-    briefingSections.push(`### Sibling Pipeline Leads (Available for Cross-Feature Conflict Consultation via slp_send_peer_message)\n${siblingLeadLines.join("\n")}`);
+    briefingSections.push(`### Sibling Pipeline Leads (Available for Cross-Feature Conflict Consultation via slp_ask)\n${siblingLeadLines.join("\n")}`);
   }
   return briefingSections.join("\n\n");
 }

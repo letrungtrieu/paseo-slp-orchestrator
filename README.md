@@ -46,12 +46,12 @@ flowchart TD
 
         FL1 <-->|"Báo cáo / Rework"| P1A
         FL1 <-->|"Báo cáo / Rework"| P1B
-        P1A <-->|"slp_send_peer_message"| P1B
+        P1A <-->|"slp_ask / slp_notify"| P1B
 
         FL1 ==>|"slp_approve_stage<br/>(Chuyển giao kết quả Stage 1)"| FL2
         FL2 <-->|"Báo cáo / Rework"| P2A
         FL2 <-->|"Báo cáo / Rework"| P2B
-        P2A <-->|"slp_send_peer_message"| P2B
+        P2A <-->|"slp_ask / slp_notify"| P2B
     end
 
     User <-->|"Chat trực tiếp"| Sup
@@ -70,7 +70,7 @@ flowchart TD
 | **`master_lead`** | 1 / Run | **Read / Write** (Trên nhánh tích hợp `integrationBranch` & quản lý Worktree) | Kiến trúc sư trưởng kiêm người sở hữu nhánh tích hợp. Khảo sát codebase, tạo Git worktree bằng `slp_create_worktree`, thiết kế cấu trúc Pipeline nhiều Stage bằng `slp_define_pipeline`, xử lý các trường hợp bế tắc (`escalate`), kiểm tra & merge kết quả từ pipeline worktree vào nhánh tích hợp (`slp_finalize_pipeline`) và báo cáo cho `Supervisor` (`slp_report`). |
 | **`forked_lead`** | 1 / Stage | **Read-Only** (Trên worktree của Pipeline) | Điều phối viên của **một Stage cụ thể** (được fork từ ngữ cảnh của `Master Lead` hoặc khởi tạo với đầy đủ trạng thái Pipeline). Theo dõi các Peer trong Stage, đối chiếu bằng chứng thực tế trong worktree với mục tiêu Stage (`stage.goal`), quyết định duyệt Stage (`slp_approve_stage`), yêu cầu Peer sửa lại (`slp_stage_rework`), hoặc báo cáo bế tắc lên `Master Lead` (`slp_escalate`). |
 | **`qa_lead`** | 1 / Run | **Read-Only** (Trong QA worktree = nhánh tích hợp `integrationBranch`) | Được spawn cùng lúc với các Lead, nhận cùng yêu cầu và danh sách Lead để chuẩn bị kế hoạch test (unit, automation, manual theo `.slp/standards/TEST_POLICY.md`). Mọi Lead merge nhánh của mình vào nhánh QA và tự giải quyết conflict. Sau khi feature cuối cùng merge xong, QA Lead định nghĩa pipeline QA ngay trong QA worktree, peer fork từ phiên của nó để test và sửa lỗi (QA Lead không tự sửa code), đóng pipeline bằng `slp_finalize_pipeline` rồi là người duy nhất được gọi `slp_report`. Yêu cầu rework của `Supervisor` cũng quay về QA Lead. |
-| **`peer`** | $1..N$ / Stage | **Read / Write** (Chia sẻ chung `pipeline.worktree`) | Chuyên gia thực thi công việc trong một Stage theo đúng quy trình trong `.slp/peers/<ROLE>.md` (ví dụ: `developer`, `reviewer`, `qa-engineer`, `security-reviewer`...). Các Peer trong cùng một Stage có quyền ngang nhau, có thể nhắn tin phản biện trực tiếp qua `slp_send_peer_message` và nộp bằng chứng hoàn thành qua `slp_stage_report`. |
+| **`peer`** | $1..N$ / Stage | **Read / Write** (Chia sẻ chung `pipeline.worktree`) | Chuyên gia thực thi công việc trong một Stage theo đúng quy trình trong `.slp/peers/<ROLE>.md` (ví dụ: `developer`, `reviewer`, `qa-engineer`, `security-reviewer`...). Các Peer trong cùng một Stage có quyền ngang nhau, có thể hỏi nhau qua `slp_ask` (chờ câu trả lời), báo tin một chiều qua `slp_notify` và nộp bằng chứng hoàn thành qua `slp_stage_report`. |
 
 ---
 
@@ -128,8 +128,8 @@ sequenceDiagram
     FL->>Peer2: 6b. Gửi Stage Briefing (Markdown) [awaitTool: slp_stage_report]
 
     par Thực thi & Phản biện ngang hàng trong Stage k
-        Peer1->>Peer2: 7. slp_send_peer_message({ toAgentId, message, waitForReply })
-        Peer2->>Peer1: 8. slp_send_peer_message (Phản hồi trực tiếp)
+        Peer1->>Peer2: 7. slp_ask({ toAgentId, question }) — Peer1 bị chặn trong lời gọi tool
+        Peer2->>Peer1: 8. slp_answer({ questionId, answer }) — trả về làm kết quả của slp_ask
         Peer1->>FL: 9a. slp_stage_report({ status: "completed", summary, findings })
         Peer2->>FL: 9b. slp_stage_report({ status: "completed", summary, findings })
     end
@@ -189,7 +189,7 @@ sequenceDiagram
      - `Forked Lead` kiểm tra code/test thực tế trong worktree cùng số liệu kỹ thuật (đầu vào, logic, đầu ra/kết quả đạt được) của các Peer, đồng thời rà soát chống dư thừa/rác hệ thống so với `goal`. Nếu đạt mục tiêu Stage, `Forked Lead` gọi `slp_approve_stage`.
      - **Giữ các Peer sống xuyên suốt Pipeline (Cross-Stage Peer Persistence)**:
        - Nếu đây là **Stage trung gian** (chưa phải Stage cuối cùng của Pipeline), hệ thống lưu `stage.result`, xóa nghĩa vụ của Stage vừa xong nhưng **vẫn giữ sống các Peer của Stage này** (ở chế độ chỉ đọc worktree và sẵn sàng trả lời tin nhắn) cho đến khi kết thúc toàn bộ Pipeline.
-       - Khi mở Stage kế tiếp (`currentStageIndex + 1`), ngoài mục **`### Previous Stage Results`**, bản Stage Briefing còn cung cấp mục **`### Prior Stage Peers (Available for Cross-Stage Questions via slp_send_peer_message)`** chứa `agentId`, `role`, `task` và tóm tắt báo cáo của từng Peer ở các Stage trước. Nhờ đó, Peer ở Stage sau (như `reviewer`, `qa-engineer`) có thể nhắn tin trực tiếp (`slp_send_peer_message`) hỏi các Peer ở Stage trước (như `developer`) về bất kỳ giả định hay chi tiết kỹ thuật nào còn thắc mắc!
+       - Khi mở Stage kế tiếp (`currentStageIndex + 1`), ngoài mục **`### Previous Stage Results`**, bản Stage Briefing còn cung cấp mục **`### Prior Stage Peers (Available for Cross-Stage Questions via slp_ask)`** chứa `agentId`, `role`, `task` và tóm tắt báo cáo của từng Peer ở các Stage trước. Nhờ đó, Peer ở Stage sau (như `reviewer`, `qa-engineer`) có thể hỏi trực tiếp (`slp_ask`) các Peer ở Stage trước (như `developer`) về bất kỳ giả định hay chi tiết kỹ thuật nào còn thắc mắc!
        - Chỉ khi **Stage cuối cùng của Pipeline** hoàn thành (và khi `Master Lead` gọi `slp_finalize_pipeline`), hệ thống mới đóng (archive) toàn bộ các Peer và `Forked Lead` của Pipeline đó.
    - **Trường hợp 2 — Yêu cầu làm lại trong Stage (`slp_stage_rework({ agentIds, feedback })`)**:
      - Nếu phát hiện lỗi, thiếu số liệu đầu vào/đầu ra, hoặc sinh dữ liệu/code rác không cần thiết, `Forked Lead` gọi `slp_stage_rework` gửi phản hồi chi tiết cho một số (hoặc tất cả) Peer trong Stage để sửa và nộp lại `slp_stage_report` mới.
@@ -215,20 +215,34 @@ sequenceDiagram
 | **QA Lead → Supervisor** | Báo cáo hoàn thành | `slp_report` | Chỉ được chấp nhận sau khi một pipeline QA đã đóng sau lần merge feature cuối cùng. Ghi `finalReport` vào SQLite, chuyển Run sang `reporting`, đẩy báo cáo vào `mailbox` của `Supervisor` kèm nghĩa vụ `awaitTool = "slp_present_to_manager"`. |
 | **Master Lead ↔ Forked Lead** | Khởi tạo Stage / Escalate / Resume | `slp_define_pipeline`<br/>`slp_escalate`<br/>`slp_resume_pipeline` | Khi Stage bị `escalate` (hoặc dừng ở Gate của chế độ `STEP_BY_STEP_DEBUG` / `SEMI_AUTO`), Pipeline chuyển sang `paused` và đánh thức `Master Lead` với nghĩa vụ `slp_resume_pipeline`. |
 | **Forked Lead ↔ Peers** | Giao việc / Báo cáo / Rework | `slp_stage_report`<br/>`slp_stage_rework`<br/>`slp_approve_stage` | Các Peer nộp bằng chứng qua `slp_stage_report`. Khi tất cả Peer hoàn tất, `Forked Lead` mới được đánh thức để duyệt (`slp_approve_stage`) hoặc yêu cầu làm lại (`slp_stage_rework`). |
-| **Peer ↔ Peer (Cùng Stage & Xuyên Stage)** | Thảo luận, Phản biện & Hỏi đáp giữa các công đoạn | `slp_send_peer_message` | Trao đổi trực tiếp giữa các Peer trong cùng một Stage, với `Forked Lead`, hoặc **giữa Peer ở Stage hiện tại với các Peer ở những Stage trước đã hoàn thành** trong cùng Pipeline. Hỗ trợ cả chế độ gửi không chờ (`waitForReply: false`) và chế độ dừng lượt chờ câu trả lời (`waitForReply: true`). |
+| **Peer ↔ Peer (Cùng Stage & Xuyên Stage)** | Thảo luận, Phản biện & Hỏi đáp giữa các công đoạn | `slp_ask` / `slp_answer` / `slp_notify` | Trao đổi trực tiếp giữa các Peer trong cùng một Stage, với `Forked Lead`, hoặc **giữa Peer ở Stage hiện tại với các Peer ở những Stage trước đã hoàn thành** trong cùng Pipeline. `slp_ask` là **câu hỏi chặn** (trả về câu trả lời ngay trong lời gọi tool); `slp_notify` là **thông báo một chiều** (không chờ, không cần trả lời). |
 
-### 4.1. Chi tiết cơ chế `waitForReply: true` khi hai Peer nhắn tin cho nhau (Cùng Stage hoặc Xuyên Stage):
-Khi Peer A gọi `slp_send_peer_message({ toAgentId: PeerB, message, waitForReply: true })`:
-1. Nghĩa vụ `slp_stage_report` của Peer A được tạm cất vào `deferredTool`, `awaitingTool` được đặt về `null` và `waitingForAgentId = PeerB`. Nhờ đó Peer A có thể kết thúc lượt để chờ Peer B trả lời mà không bị bộ quét `Sweeper` nhắc nhở.
-2. Nếu Peer B là một Peer thuộc **Stage trước đã hoàn thành**, Peer B vẫn đang sống ở chế độ **chỉ đọc worktree** (`stageActive: false` trong `decidePermission`): Peer B có thể đọc mã nguồn để kiểm tra lại và gọi `slp_send_peer_message` trả lời trực tiếp cho Peer A mà không làm thay đổi worktree của Stage hiện tại.
-3. **Peer A sẽ tự động được đánh thức và khôi phục nghĩa vụ `slp_stage_report` trong 3 trường hợp**:
-   - **Trường hợp 1**: Peer B gọi `slp_send_peer_message` trả lời lại cho Peer A.
-   - **Trường hợp 2**: Peer B (nếu cùng Stage) gọi luôn `slp_stage_report` để nộp báo cáo hoàn tất phần việc của mình — hệ thống lập tức giải phóng trạng thái chờ của Peer A và gửi tóm tắt báo cáo của Peer B cho Peer A để Peer A không bị treo chờ vô ích.
-   - **Trường hợp 3**: Quá **120 giây** (`DIRECT_REPLY_TIMEOUT_MS`) mà Peer B vẫn chưa phản hồi, hệ thống tự động gỡ trạng thái chờ và đánh thức Peer A tiếp tục công việc.
+### 4.1. Cơ chế câu hỏi chặn (`slp_ask`) và thông báo (`slp_notify`)
+Bus chia tin nhắn giữa các agent thành hai loại có hành vi khác hẳn nhau:
+
+| Loại | Tool | Hành vi |
+|---|---|---|
+| **Question** | `slp_ask` → `slp_answer` | Người hỏi **bị chặn trong lời gọi tool** đến khi có câu trả lời; câu trả lời trở về làm kết quả của chính lời gọi đó. Mỗi cặp hỏi–đáp chỉ thêm một mục vào context của người hỏi, không tạo thêm lượt và không bị trộn với mail khác. |
+| **Notify** | `slp_notify` | Thông báo một chiều qua mailbox, không chờ, không tạo nghĩa vụ. |
+
+Khi Peer A gọi `slp_ask({ toAgentId: PeerB, question })`:
+1. Câu hỏi được ghi vào bảng SQLite `questions` (trạng thái `pending`) rồi gửi cho B. Nếu B đang bị chặn trong lời gọi `slp_ask`/`slp_await_answer` của chính nó thì B được **đánh thức ngay** và nhận câu hỏi ngay trong kết quả lời gọi đó (hai bên hỏi nhau cùng lúc không bị deadlock). Ngược lại câu hỏi đến B dưới dạng prompt qua mailbox khi B rảnh.
+2. A chờ tối đa **40 giây mỗi lời gọi** (nhỏ hơn timeout 60 giây mặc định của MCP trong Codex). Nếu chưa có câu trả lời, `slp_ask` trả về "chưa có câu trả lời" kèm `questionId`; A làm việc độc lập rồi gọi `slp_await_answer({ questionId })` để chờ tiếp. Nghĩa vụ `slp_stage_report` của A **không bị đụng tới** vì A chỉ đang ở trong một lời gọi tool.
+3. B trả lời bằng `slp_answer({ questionId, answer })`. A được đánh thức tức thì (không polling); nếu A không còn chờ thì câu trả lời đến A dưới dạng mail.
+4. Quá **10 phút** không có câu trả lời, hoặc B đã bị archive, câu hỏi chuyển sang `expired`; A được báo phải tự đưa ra giả định, ghi rõ giả định đó và tiếp tục. Nếu B trả lời muộn, câu trả lời vẫn được lưu (`answered_late`) và chuyển cho A.
+5. Nếu B đã nhận câu hỏi mà vẫn im lặng khi đã rảnh, bộ quét nhắc B tối đa 2 lần (cách nhau 60 giây).
+
+Sổ `questions` là nguồn dữ liệu chính; việc đánh thức chỉ để giảm độ trễ. Bộ quét `Sweeper` đối soát sổ với mailbox mỗi 3 giây nên không câu hỏi hay câu trả lời nào bị mất khi plugin reload hay kết nối bị ngắt.
+
+**Kiểm tra hiệu quả giao tiếp**: mọi câu hỏi/trả lời được lưu vĩnh viễn (kèm thời điểm hỏi, giao, trả lời, số lần nhắc, lý do hết hạn). Dùng RPC `slp.questions.list` để xem danh sách và các chỉ số (tỉ lệ được trả lời, thời gian trả lời trung vị/p90, độ trễ giao, thống kê theo cặp vai trò):
+
+```bash
+tools/bin/slp-rpc slp.questions.list '{"runId":"<id>","limit":100}'
+```
 
 ### 4.2. Bốn quy tắc kỹ thuật bắt buộc trong `systemPrompt` của Lead và Peer:
 1. **Giao tiếp kỹ thuật bằng số liệu (Mandatory Data/Metrics Communication)**:
-   - Mọi thông điệp và báo cáo kỹ thuật (`slp_send_peer_message`, `slp_stage_report`, `slp_approve_stage`, `slp_stage_rework`, `slp_finalize_pipeline`, `slp_report`) **bắt buộc** phải trình bày rõ cho từng chức năng/hàm:
+   - Mọi thông điệp và báo cáo kỹ thuật (`slp_ask`, `slp_answer`, `slp_notify`, `slp_stage_report`, `slp_approve_stage`, `slp_stage_rework`, `slp_finalize_pipeline`, `slp_report`) **bắt buộc** phải trình bày rõ cho từng chức năng/hàm:
      1. **Logic xử lý cụ thể (Exact Logic/Mechanism)**: Thuật toán, công thức hoặc luồng biến đổi trạng thái kèm đường dẫn file/dòng lệnh.
      2. **Đầu vào kỳ vọng (Expected Inputs)**: Kiểu dữ liệu, miền giá trị, kích thước/đơn vị, điều kiện biên hoặc tiền điều kiện.
      3. **Đầu ra kỳ vọng / Số liệu đo đạc (Expected Outputs / Metrics)**: Giá trị trả về, số lượng phần tử, sai số, độ phức tạp, hoặc nếu hàm không trả về con số thì **bắt buộc nêu rõ kết quả thực tế đạt được / chuyển đổi trạng thái quan sát được** khi chạy logic đó.
@@ -249,7 +263,7 @@ Khi Peer A gọi `slp_send_peer_message({ toAgentId: PeerB, message, waitForRepl
      2. **Phân loại Kiểm thử Tự động vs. Kiểm thử Thủ công (Automation vs. Manual Test Matrix)** và trực tiếp chạy các bài test tự động kèm số liệu pass/fail.
      3. **Đánh giá mức độ ảnh hưởng đến giao diện (UI / Visual Impact Assessment)**: Xác định rõ thay đổi có tác động tới UI/canvas/layout hay không và tác động như thế nào.
      4. **Cơ chế chụp ảnh màn hình bằng chứng (Screenshot Evidence Mechanism)**: Tìm hoặc xây dựng cơ chế khởi chạy ứng dụng/cửa sổ thực tế hoặc kịch bản chụp màn hình tự động để lưu file ảnh bằng chứng xác thực kết quả hoàn thành hoặc ghi nhận lỗi (lưu ở đường dẫn kiểm chứng, không để lại file rác chưa đóng gói trong git worktree).
-     5. **Đối chiếu trực tiếp với Peer của Stage trước** qua `slp_send_peer_message` nếu phát hiện bất kỳ sai lệch nào giữa logic/số liệu đã báo cáo và hành vi thực tế.
+     5. **Đối chiếu trực tiếp với Peer của Stage trước** qua `slp_ask` nếu phát hiện bất kỳ sai lệch nào giữa logic/số liệu đã báo cáo và hành vi thực tế.
 
 ---
 
@@ -326,7 +340,7 @@ Focus on exercising the delivered behavior, regression coverage, boundary condit
 
 1. Read the current stage assignment and goal.
 2. Inspect the shared pipeline worktree and run relevant automated tests.
-3. Challenge peers directly using `slp_send_peer_message` if you find defects or untested assumptions.
+3. Challenge peers directly using `slp_ask` if you find defects or untested assumptions.
 4. Submit concrete verification evidence using `slp_stage_report`.
 ```
 
@@ -439,14 +453,16 @@ Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ th
 | :--- | :--- | :--- |
 | **`slp_approve_stage`** | `{ summary: string }` | Nghiệm thu và duyệt Stage hiện tại khi mục tiêu (`goal`) đã hoàn thành; giữ sống các Peer của Stage trung gian để Stage sau có thể hỏi đáp (và đóng toàn bộ Peer/Forked Lead khi kết thúc Stage cuối cùng của Pipeline). **Kết thúc lượt sau khi gọi.** |
 | **`slp_stage_rework`** | `{ agentIds?: string[], feedback: string }` | Yêu cầu một số (hoặc toàn bộ, nếu để mảng rỗng `[]`) Peer trong Stage hiện tại làm lại kèm hướng dẫn chi tiết. **Kết thúc lượt sau khi gọi.** |
-| **`slp_send_peer_message`** | `{ toAgentId: string, message: string, waitForReply?: boolean }` | Gửi tin nhắn trao đổi trực tiếp cho một Peer trong cùng Stage hoặc Peer ở Stage trước đã hoàn thành trong cùng Pipeline. |
+| **`slp_ask`** | `{ toAgentId: string, question: string }` | Câu hỏi chặn gửi cho Peer cùng Stage, `Forked Lead`, Peer ở Stage trước đã hoàn thành, hoặc Lead anh em. Trả về câu trả lời (chờ tối đa ~40 giây mỗi lời gọi) hoặc `questionId` để chờ tiếp. |
+| **`slp_await_answer`** | `{ questionId: string }` | Tiếp tục chờ câu trả lời của một câu hỏi đã hỏi; đồng thời trả về các câu hỏi gửi tới mình trong lúc chờ. |
+| **`slp_answer`** | `{ questionId: string, answer: string }` | Trả lời một câu hỏi được gửi tới mình; người hỏi đang bị chặn đến khi nhận được. |
+| **`slp_notify`** | `{ toAgentId: string, message: string }` | Thông báo một chiều (không chờ, không cần trả lời) tới agent hợp lệ cùng pipeline hoặc Lead anh em. |
 | **`slp_escalate`** | `{ reason: string }` | Tạm dừng Pipeline (`paused`) và báo cáo vấn đề bế tắc vượt thẩm quyền của Stage lên cho `Master Lead` quyết định. **Kết thúc lượt sau khi gọi.** |
 
 ### 6.4. Công cụ của `Peer` (Chuyên gia thực thi Stage)
 
 | Tên công cụ | Tham số đầu vào | Công dụng & Hành vi |
 | :--- | :--- | :--- |
-| **`slp_send_peer_message`** | `{ toAgentId: string, message: string, waitForReply?: boolean }` | Nhắn tin trực tiếp cho Peer khác cùng Stage, `Forked Lead`, hoặc **Peer ở các Stage trước đã hoàn thành** trong cùng Pipeline (và ngược lại khi trả lời). Nếu `waitForReply: true`, tạm hoãn nghĩa vụ nộp báo cáo và **kết thúc lượt** để chờ phản hồi (tối đa 120s). Nếu `waitForReply: false`, tiếp tục làm việc trong lượt. |
 | **`slp_stage_report`** | `{ summary: string, findings?: string[], status?: "completed" \| "blocked" }` | Nộp báo cáo kết quả và bằng chứng thực thi của Peer cho `Forked Lead`. **Kết thúc lượt sau khi gọi.** |
 | **`slp_escalate`** | `{ reason: string }` | Báo cáo tình trạng bị chặn (`status: "blocked"`) để đánh thức `Forked Lead` xử lý ngay lập tức. **Kết thúc lượt sau khi gọi.** |
 

@@ -63,8 +63,6 @@ export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: s
       if (agent.pipelineId !== pipelineId) continue;
       agent.awaitingTool = null;
       agent.awaitingSince = null;
-      agent.waitingForAgentId = null;
-      agent.deferredTool = null;
     }
     // Persist the notification with the pause so a reload cannot strand a pipeline without its owner knowing.
     mutableRun.mailbox.push(stageMail(targetLeadId,

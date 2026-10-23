@@ -47,7 +47,7 @@ describe("dynamic pipeline edge cases", () => {
   });
 
   // Surviving peers in a multi-peer stage must keep their reports and not receive a duplicate stage briefing when a sibling dies.
-  it("preserves healthy peer reports and remaps waitingForAgentId when a sibling peer or Forked Lead dies mid-stage", async () => {
+  it("preserves healthy peer reports when a sibling peer or Forked Lead dies mid-stage", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     await flow.deliverMail(runId);
@@ -57,9 +57,6 @@ describe("dynamic pipeline edge cases", () => {
     const originalCoordinatorId = initialStage.forkedLeadAgentId!;
 
     await reportPeer(flow, runId, pipelineId, "reviewer", "Reviewer completed analysis before developer crashed.");
-    flow.store.mutate(runId, (run) => {
-      run.agents[reviewerId].waitingForAgentId = deadDeveloperId;
-    });
     await flow.gateway.archive(deadDeveloperId);
     flow.gateway.prompts.length = 0;
 
@@ -70,10 +67,9 @@ describe("dynamic pipeline edge cases", () => {
     const revivedDeveloperId = stageAfterPeerRevival.peerAgentIds[1];
     expect(revivedDeveloperId).not.toBe(deadDeveloperId);
     expect(stageAfterPeerRevival.peerAgentIds[0]).toBe(reviewerId);
-    // The healthy reviewer was not re-prompted and its direct-reply wait now points to the replacement developer.
+    // The healthy reviewer was not re-prompted; only the replacement developer received a briefing.
     expect(flow.gateway.promptsTo(reviewerId)).toEqual([]);
     expect(flow.gateway.promptsTo(revivedDeveloperId)).toHaveLength(1);
-    expect(flow.run(runId).agents[reviewerId].waitingForAgentId).toBe(revivedDeveloperId);
 
     // Now simulate the Forked Lead dying after peer reports exist; the replacement coordinator must receive the saved reports.
     await flow.gateway.archive(originalCoordinatorId);

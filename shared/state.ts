@@ -34,10 +34,6 @@ export const AgentRecordSchema = z.object({
   writeScope: z.array(z.string()).default([]),
   // A Lead waiting for an extra expert must not be nudged for the workflow tool it will resume afterward.
   leadContinuationTool: z.string().nullable().default(null),
-  // A direct peer conversation can defer the sender's normal obligation until the recipient
-  // replies; keeping this explicit prevents the sweeper from treating that wait as a stall.
-  waitingForAgentId: z.string().nullable().default(null),
-  deferredTool: z.string().nullable().default(null),
   taskId: z.string().nullable(),
   token: z.string(),
   // name of the bus tool the agent owes us; used to nudge agents that end a turn without it
@@ -60,6 +56,8 @@ export const MailboxMessageSchema = z.object({
   awaitTool: z.string().nullable().default(null),
   // Reminders must not look like fresh work, otherwise delivery would reset the nudge counter forever.
   isReminder: z.boolean().default(false),
+  // Links the mail to a row of the peer-question ledger so delivery can be recorded and stale copies dropped.
+  questionId: z.string().nullable().default(null),
   createdAt: z.string(),
 });
 export type MailboxMessage = z.infer<typeof MailboxMessageSchema>;

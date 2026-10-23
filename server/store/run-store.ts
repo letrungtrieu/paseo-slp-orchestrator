@@ -4,6 +4,7 @@ import { CommLogEntrySchema, type AgentRecord, type CommLogEntry, type Run } fro
 import type { CommLogInput } from "./comm-log";
 import { openDatabase, transaction } from "./database";
 import { importLegacyState } from "./legacy-import";
+import { QuestionStore } from "./question-store";
 import { readRuns, writeRun } from "./run-repository";
 
 export interface CallerLookup { run: Run; agentRecord: AgentRecord }
@@ -12,6 +13,8 @@ export class RunStore {
   private runs: Record<string, Run> = {};
   private connection: DatabaseSync | null = null;
   private closed = false;
+  // Shares this store's lifecycle: the ledger resolves the connection lazily and so fails once the store is closed.
+  readonly questions = new QuestionStore(() => this.database());
 
   constructor(private readonly databasePath: string, private readonly legacyStatePath?: string) {}
 

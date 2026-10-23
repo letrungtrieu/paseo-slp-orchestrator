@@ -7,6 +7,7 @@ import type { Mailbox } from "../runtime/mailbox";
 import type { PaseoHolder } from "../runtime/paseo-holder";
 import type { CommLogInput } from "../store/comm-log";
 import type { RunStore } from "../store/run-store";
+import type { QuestionTiming, WaitRegistry } from "./peer-messaging/wait-registry";
 
 export type PipelineLogEntry = Omit<CommLogInput, "runId">;
 
@@ -19,6 +20,9 @@ export interface PipelineContext {
   stateDirectory?: string;
   // Optional host settings reader so background sweeps honor live shellWatchdog changes without restarting runs.
   getSettings?: () => SlpSettings | Promise<SlpSettings>;
+  // Agents blocked inside slp_ask / slp_await_answer; lives in the context so every tool handler and the sweeper share it.
+  questionWaits: WaitRegistry;
+  questionTiming: QuestionTiming;
   logEvent(runId: string, entry: PipelineLogEntry): void;
 }
 

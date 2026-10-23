@@ -8,6 +8,7 @@ import { claudeForker } from "../../server/fork/claude-forker";
 import { ForkRegistry, type SessionForker } from "../../server/fork/session-forker";
 import type { PipelineContext } from "../../server/pipeline/context";
 import { createPipeline } from "../../server/pipeline/pipeline";
+import type { QuestionTiming } from "../../server/pipeline/peer-messaging/wait-registry";
 import { startRun } from "../../server/pipeline/run-lifecycle";
 import { createBusDispatcher } from "../../server/pipeline/tool-handlers";
 import type { AgentGateway } from "../../server/runtime/agent-gateway";
@@ -27,6 +28,8 @@ export type ForkerChoice = "claude" | "unwired" | "throwing";
 export interface FlowOptions {
   mode: RunMode;
   forker?: ForkerChoice;
+  // A short wait window keeps blocking slp_ask calls fast when a test never answers them.
+  questionTiming?: Partial<QuestionTiming>;
 }
 
 export interface Flow {
@@ -85,6 +88,7 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
       gateway: gateway as unknown as AgentGateway,
       holder: holder as unknown as PaseoHolder,
       forks: new ForkRegistry([FORKERS[options.forker ?? "claude"]]),
+      questionTiming: { waitWindowMs: 150, ...options.questionTiming },
     });
     const dispatcher = createBusDispatcher(ctx);
 

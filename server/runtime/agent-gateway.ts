@@ -124,9 +124,6 @@ export class AgentGateway {
       featureSpec: null,
       archivedAt: null,
       token: randomBytes(24).toString("base64url"),
-      // Direct stage messages can temporarily defer an agent's normal report obligation.
-      waitingForAgentId: null,
-      deferredTool: null,
       awaitingTool: spec.awaitTool,
       // Starts the nudge clock at creation: an agent that never calls the tool it owes is detected by the sweeper from this timestamp.
       awaitingSince: spec.awaitTool ? new Date().toISOString() : null,

@@ -92,8 +92,6 @@ export class FakeAgentGateway {
       taskId: spec.taskId,
       token: `token-${agentId}`,
       awaitingTool: spec.awaitTool,
-      waitingForAgentId: null,
-      deferredTool: null,
       awaitingSince: spec.awaitTool ? new Date().toISOString() : null,
     });
     // registered before "starting" the agent, as in the real gateway, so its first tool call authenticates

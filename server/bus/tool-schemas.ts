@@ -43,14 +43,36 @@ export const BUS_TOOL_DEFINITIONS = {
     description: "Resume a paused pipeline with a decision or new guidance.",
     input: z.object({ pipelineId: pipelineIdField, feedback: z.string().trim().min(1) }),
   },
-  slp_send_peer_message: {
-    // Leads can directly message sibling Leads (for cross-feature API/flow alignment) or stage Peers; Peers can message their Lead or sibling stage Peers.
+  // One-way: queued for the recipient, nothing waits on it. Use slp_ask when the answer is needed to proceed.
+  slp_notify: {
+    // Leads can notify sibling Leads (cross-feature API/flow alignment) or stage Peers; Peers can notify their Lead or sibling stage Peers.
     roles: ["master_lead", "qa_lead", "peer"],
-    description: "Send a direct message to a sibling Lead (to align shared APIs/flows across parallel features) or a stage Peer.",
+    description: "Send a one-way notification (no reply expected, does not block) to a sibling Lead or a stage participant. Use slp_ask if you need an answer.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       message: z.string().trim().min(1),
-      waitForReply: z.boolean().default(false),
+    }),
+  },
+  // Blocking question: returns the answer itself, or a pending notice to resume with slp_await_answer.
+  slp_ask: {
+    roles: ["master_lead", "qa_lead", "peer"],
+    description: "Ask a sibling Lead or stage participant a question you need answered before you can proceed. Blocks up to ~40 seconds and returns the answer; if it returns 'no answer yet', call slp_await_answer to keep waiting.",
+    input: z.object({
+      toAgentId: z.string().trim().min(1),
+      question: z.string().trim().min(1),
+    }),
+  },
+  slp_await_answer: {
+    roles: ["master_lead", "qa_lead", "peer"],
+    description: "Keep waiting (up to ~40 seconds per call) for the answer to a question you asked with slp_ask. Also returns questions addressed to you that arrived meanwhile.",
+    input: z.object({ questionId: z.string().trim().min(1) }),
+  },
+  slp_answer: {
+    roles: ["master_lead", "qa_lead", "peer"],
+    description: "Answer a question another agent asked you with slp_ask; the asker is blocked until you do.",
+    input: z.object({
+      questionId: z.string().trim().min(1),
+      answer: z.string().trim().min(1),
     }),
   },
   slp_stage_report: {

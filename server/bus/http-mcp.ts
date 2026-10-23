@@ -21,7 +21,8 @@ export interface BusToolOutcome {
 
 export interface BusTransportDeps {
   resolveCaller(token: string): BusCaller | null;
-  dispatch(caller: BusCaller, toolName: string, rawArguments: unknown): Promise<BusToolOutcome>;
+  // The signal aborts when the agent's connection closes, so a blocking tool (slp_ask) can stop waiting for a caller that is gone.
+  dispatch(caller: BusCaller, toolName: string, rawArguments: unknown, abortSignal?: AbortSignal): Promise<BusToolOutcome>;
 }
 
 export interface RunningBus {
@@ -56,6 +57,7 @@ async function handleRpc(
   rpcRequest: JsonRpcRequest,
   caller: BusCaller,
   deps: BusTransportDeps,
+  abortSignal: AbortSignal,
 ): Promise<unknown | null> {
   // Notifications (no id) must never get a response body, otherwise the client's JSON-RPC state machine desyncs.
   const isNotification = rpcRequest.id === undefined;
@@ -83,7 +85,7 @@ async function handleRpc(
     case "tools/call": {
       const toolName = String(rpcRequest.params?.name ?? "");
       // Dispatch errors come back as isError content, not JSON-RPC errors, so the model sees the message and can correct its call.
-      const toolOutcome = await deps.dispatch(caller, toolName, rpcRequest.params?.arguments ?? {});
+      const toolOutcome = await deps.dispatch(caller, toolName, rpcRequest.params?.arguments ?? {}, abortSignal);
       return respondWith({
         content: [{ type: "text", text: toolOutcome.text }],
         isError: toolOutcome.isError,
@@ -149,8 +151,11 @@ async function handleHttpRequest(
   }
   // JSON-RPC allows batches; handling both shapes keeps different MCP clients working.
   const rpcRequests = (Array.isArray(parsedBody) ? parsedBody : [parsedBody]) as JsonRpcRequest[];
+  // Blocking tools hold this request open; the controller aborts them when the client disconnects before the reply is written.
+  const connectionClosed = new AbortController();
+  response.once("close", () => connectionClosed.abort());
   const rpcResponses = (
-    await Promise.all(rpcRequests.map((rpcRequest) => handleRpc(rpcRequest, caller, deps)))
+    await Promise.all(rpcRequests.map((rpcRequest) => handleRpc(rpcRequest, caller, deps, connectionClosed.signal)))
   ).filter((rpcResponse) => rpcResponse !== null);
   // A batch of only notifications must answer 202 with no body, as the streamable HTTP transport requires.
   if (rpcResponses.length === 0) {

@@ -337,8 +337,6 @@ export async function abortRun(ctx: PipelineContext, runId: string): Promise<voi
     for (const agent of Object.values(mutableRun.agents)) {
       agent.awaitingTool = null;
       agent.awaitingSince = null;
-      agent.waitingForAgentId = null;
-      agent.deferredTool = null;
     }
   });
   // Recursively archive dependent peers and leads bottom-up before closing the root Supervisor session.

@@ -184,7 +184,7 @@ describe("tools/call", () => {
       jsonrpc: "2.0", id: 5, method: "tools/call",
       params: { name: "slp_stage_report", arguments: { summary: "done" } },
     });
-    expect(dispatchSpy).toHaveBeenCalledWith(PEER_CALLER, "slp_stage_report", { summary: "done" });
+    expect(dispatchSpy).toHaveBeenCalledWith(PEER_CALLER, "slp_stage_report", { summary: "done" }, expect.any(AbortSignal));
     expect(await callResponse.json()).toEqual({
       jsonrpc: "2.0", id: 5,
       result: { content: [{ type: "text", text: "dispatched ok" }], isError: false },
@@ -203,7 +203,7 @@ describe("tools/call", () => {
   // dispatch validates arguments itself and expects an object
   it("defaults missing arguments to an empty object", async () => {
     await post("tok-sup", { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "slp_present_to_manager" } });
-    expect(dispatchSpy).toHaveBeenCalledWith(SUPERVISOR_CALLER, "slp_present_to_manager", {});
+    expect(dispatchSpy).toHaveBeenCalledWith(SUPERVISOR_CALLER, "slp_present_to_manager", {}, expect.any(AbortSignal));
   });
 
   // an agent must not be able to impersonate another role through arguments
@@ -334,7 +334,7 @@ describe("Antigravity stdio MCP bridge", () => {
       );
       expect(dispatchSpy).toHaveBeenCalledWith(SUPERVISOR_CALLER, "slp_delegate", {
         acceptanceCriteria: "Ship feature",
-      });
+      }, expect.any(AbortSignal));
       expect(delegateCallReply).toEqual({
         jsonrpc: "2.0",
         id: 3,

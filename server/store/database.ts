@@ -16,6 +16,36 @@ export function transaction<Outcome>(database: DatabaseSync, operation: () => Ou
   }
 }
 
+const LATEST_SCHEMA_VERSION = 2;
+
+// Peer questions get a relational table of their own: every ask/answer is audited, and rewriting the
+// whole Run payload for each exchange would make the synchronous write grow with the conversation.
+const PEER_QUESTIONS_SCHEMA = `
+  CREATE TABLE questions (
+    question_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    from_agent_id TEXT NOT NULL,
+    to_agent_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    pipeline_id TEXT,
+    status TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT,
+    answered_at TEXT,
+    answer_delivered_at TEXT,
+    expired_at TEXT,
+    expire_reason TEXT,
+    reminder_count INTEGER NOT NULL DEFAULT 0,
+    last_reminded_at TEXT
+  );
+  CREATE INDEX questions_by_recipient ON questions(run_id, to_agent_id, status);
+  CREATE INDEX questions_by_asker ON questions(run_id, from_agent_id, status);
+  CREATE INDEX questions_by_run ON questions(run_id, created_at);
+  PRAGMA user_version = 2;
+`;
+
 export function openDatabase(databasePath: string): DatabaseSync {
   if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(databasePath);
@@ -25,7 +55,7 @@ export function openDatabase(databasePath: string): DatabaseSync {
     database.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
     database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
     const schemaVersion = Number(database.prepare("PRAGMA user_version").get()?.user_version);
-    if (schemaVersion > 1) throw new Error(`Unsupported SLP database version: ${schemaVersion}`);
+    if (schemaVersion > LATEST_SCHEMA_VERSION) throw new Error(`Unsupported SLP database version: ${schemaVersion}`);
     if (schemaVersion === 0) transaction(database, () => {
       // Task rows remain independently queryable; the payload holds their nested domain fields.
       database.exec(`
@@ -52,6 +82,8 @@ export function openDatabase(databasePath: string): DatabaseSync {
         PRAGMA user_version = 1;
       `);
     });
+    // Runs after the v1 block on a fresh file, and alone on an existing v1 file: one forward-only step per version.
+    if (schemaVersion < 2) transaction(database, () => database.exec(PEER_QUESTIONS_SCHEMA));
     return database;
   } catch (databaseError) {
     // Failed initialization must release the handle so the next reload can repair or retry it.

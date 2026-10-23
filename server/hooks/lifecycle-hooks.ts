@@ -20,8 +20,6 @@ const lastTurnStartedAt = new Map<string, string>();
 // A missed event is recovered once per obligation; mailbox delivery changes awaitingSince and arms the next reminder.
 const lastSweeperNudgeByAgent = new Map<string, string>();
 const NUDGE_GRACE_PERIOD_MS = 10_000;
-// A direct question must not leave its sender waiting forever when the recipient is idle or gone.
-export const DIRECT_REPLY_TIMEOUT_MS = 120_000;
 
 function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
   if (run.engineVersion !== "dynamic-stages-v1" || run.status !== "running"
@@ -62,85 +60,12 @@ function agentOwnsSupervisorObligation(run: Run, agentRecord: AgentRecord): bool
 }
 
 function stageObligationFor(run: Run, agentRecord: AgentRecord): string | null {
-  if (agentRecord.deferredTool) return agentRecord.deferredTool;
   if (agentRecord.role === "peer") return "slp_stage_report";
   if (isPipelineLeadRole(agentRecord.role) && agentOwnsCurrentStage(run, agentRecord)) {
     const pipeline = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId] : undefined;
     return pipeline?.status === "completed" ? "slp_finalize_pipeline" : "slp_approve_stage";
   }
   return null;
-}
-
-function restoreExpiredDirectReply(ctx: PipelineContext, run: Run, agentId: string): boolean {
-  const currentAgent = run.agents[agentId];
-  const isWaitingLeadInPlanning =
-    isPipelineLeadRole(currentAgent?.role) &&
-    run.status === "planning" &&
-    Boolean(currentAgent.waitingForAgentId && currentAgent.awaitingSince);
-  if (
-    !currentAgent?.waitingForAgentId ||
-    !currentAgent.awaitingSince ||
-    (!agentOwnsCurrentStage(run, currentAgent) && !isWaitingLeadInPlanning)
-  ) {
-    return false;
-  }
-  const startedAtMs = Date.parse(currentAgent.awaitingSince);
-  if (!Number.isFinite(startedAtMs) || Date.now() - startedAtMs < DIRECT_REPLY_TIMEOUT_MS) return false;
-  const recipientAgentId = currentAgent.waitingForAgentId;
-  let queued = false;
-  let restoredTool: string | null = null;
-  ctx.store.mutate(run.id, (mutableRun) => {
-    const mutableAgent = mutableRun.agents[agentId];
-    const mutableIsPlanningLead =
-      isPipelineLeadRole(mutableAgent?.role) &&
-      mutableRun.status === "planning" &&
-      Boolean(mutableAgent.waitingForAgentId && mutableAgent.awaitingSince);
-    if (
-      !mutableAgent?.waitingForAgentId ||
-      !mutableAgent.awaitingSince ||
-      (!agentOwnsCurrentStage(mutableRun, mutableAgent) && !mutableIsPlanningLead)
-    ) {
-      return;
-    }
-    const refreshedStartedAtMs = Date.parse(mutableAgent.awaitingSince);
-    if (!Number.isFinite(refreshedStartedAtMs) || Date.now() - refreshedStartedAtMs < DIRECT_REPLY_TIMEOUT_MS) return;
-    // A preparing QA Lead owes no tool; restoring slp_define_pipeline would nudge it into a call the engine rejects.
-    if (mutableAgent.role === "qa_lead" && !isQaPhaseActive(mutableRun)) {
-      mutableAgent.waitingForAgentId = null;
-      mutableAgent.deferredTool = null;
-      mutableAgent.awaitingSince = null;
-      mutableRun.mailbox.push(stageMail(agentId,
-        `No reply was received from ${recipientAgentId} within ${DIRECT_REPLY_TIMEOUT_MS / 1000} seconds. Continue preparing your QA plan without it and end your turn.`,
-        null));
-      queued = true;
-      return;
-    }
-    const owningPipeline = mutableAgent.pipelineId ? mutableRun.pipelines[mutableAgent.pipelineId] : undefined;
-    const stageName = owningPipeline?.stages.find((candidate) => candidate.id === mutableAgent.stageId)?.name ?? (mutableIsPlanningLead ? "planning" : undefined);
-    if (!stageName) return;
-    restoredTool = stageObligationFor(mutableRun, mutableAgent) ?? (mutableIsPlanningLead ? "slp_define_pipeline" : null);
-    if (!restoredTool) return;
-    mutableAgent.waitingForAgentId = null;
-    mutableAgent.deferredTool = null;
-    mutableAgent.awaitingTool = null;
-    mutableAgent.awaitingSince = null;
-    mutableAgent.nudges = 0;
-    mutableRun.mailbox.push(stageMail(agentId,
-      `No reply was received from peer ${recipientAgentId} within ${DIRECT_REPLY_TIMEOUT_MS / 1000} seconds. Continue stage '${stageName}' and call ${restoredTool}; use slp_escalate if the missing response blocks the goal.`,
-      restoredTool));
-    queued = true;
-  });
-  if (queued) {
-    ctx.logEvent(run.id, {
-      taskId: null,
-      from: "pipeline",
-      to: agentId,
-      kind: "stage.direct_reply_timeout",
-      summary: `No reply from ${recipientAgentId}; restored ${restoredTool}`,
-      outcome: "queued",
-    });
-  }
-  return queued;
 }
 
 function nudgeIfToolMissing(
@@ -225,10 +150,6 @@ export function sweepStageNudges(ctx: PipelineContext, runId: string, liveStatus
     const ownsStageObligation = agentOwnsCurrentStage(run, lookup.agentRecord);
     const ownsMasterLeadObligation = agentOwnsMasterLeadObligation(run, lookup.agentRecord);
     const ownsSupervisorObligation = agentOwnsSupervisorObligation(run, lookup.agentRecord);
-    if (lookup.agentRecord.waitingForAgentId && lookup.agentRecord.awaitingSince) {
-      // A direct reply timeout restores the deferred obligation instead of pausing the whole pipeline.
-      if (restoreExpiredDirectReply(ctx, run, agentId)) continue;
-    }
     if (!ownsStageObligation && !ownsMasterLeadObligation && !ownsSupervisorObligation) continue;
     if (!lookup.agentRecord.awaitingTool || !lookup.agentRecord.awaitingSince) continue;
     // Initial/rework mail must be delivered before the sweeper starts counting a reply timeout.

@@ -384,8 +384,6 @@ export async function handleAgentArchived(
         for (const agentRecord of Object.values(mutableRun.agents)) {
           agentRecord.awaitingTool = null;
           agentRecord.awaitingSince = null;
-          agentRecord.waitingForAgentId = null;
-          agentRecord.deferredTool = null;
         }
       });
       // Archive child Leads and Peers so background sessions stop, but keep git worktrees and branches intact for restoration.
@@ -415,11 +413,6 @@ export async function handleAgentArchived(
         if (affectedAgentIds.has(agentRecord.agentId)) {
           agentRecord.awaitingTool = null;
           agentRecord.awaitingSince = null;
-          agentRecord.waitingForAgentId = null;
-          agentRecord.deferredTool = null;
-        } else if (agentRecord.waitingForAgentId && affectedAgentIds.has(agentRecord.waitingForAgentId)) {
-          agentRecord.waitingForAgentId = null;
-          agentRecord.deferredTool = null;
         }
       }
       mutableRun.mailbox = mutableRun.mailbox.filter(
