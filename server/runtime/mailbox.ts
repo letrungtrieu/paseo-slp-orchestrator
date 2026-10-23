@@ -5,6 +5,7 @@ import { isPipelineLeadRole } from "../../shared/roles";
 import type { MailboxMessage, Run } from "../../shared/state";
 import { isConfirmedMissingAgentError, type AgentGateway, type AgentLiveStatus } from "./agent-gateway";
 import type { RunStore } from "../store/run-store";
+import { composeMailPrompt, type MailClass } from "./mail-composer";
 
 export interface EnqueueOptions {
   taskId: string | null;
@@ -14,6 +15,8 @@ export interface EnqueueOptions {
   isReminder?: boolean;
   // Ledger row this mail carries (a question for its recipient, or the answer for its asker).
   questionId?: string;
+  // Replaces any still-queued message with the same key for this recipient.
+  supersedeKey?: string;
   // label of the sender for the audit log
   from: string;
   summary: string;
@@ -73,10 +76,17 @@ export class Mailbox {
       awaitTool: options.awaitTool,
       isReminder: options.isReminder ?? false,
       questionId: options.questionId ?? null,
+      supersedeKey: options.supersedeKey ?? null,
       createdAt: new Date().toISOString(),
     };
     // Persisted in the run so queued mail survives a plugin reload; the sweeper flushes it when the plugin comes back.
     this.store.mutate(runId, (run) => {
+      if (queuedMessage.supersedeKey) {
+        // Dropped in the same mutation that queues the successor, so a reload never sees both or neither.
+        run.mailbox = run.mailbox.filter(
+          (existingMessage) => !(existingMessage.toAgentId === toAgentId && existingMessage.supersedeKey === queuedMessage.supersedeKey),
+        );
+      }
       run.mailbox.push(queuedMessage);
     });
     this.logMail(runId, {
@@ -134,6 +144,17 @@ export class Mailbox {
     return deliveredCount;
   }
 
+  private classifyMail(recipientId: string, message: MailboxMessage): MailClass {
+    if (message.questionId) {
+      // The ledger knows which side of the exchange this recipient is on.
+      const mailedQuestion = this.store.questions.find(message.questionId);
+      if (mailedQuestion?.fromAgentId === recipientId) return "answer";
+      return "question";
+    }
+    if (message.isReminder) return "reminder";
+    return message.awaitTool ? "assignment" : "notice";
+  }
+
   private async deliver(runId: string, recipientId: string, messages: MailboxMessage[]): Promise<boolean> {
     const deliveredIds = new Set(messages.map((message) => message.id));
     // This guard is repeated inside the synchronous mutation so an abort cannot stamp a stale
@@ -141,8 +162,9 @@ export class Mailbox {
     const preflightRun = this.store.require(runId);
     if (!stageCanReceiveMail(preflightRun, recipientId)
       || !preflightRun.mailbox.some((message) => deliveredIds.has(message.id))) return false;
-    // Joined in arrival order with a separator so the agent can still tell the messages apart.
-    const combinedText = messages.map((message) => message.text).join("\n\n---\n\n");
+    // One prompt per recipient (a second prompt would cancel the turn), but grouped by kind so a question,
+    // an assignment and a notice are never blended into one undifferentiated block.
+    const combinedText = composeMailPrompt(messages, (message) => this.classifyMail(recipientId, message));
     // The newest owed tool wins: it describes what the agent must do after reading all of the mail.
     const latestOwedMessage = [...messages].reverse().find((message) => message.awaitTool);
     const owedTool = latestOwedMessage?.awaitTool ?? null;

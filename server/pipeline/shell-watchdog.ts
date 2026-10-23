@@ -235,6 +235,8 @@ export async function sweepPeerShellWatchdog(
       taskId: pipeline.id,
       awaitTool: null,
       from: "watchdog",
+      // A newer silence report for the same peer makes the older one obsolete (the shell may even have finished meanwhile).
+      supersedeKey: `shell-alert:${peerRecord.agentId}`,
       summary: `Shell watchdog alert for peer ${peerRecord.agentId} (${unchangedOutputSeconds}s idle): ${activeShell.command.slice(0, 80)}`,
     });
     ctx.logEvent(run.id, {

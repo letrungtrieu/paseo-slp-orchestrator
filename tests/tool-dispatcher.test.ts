@@ -103,6 +103,7 @@ describe("stage dispatch and bookkeeping", () => {
         awaitTool: "slp_stage_report",
         isReminder: false,
         questionId: null,
+        supersedeKey: null,
         createdAt: "2026-01-01T00:00:00.000Z",
       });
     });

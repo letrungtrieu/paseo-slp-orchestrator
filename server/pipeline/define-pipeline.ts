@@ -72,6 +72,7 @@ export function materializePipelineStages(
       forkedLeadAgentId: null,
       peerAgentIds: [],
       reports: [],
+      coordinatorSeenReports: 0,
       messages: [],
       result: null,
       startedAt: null,

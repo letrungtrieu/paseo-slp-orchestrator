@@ -336,7 +336,7 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
   }
   const createdAt = new Date().toISOString();
   const promptMessage = (toAgentId: string, text: string, awaitTool: string | null): MailboxMessage => ({
-    id: randomUUID(), toAgentId, text, taskId: null, awaitTool, isReminder: false, questionId: null, createdAt,
+    id: randomUUID(), toAgentId, text, taskId: null, awaitTool, isReminder: false, questionId: null, supersedeKey: null, createdAt,
   });
   // Map dead identities to their newly spawned replacements so stale mail and parent links can be reconciled.
   const replacementByDeadAgentId = new Map<string, string>();
@@ -372,6 +372,8 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
   ctx.store.mutate(runId, (mutableRun) => {
     const currentPipeline = mutableRun.pipelines[pipelineId];
     const currentStage = currentPipeline.stages[currentPipeline.currentStageIndex];
+    // A replacement coordinator is briefed with every saved report above, never with a delta over the dead one's history.
+    if (activationChanges.coordinatorCreated) currentStage.coordinatorSeenReports = currentStage.reports.length;
     if (replacementByDeadAgentId.size > 0) {
       // Drop unread mail addressed to dead stage sessions because their replacements receive a full stage briefing.
       mutableRun.mailbox = mutableRun.mailbox.filter((queuedMessage) => !replacementByDeadAgentId.has(queuedMessage.toAgentId));

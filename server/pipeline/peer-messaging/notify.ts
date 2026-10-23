@@ -23,6 +23,7 @@ export function notifyAgent(ctx: PipelineContext, caller: BusCaller, input: { to
       awaitTool: null,
       isReminder: false,
       questionId: null,
+      supersedeKey: null,
       createdAt,
     });
   });

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { BusCaller } from "../bus/http-mcp";
 import type { StageReportSubmission } from "../../shared/pipeline";
 import type { PipelineContext } from "./context";
-import { coordinatorRevivalBriefing } from "./stage-briefings";
+import { coordinatorReportUpdateBriefing, coordinatorRevivalBriefing } from "./stage-briefings";
 import { pausePipeline, requireStageLead, stageForCaller } from "./stage-context";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
@@ -35,6 +35,12 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
       return peerRecord.awaitingTool === "slp_stage_report" || hasQueuedReportMail;
     });
     if (!otherPeersStillOwingReport || report.status === "blocked") {
+      // An undelivered review mail means the coordinator has not yet seen what it announced; replacing it
+      // with a delta would drop that content, so only a delivered one allows a delta.
+      const hasUndeliveredReviewMail = mutableRun.mailbox.some(
+        (queuedMessage) => queuedMessage.toAgentId === coordinatorId && queuedMessage.awaitTool === "slp_approve_stage",
+      );
+      const reportsAlreadyBriefed = hasUndeliveredReviewMail ? 0 : stage.coordinatorSeenReports;
       mutableRun.mailbox = mutableRun.mailbox.filter(
         (queuedMessage) =>
           !(
@@ -42,9 +48,12 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
             && queuedMessage.awaitTool === "slp_approve_stage"
           ),
       );
-      mutableRun.mailbox.push(
-        stageMail(coordinatorId, coordinatorRevivalBriefing(mutableRun, pipeline, stage), "slp_approve_stage"),
-      );
+      const reviewBriefing = reportsAlreadyBriefed > 0
+        ? coordinatorReportUpdateBriefing(stage, reportsAlreadyBriefed)
+        : coordinatorRevivalBriefing(mutableRun, pipeline, stage);
+      mutableRun.mailbox.push(stageMail(coordinatorId, reviewBriefing, "slp_approve_stage"));
+      // Recorded at queue time: a later report either replaces this mail (then briefs from zero) or follows its delivery.
+      stage.coordinatorSeenReports = stage.reports.length;
       notifiedCoordinator = true;
     }
   });
@@ -91,6 +100,8 @@ export function escalateStage(ctx: PipelineContext, caller: BusCaller, reason: s
         taskId: null,
         awaitTool: null,
         from: caller.agentId,
+        // Only the latest blocker of a pipeline matters to the Supervisor, not each earlier escalation.
+        supersedeKey: `escalation:${pipeline.id}`,
         summary: `escalation: ${pipeline.name}/${stage.name}`,
       },
     );

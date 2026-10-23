@@ -168,6 +168,9 @@ export const StageStateSchema = PipelineStageDefinitionSchema.extend({
   forkedLeadAgentId: z.string().nullable().default(null),
   peerAgentIds: z.array(z.string()).default([]),
   reports: z.array(StoredStageReportSchema).default([]),
+  // How many of `reports` the stage coordinator has already been briefed on, so later review mail
+  // carries only the new evidence instead of resending the whole history every round.
+  coordinatorSeenReports: z.number().int().min(0).default(0),
   // Direct peer messages stay attached to the stage, making the review history auditable after
   // its agents are archived and preventing cross-stage conversations from being conflated.
   messages: z.array(StageMessageSchema).default([]),

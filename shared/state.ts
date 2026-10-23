@@ -58,6 +58,9 @@ export const MailboxMessageSchema = z.object({
   isReminder: z.boolean().default(false),
   // Links the mail to a row of the peer-question ledger so delivery can be recorded and stale copies dropped.
   questionId: z.string().nullable().default(null),
+  // A newer message with the same key to the same recipient replaces this one while it is still queued,
+  // so a stale alert or status never reaches an agent after its successor made it obsolete.
+  supersedeKey: z.string().nullable().default(null),
   createdAt: z.string(),
 });
 export type MailboxMessage = z.infer<typeof MailboxMessageSchema>;

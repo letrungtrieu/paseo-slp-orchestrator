@@ -192,3 +192,43 @@ describe("failed sends", () => {
     });
   });
 });
+
+describe("superseding queued mail", () => {
+  it("replaces a still-queued message with the same key for the same recipient only", async () => {
+    const { flow, runId, masterLeadAgentId, supervisorAgentId } = await runWithTwoAgents();
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "alert v1", { ...ENQUEUE_NO_REPLY, supersedeKey: "shell-alert:peer-1" });
+    flow.ctx.mailbox.enqueue(runId, supervisorAgentId, "alert for another recipient", { ...ENQUEUE_NO_REPLY, supersedeKey: "shell-alert:peer-1" });
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "alert v2", { ...ENQUEUE_NO_REPLY, supersedeKey: "shell-alert:peer-1" });
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "unrelated alert", { ...ENQUEUE_NO_REPLY, supersedeKey: "shell-alert:peer-2" });
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "plain notice", ENQUEUE_NO_REPLY);
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "another plain notice", ENQUEUE_NO_REPLY);
+
+    expect(flow.mailTo(runId, masterLeadAgentId).map((queuedMail) => queuedMail.text)).toEqual([
+      "alert v2", "unrelated alert", "plain notice", "another plain notice",
+    ]);
+    expect(flow.mailTo(runId, supervisorAgentId).map((queuedMail) => queuedMail.text)).toEqual(["alert for another recipient"]);
+  });
+});
+
+describe("composed prompts", () => {
+  it("sends one prompt that separates a question from a notice and an assignment", async () => {
+    const { flow, runId, masterLeadAgentId, supervisorAgentId, flush } = await runWithTwoAgents();
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "FYI the build is green", ENQUEUE_NO_REPLY);
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "Define the pipeline now", { ...ENQUEUE_NO_REPLY, awaitTool: "slp_define_pipeline" });
+    flow.store.questions.insert({
+      questionId: "q-1", runId, fromAgentId: supervisorAgentId, toAgentId: masterLeadAgentId, scope: "cross_lead",
+      pipelineId: null, question: "Which route?", createdAt: new Date().toISOString(),
+    });
+    flow.ctx.mailbox.enqueue(runId, masterLeadAgentId, "Question q-1: Which route?", { ...ENQUEUE_NO_REPLY, questionId: "q-1" });
+
+    expect(await flush()).toBe(1);
+    const deliveredPrompts = flow.gateway.promptsTo(masterLeadAgentId);
+    expect(deliveredPrompts).toHaveLength(1);
+    const promptText = deliveredPrompts[0];
+    expect(promptText.indexOf("Which route?")).toBeLessThan(promptText.indexOf("Define the pipeline now"));
+    expect(promptText.indexOf("Define the pipeline now")).toBeLessThan(promptText.indexOf("FYI the build is green"));
+    // The owed tool still comes from the assignment, and the ledger records the question as delivered.
+    expect(flow.run(runId).agents[masterLeadAgentId].awaitingTool).toBe("slp_define_pipeline");
+    expect(flow.store.questions.require("q-1").deliveredAt).not.toBeNull();
+  });
+});

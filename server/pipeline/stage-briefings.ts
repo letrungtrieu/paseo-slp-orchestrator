@@ -100,17 +100,31 @@ export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stag
   ].join("\n\n");
 }
 
-// When a Lead session dies mid-stage after peers already reported, include their saved reports so the replacement can act immediately.
-export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
-  const baseBriefing = coordinatorStageBriefing(run, pipeline, stage);
-  if (stage.reports.length === 0) return baseBriefing;
-  const formattedReports = stage.reports.map((peerReport) => {
+function formatStageReports(reports: StageState["reports"]): string {
+  return reports.map((peerReport) => {
     const findingsText = peerReport.findings.length > 0
       ? `\n  Findings:\n${peerReport.findings.map((finding) => `  - ${finding}`).join("\n")}`
       : "";
     return `- **${peerReport.role}** (\`${peerReport.agentId}\`) [${peerReport.status}]: ${peerReport.summary}${findingsText}`;
   }).join("\n");
-  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formattedReports}\n\nReview the submitted reports against goal '${stage.goal}' according to your configured \`.slp\` workflow. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
+}
+
+// When a Lead session dies mid-stage after peers already reported, include their saved reports so the replacement can act immediately.
+export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
+  const baseBriefing = coordinatorStageBriefing(run, pipeline, stage);
+  if (stage.reports.length === 0) return baseBriefing;
+  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formatStageReports(stage.reports)}\n\nReview the submitted reports against goal '${stage.goal}' according to your configured \`.slp\` workflow. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
+}
+
+// A coordinator that already holds the goal, roster and earlier reports only needs what changed;
+// resending the full briefing each round made its context grow quadratically with every rework.
+export function coordinatorReportUpdateBriefing(stage: StageState, firstNewReportIndex: number): string {
+  const newReports = stage.reports.slice(firstNewReportIndex);
+  return [
+    `### New Peer Report(s) For Stage '${stage.name}' (${newReports.length} new, ${stage.reports.length} total)`,
+    formatStageReports(newReports),
+    `You already hold this stage's goal ('${stage.goal}'), roster and the earlier reports. Judge the new evidence against that goal according to your configured \`.slp\` workflow, then direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\`. Call \`slp_get_pipeline\` if you need the full report history.`,
+  ].join("\n\n");
 }
 
 // Inform a surviving Lead when dead peer slots are replaced so direct messages and rework target the new identities.
