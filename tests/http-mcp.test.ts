@@ -273,10 +273,11 @@ describe("Antigravity stdio MCP bridge", () => {
       const bridgeScriptPath = ensureAntigravityMcpBridge(tempDir, {
         mcpConfigPath,
         nodeExecutablePath: "/usr/local/bin/node",
+        platform: "linux",
       });
       const updatedConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
       expect(updatedConfig.mcpServers.codegraph).toEqual({ command: "codegraph", args: ["serve", "--mcp"] });
-      // Wrapping with /usr/bin/env guarantees ELECTRON_RUN_AS_NODE=1 when Paseo's execPath is an Electron binary.
+      // Wrapping with /usr/bin/env on POSIX guarantees ELECTRON_RUN_AS_NODE=1 when Paseo's execPath is an Electron binary.
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME]).toMatchObject({
         command: "/usr/bin/env",
         args: ["ELECTRON_RUN_AS_NODE=1", "/usr/local/bin/node", bridgeScriptPath],
@@ -284,6 +285,19 @@ describe("Antigravity stdio MCP bridge", () => {
       });
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_delegate).toEqual({ eager: true });
       expect(updatedConfig.mcpServers[BUS_SERVER_NAME].tools.slp_stage_report).toEqual({ eager: true });
+
+      // On Windows (/usr/bin/env absent), command points directly to nodeExecutablePath with ELECTRON_RUN_AS_NODE=1 in env.
+      ensureAntigravityMcpBridge(tempDir, {
+        mcpConfigPath,
+        nodeExecutablePath: "C:\\Program Files\\Paseo\\Paseo.exe",
+        platform: "win32",
+      });
+      const winUpdatedConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8"));
+      expect(winUpdatedConfig.mcpServers[BUS_SERVER_NAME]).toMatchObject({
+        command: "C:\\Program Files\\Paseo\\Paseo.exe",
+        args: [bridgeScriptPath],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -346,4 +360,3 @@ describe("Antigravity stdio MCP bridge", () => {
     }
   });
 });
-

@@ -11,6 +11,7 @@ import { BUS_TOOL_DEFINITIONS, type BusToolName } from "./tool-schemas";
 export interface AntigravityBridgeSetupOptions {
   mcpConfigPath?: string;
   nodeExecutablePath?: string;
+  platform?: NodeJS.Platform;
 }
 
 const BRIDGE_SCRIPT_FILENAME = "slp-mcp-bridge.mjs";
@@ -31,6 +32,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_STATE_DIRECTORY = ${JSON.stringify(defaultStateDirectory)};
 // Newest protocol first so clients negotiating an unknown version downgrade from our latest supported spec.
@@ -180,7 +182,9 @@ export async function handleStdioRpcMessage(rpcMessage, environment = process.en
 }
 
 // Only start the stdin loop when invoked as the stdio bridge entrypoint.
-if (import.meta.url === \`file://\${process.argv[1]}\`) {
+// Normalize process.argv[1] via pathToFileURL so Windows drive letters and backslashes match import.meta.url.
+const invokedEntrypointUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
+if (import.meta.url === invokedEntrypointUrl) {
   const stdinLines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   stdinLines.on("line", (rawLine) => {
     const trimmedLine = rawLine.trim();
@@ -254,6 +258,7 @@ export function ensureAntigravityMcpBridge(
   const mcpConfigPath = options.mcpConfigPath ?? defaultAntigravityMcpConfigPath();
   // Use the daemon's own Node binary so child bridges always have node:sqlite regardless of GUI PATH.
   const nodeExecutablePath = options.nodeExecutablePath ?? process.execPath;
+  const targetPlatform = options.platform ?? process.platform;
   const existingConfigRoot = readExistingMcpConfigObject(mcpConfigPath);
   const existingMcpServers =
     existingConfigRoot.mcpServers
@@ -262,14 +267,22 @@ export function ensureAntigravityMcpBridge(
       ? (existingConfigRoot.mcpServers as Record<string, unknown>)
       : {};
 
-  // Paseo's process.execPath is an Electron binary (/opt/Paseo/Paseo.bin); wrapping via /usr/bin/env
-  // guarantees ELECTRON_RUN_AS_NODE=1 even if the MCP host ignores per-server env blocks in mcp_config.json.
-  const desiredBusServerEntry = {
-    command: "/usr/bin/env",
-    args: ["ELECTRON_RUN_AS_NODE=1", nodeExecutablePath, bridgeScriptPath],
-    env: { ELECTRON_RUN_AS_NODE: "1" },
-    tools: buildEagerToolMap(),
-  };
+  // On POSIX, wrapping via /usr/bin/env guarantees ELECTRON_RUN_AS_NODE=1 even if an MCP host ignores
+  // per-server env blocks; on Windows (/usr/bin/env does not exist), invoke nodeExecutablePath directly.
+  const desiredBusServerEntry =
+    targetPlatform === "win32"
+      ? {
+          command: nodeExecutablePath,
+          args: [bridgeScriptPath],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+          tools: buildEagerToolMap(),
+        }
+      : {
+          command: "/usr/bin/env",
+          args: ["ELECTRON_RUN_AS_NODE=1", nodeExecutablePath, bridgeScriptPath],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+          tools: buildEagerToolMap(),
+        };
 
   const currentBusServerEntry = existingMcpServers[BUS_SERVER_NAME];
   if (JSON.stringify(currentBusServerEntry) !== JSON.stringify(desiredBusServerEntry)) {
