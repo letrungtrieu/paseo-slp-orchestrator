@@ -1,4 +1,5 @@
 // Every file the `slp-manager` skill ships, keyed by its path inside the skill directory.
+import { PEER_TEMPLATES_REFERENCE } from "./peer-templates-reference";
 import { PROJECT_INVESTIGATION_REFERENCE } from "./project-investigation-reference";
 import { renderSlpManagerSkillMarkdown } from "./skill-markdown";
 import { STACK_PLAYBOOKS_REFERENCE } from "./stack-playbooks-reference";
@@ -20,5 +21,6 @@ export function slpManagerSkillFiles(): SlpManagerSkillFile[] {
     { relativePath: "references/PROJECT_INVESTIGATION.md", content: PROJECT_INVESTIGATION_REFERENCE },
     { relativePath: "references/TEST_POLICY_TEMPLATE.md", content: TEST_POLICY_TEMPLATE_REFERENCE },
     { relativePath: "references/STACK_PLAYBOOKS.md", content: STACK_PLAYBOOKS_REFERENCE },
+    { relativePath: "references/PEER_TEMPLATES.md", content: PEER_TEMPLATES_REFERENCE },
   ];
 }

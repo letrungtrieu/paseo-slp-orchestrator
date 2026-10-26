@@ -2,7 +2,7 @@
 // Hints only guide the investigation; measured commands from the real repository always override them.
 export const STACK_PLAYBOOKS_REFERENCE = `# Stack Playbooks (Starting Points, Not Answers)
 
-Use these only to know **what to look for** during \`PROJECT_INVESTIGATION.md\`. The project's own CI, scripts and existing tests always win over this file. Every command below must be confirmed and measured in the actual repository before it goes into \`TEST_POLICY.md\`.
+Use these only to know **what to look for** during \`PROJECT_INVESTIGATION.md\`. The project's own CI, scripts and existing tests always win over this file. Every command below must be confirmed and measured in the actual repository before it goes into \`TEST_POLICY.md\`. Map what you find to peer kinds: \`fast\` work belongs to developers, \`engine\`/\`integration\` work to QA graders.
 
 ## Game Engines
 
@@ -11,7 +11,7 @@ Use these only to know **what to look for** during \`PROJECT_INVESTIGATION.md\`.
 - **Engine:** Unity Test Framework EditMode/PlayMode via \`-batchmode -runTests -testPlatform EditMode|PlayMode -testResults <file>\` (do not add \`-quit\` together with \`-runTests\`). Each run opens a full editor (often 3–5 GB).
 - **Integration:** a player build or Play Mode session driven by the project's automation (PlayMode tests, AltTester, GameDriver, debug/cheat menus), screenshots via \`ScreenCapture.CaptureScreenshot\` or the window, and the gameplay loops from the GDD or playtest notes.
 - **Heavy signatures:** \`Unity\`, \`Unity.exe\`, \`-projectPath\`, helper processes \`UnityShaderCompiler\`, \`bee_backend\`, \`Unity.ILPP.Runner\`. One editor per project folder; every Git worktree imports its own \`Library/\`.
-- **Typical peers:** \`gameplay-engineer\` and \`ui-engineer\` (feature), \`code-reviewer\` (feature, advisor), \`unity-test-automation\` and \`playtester\` (integration).
+- **Typical peers:** \`gameplay-engineer\` and \`ui-engineer\` (developer, feature), \`gameplay-architect\` (advisor, feature), \`unity-test-automation\` and \`playtester\` (qa, integration).
 
 ### Unreal Engine
 - **Fast:** standalone C++ modules tested with GoogleTest/Catch2 when the project has them; otherwise only static checks.

@@ -99,6 +99,7 @@ describe("slp-manager project skill provisioning", () => {
       "references/PROJECT_INVESTIGATION.md",
       "references/TEST_POLICY_TEMPLATE.md",
       "references/STACK_PLAYBOOKS.md",
+      "references/PEER_TEMPLATES.md",
     ]);
     for (const referenceFile of referenceFiles) {
       // A reference that SKILL.md never names would be dead weight; one it names but never installs would break the procedure.
@@ -179,6 +180,42 @@ describe("slp-manager project skill provisioning", () => {
     const skillMarkdown = renderSlpManagerSkillMarkdown();
     expect(skillMarkdown).toContain("## 6. Upgrading an Existing `.slp` to the Current Structure");
     expect(skillMarkdown).toContain("Delete the file only after the human confirms");
+  });
+
+  // Every template an agent copies must load in the engine and carry the kind-specific protocol it relies on.
+  it("ships developer, advisor and QA grader templates that parse with the kind and protocol the engine enforces", () => {
+    const peerTemplatesText = slpManagerSkillFiles().find((skillFile) => skillFile.relativePath === "references/PEER_TEMPLATES.md")!.content;
+    const templateBlocks = [renderSlpManagerSkillMarkdown(), peerTemplatesText]
+      .flatMap((documentText) => [...documentText.matchAll(/```markdown\n([\s\S]*?)\n```/g)].map((fenceMatch) => fenceMatch[1]));
+    const parsedTemplates = templateBlocks.map((templateText) => parseRoleMarkdown(templateText, ".slp/peers/TEMPLATE.md"));
+    expect(parsedTemplates.map((template) => [template.role, template.kind])).toEqual([
+      ["backend-engineer", "developer"],
+      ["system-architect", "advisor"],
+      ["qa-automation-engineer", "qa"],
+    ]);
+    for (const template of parsedTemplates) {
+      expect(template.workflow).toContain("slp_stage_report");
+      expect(template.workflow).toContain("END YOUR TURN");
+      // Templates must not teach the retired behaviours that caused scope creep.
+      expect(template.workflow).not.toMatch(/MANDATORY|STRICT TECHNICAL METRICS|Rejected Alternatives|fellow peers|Prior Stage Peers/);
+      expect(template.workflow).toMatch(/only (to )?(your|the QA) Lead|Ask only/);
+    }
+    // Only the grader reports a scorecard, and only it may use the heavy integration tier.
+    expect(parsedTemplates[2].workflow).toContain("scorecard");
+    expect(parsedTemplates[2].frontMatter).toContain("tier: integration");
+    expect(parsedTemplates[1].workflow).toContain("You do not write code");
+  });
+
+  it("describes the enforced pipeline contract instead of the retired multi-writer flow", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    expect(skillMarkdown).toContain("[planning: advisor peers only]?  ->  implement: exactly one developer peer");
+    expect(skillMarkdown).toContain("{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }");
+    expect(skillMarkdown).toContain("scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]");
+    expect(skillMarkdown).toContain("slp_relay_decision");
+    // Fork and the rework cap are run settings; generated .slp files must not depend on an inherited Lead session.
+    expect(skillMarkdown).toContain("never assume it inherited the Lead's context");
+    expect(skillMarkdown).not.toContain("forks directly from that Lead's session");
+    expect(skillMarkdown).not.toContain("design-contracts\` -> \`implement\` -> \`verify-and-review");
   });
 
   it("keeps the QA engineer as the only seeded integration-tier peer so QA pipelines can run heavy verification", () => {

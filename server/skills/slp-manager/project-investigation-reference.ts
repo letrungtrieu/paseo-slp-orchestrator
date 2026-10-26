@@ -80,10 +80,13 @@ Write \`.slp/standards/TEST_POLICY.md\` from \`TEST_POLICY_TEMPLATE.md\`. Every 
 
 ## Phase 6: Derive the Peers From the Findings
 
-1. **Feature-tier peers (\`tier: feature\`):** one \`kind: developer\` engineer peer per area with distinct conventions (for example gameplay logic versus UI, backend versus frontend), plus one or two \`kind: advisor\` planning peers (architect, technical reviewer). Only one developer works per pipeline. Their workflows cite the exact \`fast\` commands, test folders, naming, and mocking approach from \`TEST_POLICY.md\`, and require work needing a heavy resource to be handed off in \`slp_stage_report\`.
-2. **Integration-tier peers (\`tier: integration\`):** an automation QA peer that runs the \`engine\`/\`integration\` automated suites on the merged build; a real-environment tester that follows the Phase 3 bring-up procedure and critical journeys and captures the recorded evidence types; add performance, security or device-compatibility peers only when the project has budgets or risks for them.
-3. **Do not create peers for stacks that are not present,** and merge roles that would have almost no distinct work.
-4. **Report a summary to the human:** detected stacks, tier table, heavy resources with \`max_concurrent\`, generated peers with their tier, and every \`UNVERIFIED\`/\`PROPOSED\` item that needs confirmation.
+The engine runs every feature as \`[planning with advisors]? -> implement with one developer\` and grades the merged build in the QA pipeline. Derive the peers to fit that shape:
+
+1. **Developers (\`kind: developer\`, \`tier: feature\`):** one per stack area with distinct conventions (for example gameplay logic versus UI, backend versus frontend). Only one developer works in a pipeline, so each developer must be able to deliver a whole feature slice in its area. Their workflows cite the exact \`fast\` commands, test folders, naming and mocking approach from \`TEST_POLICY.md\`, and list work needing a heavy resource as a hand-off in \`slp_stage_report\`.
+2. **Advisors (\`kind: advisor\`, \`tier: feature\`):** only for concerns that need a design decision before coding (architecture, a hard algorithm, security, UX fidelity). One or two are usually enough. They recommend, they never write.
+3. **QA graders (\`kind: qa\`, \`tier: integration\`):** an automation grader that runs the \`engine\`/\`integration\` suites on the merged build, and a real-environment grader that follows the Phase 3 bring-up procedure and critical journeys and captures the recorded evidence types. Add performance, security or device-compatibility graders only when the project has budgets or risks for them. Graders report a scorecard per criterion; they do not fix.
+4. **Do not create peers for stacks that are not present,** and merge roles that would have almost no distinct work. Do not add a code-review peer to the build stage; code is checked by the QA graders against the brief.
+5. **Report a summary to the human:** detected stacks, tier table, heavy resources with \`max_concurrent\`, generated peers with their \`kind\` and \`tier\`, and every \`UNVERIFIED\`/\`PROPOSED\` item that needs confirmation.
 
 ## Done Checklist
 
@@ -92,5 +95,6 @@ Write \`.slp/standards/TEST_POLICY.md\` from \`TEST_POLICY_TEMPLATE.md\`. Every 
 - [ ] Every \`fast\` command was run alone, with wall time, peak memory and baseline results recorded.
 - [ ] The manual-test procedure and critical journeys come from project material or from the human, not from invention.
 - [ ] Every heavy resource has process signatures, peak memory and \`max_concurrent\`.
-- [ ] \`.slp/standards/TEST_POLICY.md\` exists and every generated peer declares \`tier\` and cites its exact commands.
+- [ ] \`.slp/standards/TEST_POLICY.md\` exists and every generated peer declares \`kind\` and a matching \`tier\` and cites its exact commands.
+- [ ] The catalog has a developer for every stack area features will touch and at least one \`qa\` grader.
 `;
