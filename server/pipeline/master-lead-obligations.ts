@@ -1,5 +1,6 @@
 // Decides which workflow tool the accountable Lead (feature Lead, or QA Lead after handover) owes in the
 // current run state, so revival and nudging re-queue exactly one valid obligation instead of a stale one.
+import { awaitsLeadRecovery } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import { delegationMessage } from "../prompts/messages";
 import { qaLeadRevivalBriefing } from "../prompts/qa-messages";
@@ -28,7 +29,7 @@ export function isMasterLeadObligationActive(run: Run, awaitedTool: string | nul
   if (run.status !== "running") return false;
   const runPipelines = Object.values(run.pipelines);
   if (awaitedTool === "slp_resume_pipeline") {
-    return runPipelines.some((pipeline) => pipeline.status === "paused" && !pipeline.gate);
+    return runPipelines.some(awaitsLeadRecovery);
   }
   if (awaitedTool === "slp_finalize_pipeline") {
     return runPipelines.some((pipeline) => pipeline.status === "completed" && !pipeline.gate);
@@ -65,7 +66,7 @@ export function inferMasterLeadObligation(
   if (run.status === "running") {
     const runPipelines = Object.values(run.pipelines);
     // Paused pipelines without a human gate depend on the Master Lead's recovery guidance to continue.
-    const pausedPipeline = runPipelines.find((pipeline) => pipeline.status === "paused" && !pipeline.gate);
+    const pausedPipeline = runPipelines.find(awaitsLeadRecovery);
     if (pausedPipeline) {
       return {
         awaitTool: "slp_resume_pipeline",

@@ -11,7 +11,7 @@ Use these only to know **what to look for** during \`PROJECT_INVESTIGATION.md\`.
 - **Engine:** Unity Test Framework EditMode/PlayMode via \`-batchmode -runTests -testPlatform EditMode|PlayMode -testResults <file>\` (do not add \`-quit\` together with \`-runTests\`). Each run opens a full editor (often 3–5 GB).
 - **Integration:** a player build or Play Mode session driven by the project's automation (PlayMode tests, AltTester, GameDriver, debug/cheat menus), screenshots via \`ScreenCapture.CaptureScreenshot\` or the window, and the gameplay loops from the GDD or playtest notes.
 - **Heavy signatures:** \`Unity\`, \`Unity.exe\`, \`-projectPath\`, helper processes \`UnityShaderCompiler\`, \`bee_backend\`, \`Unity.ILPP.Runner\`. One editor per project folder; every Git worktree imports its own \`Library/\`.
-- **Typical peers:** \`gameplay-engineer\` and \`ui-engineer\` (feature), \`code-reviewer\` (feature), \`unity-test-automation\` and \`playtester\` (integration).
+- **Typical peers:** \`gameplay-engineer\` and \`ui-engineer\` (feature), \`code-reviewer\` (feature, advisor), \`unity-test-automation\` and \`playtester\` (integration).
 
 ### Unreal Engine
 - **Fast:** standalone C++ modules tested with GoogleTest/Catch2 when the project has them; otherwise only static checks.

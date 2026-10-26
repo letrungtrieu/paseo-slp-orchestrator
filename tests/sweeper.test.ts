@@ -4,7 +4,7 @@ import { startSweeper } from "../server/sweeper";
 import { DEFAULT_SLP_SETTINGS } from "../shared/settings";
 import type { FakePaseoHolder } from "./helpers/fake-paseo";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, delegateToLead, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_BRIEF, delegateToLead, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
 import { permissionRequest } from "./helpers/permission-request";
 
 const createFlow = useFlowFixture();
@@ -244,6 +244,7 @@ describe("sweeper", () => {
         name: "secondary-feature",
         version: "1.0",
         description: "Secondary parallel pipeline",
+        brief: SAMPLE_BRIEF,
         stages: [{ name: "impl", goal: "Implement secondary feature", peers: [{ role: "developer", task: "Code secondary" }] }],
       },
     });

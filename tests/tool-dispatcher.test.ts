@@ -81,14 +81,17 @@ describe("dispatch validation", () => {
 });
 
 describe("stage dispatch and bookkeeping", () => {
-  it("delivers a direct peer message through the stage mailbox", async () => {
-    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_notify", { toAgentId: "peer-2", message: LONG_MESSAGE });
+  it("delivers a peer's message to its Lead through the stage mailbox and refuses peer-to-peer mail", async () => {
+    const outcome = await dispatcher.dispatch(callerFor("peer-1"), "slp_notify", { toAgentId: "stage-lead", message: LONG_MESSAGE });
     expect(outcome.isError).toBe(false);
     expect(outcome.text).toContain("queued");
     expect(store.require("run-1").mailbox.at(-1)).toMatchObject({
-      toAgentId: "peer-2", text: expect.stringContaining(LONG_MESSAGE), awaitTool: null,
+      toAgentId: "stage-lead", text: expect.stringContaining(LONG_MESSAGE), awaitTool: null,
     });
     expect(store.require("run-1").pipelines["pipeline-1"].stages[0].messages).toHaveLength(1);
+    // The Lead is the single hub even in stages stored before stage kinds existed.
+    const peerToPeer = await dispatcher.dispatch(callerFor("peer-1"), "slp_notify", { toAgentId: "peer-2", message: LONG_MESSAGE });
+    expect(peerToPeer.isError).toBe(true);
   });
 
   it("stores peer evidence and sends it to the Forked Lead", async () => {

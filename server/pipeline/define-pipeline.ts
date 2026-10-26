@@ -6,9 +6,8 @@ import {
   type PipelineDefinition,
   type PipelineEnvelope,
   type PipelineInputDefinition,
-  type PipelineStageDefinition,
   type PipelineState,
-  type StageState,
+  type StageKind,
 } from "../../shared/pipeline";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { Run } from "../../shared/state";
@@ -18,6 +17,7 @@ import { createPipelineWorktree, openPipelineWorktree } from "./pipeline-workspa
 import { recoverPipelines } from "./stage-engine";
 import type { PipelineContext } from "./context";
 import { assertQaPipelineDefinitionAllowed, qaPipelineWorkspace } from "./qa/qa-pipeline";
+import { resolvePipelineShape } from "./stage-shape";
 import { ToolError } from "./tool-error";
 
 // Serialize concurrent pipeline definition calls per run so parallel tool invocations from Leads never collide.
@@ -38,47 +38,6 @@ async function withRunDefineLock<ResultType>(runId: string, operation: () => Pro
 
 function pipelineKey(name: string, version: string): string {
   return `${name.trim().toLocaleLowerCase()}\u0000${version.trim()}`;
-}
-
-// Validates stage names and .slp/peers role references, then builds fresh pending StageState records.
-export function materializePipelineStages(
-  run: Run,
-  stageDefinitions: readonly PipelineStageDefinition[],
-): StageState[] {
-  if (stageDefinitions.length === 0) {
-    throw new ToolError("Provide at least one stage when creating the pipeline.");
-  }
-  const seenStageNames = new Set<string>();
-  return stageDefinitions.map((stageDefinition) => {
-    const normalizedStageName = stageDefinition.name.trim().toLocaleLowerCase();
-    if (seenStageNames.has(normalizedStageName)) {
-      throw new ToolError(`Stage name '${stageDefinition.name}' is duplicated.`);
-    }
-    seenStageNames.add(normalizedStageName);
-    for (const peerAssignment of stageDefinition.peers) {
-      try {
-        // The snapshot is authoritative: arbitrary JSON cannot smuggle an unconfigured workflow.
-        peerRole(run.promptConfig, peerAssignment.role);
-      } catch (roleError) {
-        throw new ToolError(roleError instanceof Error ? roleError.message : String(roleError));
-      }
-    }
-    return {
-      name: stageDefinition.name,
-      goal: stageDefinition.goal,
-      peers: stageDefinition.peers.map(({ role, task }) => ({ role, task })),
-      id: randomUUID(),
-      status: "pending",
-      forkedLeadAgentId: null,
-      peerAgentIds: [],
-      reports: [],
-      coordinatorSeenReports: 0,
-      messages: [],
-      result: null,
-      startedAt: null,
-      completedAt: null,
-    };
-  });
 }
 
 function normalizeInputDefinitions(rawInput: PipelineEnvelope | PipelineInputDefinition): PipelineInputDefinition[] {
@@ -143,15 +102,21 @@ function validatePeerRoles(
   }
 }
 
-function sanitizeDefinition(definition: PipelineInputDefinition, canonicalWorktree: string): PipelineDefinition {
+function sanitizeDefinition(
+  definition: PipelineInputDefinition,
+  canonicalWorktree: string,
+  stageKinds: readonly StageKind[],
+): PipelineDefinition {
   return {
     name: definition.name,
     version: definition.version,
     worktree: canonicalWorktree,
     description: definition.description,
+    brief: definition.brief,
     // systemPrompt is deliberately discarded; only the project role Markdown can define it.
-    stages: definition.stages.map((stage) => ({
+    stages: definition.stages.map((stage, stageIndex) => ({
       ...stage,
+      kind: stageKinds[stageIndex],
       peers: stage.peers.map(({ role, task }) => ({ role, task })),
     })),
   };
@@ -249,6 +214,10 @@ export async function definePipeline(
     // QA pipelines verify the merged QA branch in place, so they skip worktree provisioning and Lead spawning below.
     const isQaDefinition = run.agents[callerLeadId]?.role === "qa_lead";
     if (isQaDefinition) assertQaPipelineDefinitionAllowed(run, callerLeadId, definitions);
+    // Shape errors (two writers, missing brief, self-grading feature pipeline) must surface before any worktree is created.
+    const stageKindsByDefinition = definitions.map((definition) =>
+      resolvePipelineShape(run, definition, isQaDefinition ? "qa" : "feature"),
+    );
     const preparedPipelines: Array<{
       pipeline: PipelineState;
       workspace: Awaited<ReturnType<typeof openPipelineWorktree>>;
@@ -284,7 +253,7 @@ export async function definePipeline(
       const workspace = isQaDefinition
         ? await qaPipelineWorkspace(latestRun)
         : await openPipelineWorktree(ctx, latestRun, requestedWorktreePath);
-      const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd);
+      const sanitizedDefinition = sanitizeDefinition(definition, workspace.cwd, stageKindsByDefinition[definitionIndex]);
       recheckWorkspaceAndIdentity(
         ctx,
         runId,
@@ -323,12 +292,17 @@ export async function definePipeline(
           forkedLeadAgentId: null,
           peerAgentIds: [],
           reports: [],
+          reworkRounds: 0,
           messages: [],
           result: null,
           startedAt: null,
           completedAt: null,
         })),
+        // A brief given at definition is locked immediately; a planning stage locks it on approval instead.
+        brief: sanitizedDefinition.brief ?? null,
+        briefLockedAt: sanitizedDefinition.brief ? createdAt : null,
         pausedReason: null,
+        awaitingHumanDecision: false,
         createdAt,
         updatedAt: createdAt,
         finalReport: null,

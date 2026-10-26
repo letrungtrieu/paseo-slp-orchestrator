@@ -17,6 +17,7 @@ import { RunStore } from "../../server/store/run-store";
 import type { RunMode } from "../../shared/roles";
 import type { MailboxMessage, Run } from "../../shared/state";
 import type { PipelineState } from "../../shared/pipeline";
+import { DEFAULT_ORCHESTRATION_SETTINGS, type OrchestrationSettings } from "../../shared/orchestration";
 import { normalizePipelineRoleId } from "../../shared/pipeline";
 import { FakeAgentGateway } from "./fake-gateway";
 import { FakePaseo, FakePaseoHolder } from "./fake-paseo";
@@ -30,6 +31,8 @@ export interface FlowOptions {
   forker?: ForkerChoice;
   // A short wait window keeps blocking slp_ask calls fast when a test never answers them.
   questionTiming?: Partial<QuestionTiming>;
+  // Fork and rework-cap policy snapshotted into every run this flow starts; defaults match a fresh install.
+  orchestration?: Partial<OrchestrationSettings>;
 }
 
 export interface Flow {
@@ -147,6 +150,7 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
           mode: options.mode,
           name: "Flow test",
           providers: { supervisor: "claude/sonnet", lead: "claude/sonnet", peer: "claude/sonnet" },
+          orchestration: { ...DEFAULT_ORCHESTRATION_SETTINGS, ...options.orchestration },
         });
         return startedRun.runId;
       },

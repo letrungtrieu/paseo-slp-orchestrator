@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { approvePipelineGate } from "../server/pipeline/stage-control";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, currentStage, reportPeer, startedRunWithPipeline, waitForStage } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SINGLE_DEVELOPER_PIPELINE, approveCurrentStage, currentStage, reportPeer, startedRunWithPipeline, waitForStage } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -27,7 +27,7 @@ describe("dynamic pipeline gates", () => {
 
   it("opens a before-integration gate after all stages in SEMI_AUTO", async () => {
     const flow = await createFlow({ mode: "SEMI_AUTO" });
-    const definition: PipelineDefinition = { ...DEFAULT_PIPELINE, name: "semi-auto", stages: [DEFAULT_PIPELINE.stages[0]] };
+    const definition: PipelineDefinition = { ...SINGLE_DEVELOPER_PIPELINE, name: "semi-auto" };
     const { runId, pipelineId } = await startedRunWithPipeline(flow, definition);
     const stage = currentStage(flow, runId, pipelineId);
     for (const assignment of stage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);
@@ -39,7 +39,7 @@ describe("dynamic pipeline gates", () => {
 
   it("keeps FULL_AUTO free of human gates while retaining Forked Lead approval", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
-    const definition: PipelineDefinition = { ...DEFAULT_PIPELINE, name: "full-auto", stages: [DEFAULT_PIPELINE.stages[0]] };
+    const definition: PipelineDefinition = { ...SINGLE_DEVELOPER_PIPELINE, name: "full-auto" };
     const { runId, pipelineId } = await startedRunWithPipeline(flow, definition);
     const stage = currentStage(flow, runId, pipelineId);
     for (const assignment of stage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);

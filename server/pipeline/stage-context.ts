@@ -47,7 +47,13 @@ export function pausePipelineForAgent(ctx: PipelineContext, agentId: string, rea
   pausePipeline(ctx, lookup.run.id, pipeline.id, reason);
 }
 
-export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: string, reason: string): void {
+export function pausePipeline(
+  ctx: PipelineContext,
+  runId: string,
+  pipelineId: string,
+  reason: string,
+  options: { awaitingHumanDecision?: boolean } = {},
+): void {
   const run = ctx.store.require(runId);
   const pipeline = requirePipeline(run, pipelineId);
   const targetLeadId = pipeline.leadAgentId && !run.agents[pipeline.leadAgentId]?.archivedAt
@@ -57,6 +63,7 @@ export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: s
     const mutablePipeline = mutableRun.pipelines[pipelineId];
     mutablePipeline.status = "paused";
     mutablePipeline.pausedReason = reason;
+    mutablePipeline.awaitingHumanDecision = Boolean(options.awaitingHumanDecision);
     mutablePipeline.updatedAt = new Date().toISOString();
     // A recovery decision replaces outstanding conversation waits as well as workflow obligations.
     for (const agent of Object.values(mutableRun.agents)) {
@@ -65,8 +72,11 @@ export function pausePipeline(ctx: PipelineContext, runId: string, pipelineId: s
       agent.awaitingSince = null;
     }
     // Persist the notification with the pause so a reload cannot strand a pipeline without its owner knowing.
-    mutableRun.mailbox.push(stageMail(targetLeadId,
-      `Pipeline ${mutablePipeline.name} (${pipelineId}) paused: ${reason}\nInspect slp_get_pipeline, then use slp_resume_pipeline with a recovery decision.`, "slp_resume_pipeline"));
+    // A human-decision pause owes the Lead nothing: the Supervisor relays the verdict and that resumes the stage.
+    mutableRun.mailbox.push(options.awaitingHumanDecision
+      ? stageMail(targetLeadId, `Pipeline ${mutablePipeline.name} (${pipelineId}) paused for the human's decision: ${reason}\nThe Supervisor presents your latest results to the human and relays the decision to you. End your turn.`, null)
+      : stageMail(targetLeadId,
+        `Pipeline ${mutablePipeline.name} (${pipelineId}) paused: ${reason}\nInspect slp_get_pipeline, then use slp_resume_pipeline with a recovery decision.`, "slp_resume_pipeline"));
   });
   ctx.logEvent(runId, { taskId: null, from: "pipeline", to: targetLeadId, kind: "pipeline.paused", summary: `${pipelineId}: ${reason}`, outcome: "blocked" });
 }

@@ -29,61 +29,76 @@ const DEFAULT_ROLES = [
     file: "QA_LEAD.md",
     workflow: DEFAULT_WORKFLOWS.qa_lead.trim(),
   },
-  // Developer peers implement scoped code and tests while documenting concrete input/logic/output metrics.
+  // The single developer of a pipeline builds the locked brief; nobody else writes code.
   {
     role: "developer",
     name: "Developer",
-    description: "Implement scoped features and fixes with concrete input/logic/output metrics, step-by-step methodological arguments, and verifiable evidence in the shared pipeline worktree.",
+    description: "The single writer of a pipeline — implements exactly the locked brief with tests in the shared worktree.",
     file: "peers/DEVELOPER.md",
+    kind: "developer",
     tier: "feature",
     workflow: [
-      "Focus on clean implementation, automated tests, zero redundant system bloat, and verifiable changes in the shared pipeline worktree. Document the exact logic, expected inputs, and expected outputs/metrics (or concrete runtime outcomes) for every function or feature touched.",
+      "Build what the locked brief describes: everything in scope, nothing out of scope.",
       "",
-      "MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT:",
-      "1. Chosen Method & Problem Mapping: Explicitly state the engineering technique/algorithm/pattern (A) you used to solve the assigned problem (B).",
-      "2. Step-by-Step Quantitative Progression: Present the chosen method step-by-step with concrete data and metrics—showing how input data (C) is transformed through each processing step to yield output/outcome (D) in measured time or complexity (E).",
-      "3. Rejected Alternatives & Rationale: Explicitly explain which alternative technique(s) (F) you chose NOT to use and why (G) (e.g., worse time/memory complexity, boundary distortion, edge-case failure, or redundant system bloat).",
-      "4. Required Reporting Pattern Example:",
-      "   \"I used technique A to solve problem B; with input data C, it produced output D in time/complexity E (step-by-step metrics: Step 1: ... -> Step 2: ... -> Output: ...). I did not use technique F because G...\"",
+      "1. Read the brief, the stage goal and the files the change touches.",
+      "2. Make the smallest change that satisfies every criterion; follow the project's existing patterns and libraries.",
+      "3. Add or update tests for the changed behavior and run the fast-tier commands.",
+      "4. Commit your work in the pipeline worktree.",
+      "5. Report with slp_stage_report: files changed, commands run with their results, and any criterion you could not meet and why.",
+      "If the brief is wrong or cannot be built as written, call slp_escalate instead of redesigning it yourself.",
       "",
       DEFAULT_WORKFLOWS.peer.trim(),
     ].join("\n"),
   },
+  // QA graders score the brief criteria; they do not fix code, so the Lead decides every rework.
   {
     role: "qa-engineer",
     name: "QA Engineer",
-    description: "Analyze edge cases, automated vs manual testing needs, UI impact, and capture screenshot/runtime evidence to verify delivered behavior or report bugs.",
+    description: "Grades the merged build against the locked brief criteria and product spec scenarios — pass/fail/blocked with reason and evidence.",
     file: "peers/QA_ENGINEER.md",
+    kind: "qa",
     // Verification of the merged QA branch happens in the QA pipeline, so this is the seeded integration-tier peer.
     tier: "integration",
     workflow: [
-      "Focus on exercising the delivered behavior, regression coverage, boundary conditions and reproducible verification evidence.",
+      "Grade the delivered behavior against the criteria you were given. You do not fix code.",
       "",
-      "MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT:",
-      "1. Logic, Inputs/Outputs & Edge-Case Analysis: For every piece of logic or feature processed in the pipeline, explicitly analyze and state its exact logic, expected inputs, expected outputs/outcomes, and enumerate all potential edge cases that can occur.",
-      "2. Automated vs. Manual Test Assessment: Explicitly determine and report which edge cases and flows can be verified via automated tests (and run/write those automated tests) versus which scenarios require manual testing and why.",
-      "3. UI / Visual Impact Assessment: Explicitly analyze whether the changes affect the user interface (UI) or visual rendering, and explain how the layout, state, interaction, or rendering is affected.",
-      "4. Mandatory Screenshot / Visual Evidence Capture: Whenever the UI or visual output is affected (or when visual proof applies to the feature/bug), you MUST find and execute a concrete mechanism to capture screenshot evidence (e.g., native window/headless screenshot command, browser capture, Xvfb/import/scrot/Playwright or project screenshot tool) and include the captured screenshot path and findings in `slp_stage_report` to prove completion or document a bug. You run in the QA pipeline on the merged QA branch, so heavy resources listed in `.slp/standards/TEST_POLICY.md` (engine editor, emulator, simulator, container stack) are allowed here, one at a time, and never while another peer of the same stage uses the same resource.",
-      "5. Cross-Stage Clarification: If any upstream logic, input/output contract, or edge-case behavior from an earlier stage is unclear, use `slp_ask` to question the responsible peer from that earlier stage directly.",
+      "1. For each criterion, run its verification (automated test, command or manual step from `.slp/standards/TEST_POLICY.md`).",
+      "2. Record one scorecard entry per criterion: pass, fail or blocked, a one-line reason, and the evidence (test output, command result, screenshot path).",
+      "3. Capture a screenshot only when the criterion is visual and the project already has a way to take one; save it outside the worktree (for example under /tmp).",
+      "4. Anything you notice outside the criteria goes into observations; do not grade it.",
+      "5. Submit slp_stage_report with summary, scorecard and observations.",
+      "Heavy resources listed in TEST_POLICY.md are allowed in the QA pipeline, one at a time, never while another peer of the same stage uses the same resource.",
       "",
       DEFAULT_WORKFLOWS.peer.trim(),
     ].join("\n"),
   },
+  // Advisors only take part in planning: they help the Lead choose the approach and never write code.
+  {
+    role: "architect",
+    name: "Architect",
+    description: "Planning advisor — proposes the simplest design that fits the existing codebase and names what to leave out.",
+    file: "peers/ARCHITECT.md",
+    kind: "advisor",
+    tier: "feature",
+    workflow: `Advise the Lead on structure: which modules change, which existing patterns to reuse, and the simplest design that meets the acceptance criteria. Name tempting extras that should stay out of scope. Report one recommendation, its reason and its main risk.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
+  },
   {
     role: "reviewer",
-    name: "Reviewer",
-    description: "Review the current stage's design, metrics, data hygiene and implementation, challenging weak assumptions or system bloat.",
+    name: "Technical Reviewer",
+    description: "Planning advisor — compares candidate techniques for the problem and flags correctness or maintenance risks before code is written.",
     file: "peers/REVIEWER.md",
+    kind: "advisor",
     tier: "feature",
-    workflow: `Focus on architecture, correctness, maintainability, input/logic/output metrics, and challenging weak assumptions or redundant system garbage with concrete file/line evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
+    workflow: `Advise the Lead on technique: list at most two or three candidate approaches, compare them on correctness, complexity and fit with the codebase, and recommend one. Point to concrete files or APIs. Do not propose work beyond the acceptance criteria.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
   },
   {
     role: "security-reviewer",
-    name: "Security Reviewer",
-    description: "Review vulnerabilities, data handling, trust boundaries and architecture risks.",
+    name: "Security Advisor",
+    description: "Planning advisor — identifies trust-boundary, authorization, input-validation and secret-handling risks the brief must cover.",
     file: "peers/SECURITY_REVIEWER.md",
+    kind: "advisor",
     tier: "feature",
-    workflow: `Focus on trust boundaries, authentication/authorization, input validation, secret handling and security risks with concrete input/logic/output evidence.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
+    workflow: `Advise the Lead on security risks that apply to this change only, and suggest the brief criteria that would cover them. Skip generic checklists.\n\n${DEFAULT_WORKFLOWS.peer.trim()}`,
   },
 ] as const;
 
@@ -92,7 +107,8 @@ export function defaultPromptFiles(): Array<{ relativePath: string; markdown: st
     relativePath: definition.file,
     // Each .slp file is the editable system prompt for that role; peer YAML front matter is the summary injected into the Lead.
     // Root roles have no tier; peers declare one so the Lead's catalog shows where each may be scheduled.
-    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n${"tier" in definition ? `tier: ${definition.tier}\n` : ""}---\n\n# Workflow\n\n${definition.workflow}\n`,
+    // Peers also declare a kind, which decides the stages they may join and whether they can write.
+    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n${"kind" in definition ? `kind: ${definition.kind}\n` : ""}${"tier" in definition ? `tier: ${definition.tier}\n` : ""}---\n\n# Workflow\n\n${definition.workflow}\n`,
   }));
 }
 

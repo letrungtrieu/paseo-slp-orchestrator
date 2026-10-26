@@ -4,6 +4,7 @@ import { z } from "zod";
 import { SLP_ROLES, type SlpRole } from "../../shared/roles";
 import {
   DelegationSubmissionSchema,
+  PipelineBriefSchema,
   PipelineEnvelopeSchema,
   StageReportSubmissionSchema,
 } from "../../shared/pipeline";
@@ -14,7 +15,7 @@ export const BUS_TOOL_DEFINITIONS = {
   // Each Lead defines the stage pipeline for its dedicated feature worktree; the QA Lead defines QA pipelines on the QA branch.
   slp_define_pipeline: {
     roles: ["master_lead", "qa_lead"],
-    description: "Define the stage pipeline(s) for this Lead's feature worktree, or the QA Lead's verification pipeline on the QA branch.",
+    description: "Define the stage pipeline(s) for this Lead's feature worktree ([planning with advisor peers?] -> one implement stage with exactly one developer peer; pass brief when there is no planning stage), or the QA Lead's verification pipeline on the QA branch (verify stages: QA peers grade, at most one developer fixes).",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -47,7 +48,7 @@ export const BUS_TOOL_DEFINITIONS = {
   slp_notify: {
     // Leads can notify sibling Leads (cross-feature API/flow alignment) or stage Peers; Peers can notify their Lead or sibling stage Peers.
     roles: ["master_lead", "qa_lead", "peer"],
-    description: "Send a one-way notification (no reply expected, does not block) to a sibling Lead or a stage participant. Use slp_ask if you need an answer.",
+    description: "Send a one-way notification (no reply expected, does not block). Leads reach sibling Leads and their stage peers; peers reach only their Lead. Use slp_ask if you need an answer.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       message: z.string().trim().min(1),
@@ -56,7 +57,7 @@ export const BUS_TOOL_DEFINITIONS = {
   // Blocking question: returns the answer itself, or a pending notice to resume with slp_await_answer.
   slp_ask: {
     roles: ["master_lead", "qa_lead", "peer"],
-    description: "Ask a sibling Lead or stage participant a question you need answered before you can proceed. Blocks up to ~40 seconds and returns the answer; if it returns 'no answer yet', call slp_await_answer to keep waiting.",
+    description: "Ask a question you need answered before you can proceed. Leads ask sibling Leads or their stage peers; peers ask only their Lead. Blocks up to ~40 seconds and returns the answer; if it returns 'no answer yet', call slp_await_answer to keep waiting.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       question: z.string().trim().min(1),
@@ -78,26 +79,28 @@ export const BUS_TOOL_DEFINITIONS = {
   slp_stage_report: {
     // Stage peers submit structured findings or blockers via slp_stage_report.
     roles: ["peer"],
-    description: "Submit this peer's findings or blocker for the current stage.",
+    description: "Submit this peer's result or blocker for the current stage. QA peers must include scorecard: one entry per brief criterion { criterionId, status: pass|fail|blocked, reason, evidence }, plus optional observations outside the criteria.",
     input: StageReportSubmissionSchema,
   },
   slp_approve_stage: {
     roles: ["master_lead", "qa_lead"],
-    description: "Approve the current stage after reviewing peer reports and the worktree diff to advance the pipeline.",
+    description: "Approve the current stage to advance the pipeline. Approving a planning stage requires brief, which is then locked for every later stage.",
     input: z.object({
       summary: z.string().trim().min(1),
+      brief: PipelineBriefSchema.optional(),
     }),
   },
   slp_stage_rework: {
     roles: ["master_lead", "qa_lead"],
-    description: "Request another pass from selected stage peers with concrete feedback.",
+    description: "Request another pass from selected stage peers with concrete feedback. Limited per stage by the run's rework cap; at the cap, call slp_escalate so the human decides.",
     input: z.object({
       agentIds: z.array(z.string().trim().min(1)).default([]),
       feedback: z.string().trim().min(1),
     }),
   },
+  // The QA Lead needs it too: after the rework cap, escalating is how the scorecard reaches the human.
   slp_escalate: {
-    roles: ["master_lead", "peer"],
+    roles: ["master_lead", "qa_lead", "peer"],
     description: "Escalate a blocked stage or implementation decision to the Lead.",
     input: z.object({ reason: z.string().trim().min(1) }),
   },
@@ -112,6 +115,12 @@ export const BUS_TOOL_DEFINITIONS = {
     roles: ["supervisor"],
     description: "Send the Lead's result back because acceptance criteria are not met.",
     input: z.object({ feedback: z.string().trim().min(1) }),
+  },
+  // Closes the loop of a rework-capped stage: the human decided in chat, the Supervisor hands that decision to the Lead.
+  slp_relay_decision: {
+    roles: ["supervisor"],
+    description: "Relay the human's decision on a pipeline that reached its rework cap back to its Lead (resets the stage's rework counter).",
+    input: z.object({ pipelineId: pipelineIdField, decision: z.string().trim().min(1) }),
   },
   slp_present_to_manager: {
     roles: ["supervisor"],

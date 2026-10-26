@@ -23,7 +23,8 @@ describe("dynamic pipeline edge cases", () => {
   });
 
   it("uses the stored-spec stage briefing when the native Forked Lead adapter is unavailable", async () => {
-    const flow = await createFlow({ mode: "FULL_AUTO", forker: "unwired" });
+    // The degraded path only exists when the run asked for forking in the first place.
+    const flow = await createFlow({ mode: "FULL_AUTO", forker: "unwired", orchestration: { forkPeers: true } });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
 
     expect(flow.run(runId).forkDegradedReason).toBeTruthy();
@@ -53,10 +54,10 @@ describe("dynamic pipeline edge cases", () => {
     await flow.deliverMail(runId);
     const initialStage = currentStage(flow, runId, pipelineId);
     const reviewerId = flow.agentId(runId, "reviewer", initialStage.id);
-    const deadDeveloperId = flow.agentId(runId, "developer", initialStage.id);
+    const deadDeveloperId = flow.agentId(runId, "architect", initialStage.id);
     const originalCoordinatorId = initialStage.forkedLeadAgentId!;
 
-    await reportPeer(flow, runId, pipelineId, "reviewer", "Reviewer completed analysis before developer crashed.");
+    await reportPeer(flow, runId, pipelineId, "reviewer", "Reviewer completed analysis before the architect crashed.");
     await flow.gateway.archive(deadDeveloperId);
     flow.gateway.prompts.length = 0;
 
@@ -80,7 +81,7 @@ describe("dynamic pipeline edge cases", () => {
     const stageAfterCoordinatorRevival = currentStage(flow, runId, pipelineId);
     const revivedCoordinatorId = stageAfterCoordinatorRevival.forkedLeadAgentId!;
     expect(revivedCoordinatorId).not.toBe(originalCoordinatorId);
-    expect(flow.gateway.promptsTo(revivedCoordinatorId).at(-1)).toContain("Reviewer completed analysis before developer crashed.");
+    expect(flow.gateway.promptsTo(revivedCoordinatorId).at(-1)).toContain("Reviewer completed analysis before the architect crashed.");
     expect(flow.run(runId).agents[revivedCoordinatorId].awaitingTool).toBe("slp_approve_stage");
   });
 

@@ -2,7 +2,9 @@
 // Called both from the lifecycle event (low latency) and from the sweeper (catches missed events).
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { AgentRecord, Run } from "../../shared/state";
+import type { PeerKind } from "../../shared/project-prompts";
 import { isPipelineLeadRole } from "../../shared/roles";
+import { agentPeerKind } from "../pipeline/stage-shape";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
 import { isKiroProvider } from "../runtime/agent-gateway-helpers";
@@ -127,6 +129,8 @@ export async function handlePermissionRequest(
       stageId: agentRecord.stageId,
       stageActive,
       archived: false,
+      // Advisors and QA graders never write; only the stage's developer peer gets the worktree grant.
+      peerKind: agentRecord.role === "peer" ? safePeerKind(run, agentRecord.projectRole) : null,
       finalizingPipeline,
       additionalWritableRoots:
         agentRecord.role === "master_lead"
@@ -152,5 +156,14 @@ export async function handlePermissionRequest(
       summary: decision.message,
       outcome: "blocked",
     });
+  }
+}
+
+// A role missing from the snapshot (renamed between runs) falls back to read-only rather than throwing inside the hook.
+function safePeerKind(run: Run, projectRole: string | null): PeerKind {
+  try {
+    return agentPeerKind(run, projectRole);
+  } catch {
+    return "advisor";
   }
 }

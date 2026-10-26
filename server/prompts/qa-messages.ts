@@ -2,6 +2,7 @@
 import type { PipelineState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import type { SiblingLeadSummary } from "./messages";
+import { formatBrief } from "../pipeline/stage-briefing-sections";
 
 export interface QaLeadBriefingContext {
   acceptanceCriteria: string;
@@ -45,7 +46,9 @@ function mergedFeatureSummary(pipeline: PipelineState): string {
     `#### Feature Pipeline: ${pipeline.name} (\`${pipeline.id}\`)`,
     `- **Merged**: \`${pipeline.branch ?? "n/a"}\` (commit \`${pipeline.mergedCommit ?? "n/a"}\`)`,
     `- **Lead summary and heavy-verification hand-offs**:\n${pipeline.finalReport ?? "No summary provided."}`,
-  ].join("\n");
+    // The locked brief is what QA grades, so it travels with the merge summary.
+    pipeline.brief ? `- **Locked brief (grade these criteria)**:\n${formatBrief(pipeline.brief)}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 // Sent when the last feature branch lands: the QA branch now holds the whole conflict-free result.
@@ -57,8 +60,8 @@ export function qaHandoverBriefing(run: Run, mergedFeaturePipelines: readonly Pi
     [
       "## Next Action for QA Lead",
       "1. Inspect the merged QA branch and the hand-off items above.",
-      "2. Call slp_define_pipeline now with your QA stages (omit worktree; QA pipelines always run in the QA worktree). Stage peers fork from your session.",
-      "3. Supervise the stages, approve the last one, close it with slp_finalize_pipeline, then call slp_report with a pass/fail line for every product spec scenario.",
+      "2. Call slp_define_pipeline now with your verify stage(s) (omit worktree; QA pipelines always run in the QA worktree): QA peers grade the brief criteria and product spec scenarios, plus at most one developer peer per stage who fixes when you ask.",
+      "3. Decide from the scorecards, approve the last stage, close it with slp_finalize_pipeline, then call slp_report with the final scorecard (pass/fail per criterion and scenario).",
     ].join("\n"),
   ].join("\n\n");
 }
@@ -68,7 +71,7 @@ export function qaReworkNotice(feedback: string, run: Run): string {
   return [
     `The Supervisor requested rework of the verified result on the QA branch \`${run.integrationBranch}\` (\`${run.devCwd}\`):`,
     feedback,
-    "Define a new QA pipeline with a new name via slp_define_pipeline containing the fix stages (developer peers) and the re-verification stages, close it with slp_finalize_pipeline, then call slp_report again.",
+    "Define a new QA pipeline with a new name via slp_define_pipeline: a verify stage with QA graders and one developer peer who fixes when you send slp_stage_rework. Close it with slp_finalize_pipeline, then call slp_report again.",
   ].join("\n");
 }
 

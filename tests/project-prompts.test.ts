@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { loadProjectPrompts } from "../server/project-prompts/load";
 import { parseRoleMarkdown } from "../server/project-prompts/markdown";
 import { systemPromptFor } from "../server/prompts/system-prompts";
+import { peerKindOf } from "../shared/project-prompts";
 import { useTemporaryDirectories } from "./helpers/temp-directory";
 
 const createDirectory = useTemporaryDirectories();
@@ -13,6 +14,7 @@ describe("project prompt initialization", () => {
     const repoPath = await createDirectory("project-prompts");
     const configuration = await loadProjectPrompts(repoPath);
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "architect",
       "developer",
       "qa-engineer",
       "reviewer",
@@ -22,8 +24,8 @@ describe("project prompt initialization", () => {
     expect(await readFile(join(repoPath, ".slp/SUPERVISOR.md"), "utf8")).toContain("role: supervisor");
     // Merged-build verification belongs to the QA Lead, so no separate UAT peer is seeded.
     await expect(readFile(join(repoPath, ".slp/peers/END_USER_UAT.md"), "utf8")).rejects.toThrow();
-    // Business-role metadata must not prescribe a permanent pipeline kind.
-    expect(await readFile(join(repoPath, ".slp/peers/QA_ENGINEER.md"), "utf8")).not.toContain("kind:");
+    // Peer files declare what the peer may do (kind), which decides its stage and write access.
+    expect(await readFile(join(repoPath, ".slp/peers/QA_ENGINEER.md"), "utf8")).toContain("kind: qa");
   });
 
   it("preserves a customized workflow across repeated initialization", async () => {
@@ -44,7 +46,7 @@ describe("project prompt initialization", () => {
     await mkdir(join(repoPath, ".slp"));
     await writeFile(join(repoPath, ".slp/comm-log.jsonl"), "historic log");
     await writeFile(join(repoPath, ".slp/MASTER_SPEC.md"), "historic spec without YAML");
-    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(4);
+    expect((await loadProjectPrompts(repoPath)).peers).toHaveLength(5);
     expect(await readFile(join(repoPath, ".slp/comm-log.jsonl"), "utf8")).toBe("historic log");
   });
 
@@ -52,7 +54,7 @@ describe("project prompt initialization", () => {
     const repoPath = await createDirectory("project-prompts");
     const configurations = await Promise.all([loadProjectPrompts(repoPath), loadProjectPrompts(repoPath)]);
     expect(configurations[0]).toEqual(configurations[1]);
-    expect(configurations[0].peers).toHaveLength(4);
+    expect(configurations[0].peers).toHaveLength(5);
   });
 });
 
@@ -105,6 +107,7 @@ describe("Markdown role discovery", () => {
     expect(configuration.supervisor.role).toBe("supervisor");
     expect(configuration.lead.role).toBe("master-lead");
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "architect",
       "developer",
       "qa-engineer",
       "reviewer",
@@ -119,6 +122,17 @@ describe("Markdown role discovery", () => {
     await loadProjectPrompts(repoPath);
     await writeFile(join(repoPath, ".slp/peers/OTHER.md"), "---\nrole: reviewer\ndescription: Duplicate\n---\nReview.");
     await expect(loadProjectPrompts(repoPath)).rejects.toThrow(/duplicate role 'reviewer'.*\.slp\/peers/);
+  });
+
+  it("infers a peer kind from the role id when the front matter has none, and rejects unknown kinds", () => {
+    const parseKindOf = (frontMatter: string) =>
+      peerKindOf(parseRoleMarkdown(`---\n${frontMatter}\ndescription: Example\n---\nWork.`, ".slp/peers/X.md"));
+    expect(parseKindOf("role: code-reviewer")).toBe("advisor");
+    expect(parseKindOf("role: unity-test-automation")).toBe("qa");
+    expect(parseKindOf("role: gameplay-engineer")).toBe("developer");
+    // An explicit kind always wins over the name heuristic.
+    expect(parseKindOf("role: code-reviewer\nkind: developer")).toBe("developer");
+    expect(() => parseRoleMarkdown("---\nrole: x\ndescription: d\nkind: writer\n---\nWork.", ".slp/peers/X.md")).toThrow(".slp/peers/X.md");
   });
 
   it.each([
@@ -140,17 +154,19 @@ describe("project system prompt composition", () => {
     const defaultQaPrompt = systemPromptFor("peer", configuration, "qa-engineer");
     const defaultLeadPrompt = systemPromptFor("master_lead", configuration);
 
-    // Seeded .slp files contain the default metrics, methodology, anti-bloat, and QA screenshot rules out of the box.
-    expect(defaultDeveloperPrompt).toContain("STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE");
-    expect(defaultDeveloperPrompt).toContain("CROSS-STAGE PEER LIFECYCLE");
-    expect(defaultDeveloperPrompt).toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
-    expect(defaultDeveloperPrompt).toContain("I used technique A to solve problem B");
-    expect(defaultDeveloperPrompt).toContain("I did not use technique F because G");
-    expect(defaultQaPrompt).toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
-    expect(defaultQaPrompt).toContain("screenshot evidence");
-    expect(defaultQaPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
-    expect(defaultDeveloperPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
-    expect(defaultLeadPrompt).toContain("system garbage/bloat");
+    // Seeded workflows carry the calm anti-over-engineering rules instead of capitalised mandates.
+    expect(defaultDeveloperPrompt).toContain("Keep it simple: build only what the acceptance criteria and the locked brief require.");
+    expect(defaultDeveloperPrompt).toContain("Build what the locked brief describes");
+    expect(defaultDeveloperPrompt).toContain("Talk only to your Lead");
+    expect(defaultQaPrompt).toContain("scorecard entry per criterion");
+    expect(defaultQaPrompt).not.toContain("Build what the locked brief describes");
+    expect(defaultDeveloperPrompt).not.toContain("scorecard entry per criterion");
+    expect(defaultLeadPrompt).toContain("Pipeline shape (enforced): [planning]? -> implement.");
+    // The Lead's catalog shows each peer's kind because it decides which stage the peer may join.
+    expect(defaultLeadPrompt).toContain("(Architect, kind: advisor)");
+    for (const seededPrompt of [defaultDeveloperPrompt, defaultQaPrompt, defaultLeadPrompt]) {
+      expect(seededPrompt).not.toMatch(/MANDATORY|STRICT TECHNICAL METRICS/);
+    }
 
     // Customizing .slp workflows replaces the prompt body cleanly without any hardcoded contract wrappers remaining.
     const qa = configuration.peers.find((peer) => peer.role === "qa-engineer")!;
@@ -168,9 +184,9 @@ describe("project system prompt composition", () => {
     expect(customLeadPrompt).toContain("CUSTOM_LEAD_WORKFLOW");
     expect(customLeadPrompt).not.toContain("PRIVATE_QA_WORKFLOW");
     expect(customQaPrompt).toContain("PRIVATE_QA_WORKFLOW");
-    expect(customQaPrompt).not.toContain("MANDATORY QA VERIFICATION & VISUAL EVIDENCE CONTRACT");
+    expect(customQaPrompt).not.toContain("scorecard entry per criterion");
     expect(customDeveloperPrompt).toContain("CUSTOM_DEV_WORKFLOW");
-    expect(customDeveloperPrompt).not.toContain("MANDATORY DEVELOPER METHODOLOGY, STEP-BY-STEP METRICS & TRADE-OFF ARGUMENT CONTRACT");
+    expect(customDeveloperPrompt).not.toContain("Build what the locked brief describes");
     expect(customDeveloperPrompt).not.toContain("ROLE CONTRACT:");
     expect(customDeveloperPrompt).not.toContain("RUNTIME CONTRACT PRIORITY:");
   });

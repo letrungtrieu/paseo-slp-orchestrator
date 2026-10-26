@@ -58,6 +58,10 @@ function resolveMergeRoute(run: Run, caller: AgentRecord, recipient: AgentRecord
   if (!isPipelineParticipant || !recipient || !isRecipientInPipeline) {
     throw new ToolError("Select an active peer or Lead of this pipeline, or another pipeline's Lead.");
   }
+  // The single-hub rule also holds while merging: a peer explains its change to the Lead, not to another peer.
+  if (caller.role === "peer" && !pipelineCoordinatorIds.has(recipientId)) {
+    throw new ToolError("Peers can only contact their Lead.");
+  }
   const callerStageName = pipeline.stages.find((candidate) => candidate.id === caller.stageId)?.name ?? finalStage.name;
   return {
     scope: "merge",
@@ -85,12 +89,16 @@ function resolveStageRoute(run: Run, caller: AgentRecord, recipient: AgentRecord
   const isCurrentStageCaller = caller.stageId === currentStage.id && currentStageParticipantIds.has(caller.agentId);
   const isPriorStagePeerCaller = caller.role === "peer" && priorStagePeerIds.has(caller.agentId);
   if (!isCurrentStageCaller && !isPriorStagePeerCaller) throw new ToolError("Agent is not a participant of this pipeline.");
-  // Current-stage participants may reach their stage and live earlier-stage peers; earlier-stage peers may only answer back to the running stage.
-  const allowedRecipientIds = isCurrentStageCaller
-    ? new Set([...currentStageParticipantIds, ...priorStagePeerIds])
-    : currentStageParticipantIds;
+  const leadIds = new Set([currentStage.forkedLeadAgentId, pipeline.leadAgentId].filter((id): id is string => Boolean(id)));
+  // Peers talk only to their Lead: peer-to-peer threads were where scope crept in, so the Lead is the single hub.
+  // The Lead may reach its current peers and live earlier-stage peers (for example the developer after planning).
+  const allowedRecipientIds = caller.role === "peer"
+    ? leadIds
+    : new Set([...currentStageParticipantIds, ...priorStagePeerIds]);
   if (!recipient || recipient.archivedAt || !allowedRecipientIds.has(recipientId) || recipientId === caller.agentId) {
-    throw new ToolError("Select another active participant of your current stage or a peer from an earlier stage of this pipeline.");
+    throw new ToolError(caller.role === "peer"
+      ? "Peers can only contact their Lead. Address the stage Lead's agent id."
+      : "Select an active peer of this pipeline or a sibling Lead.");
   }
   const callerStageName = pipeline.stages.find((candidate) => candidate.id === caller.stageId)?.name ?? currentStage.name;
   const isRecipientPriorStagePeer = priorStagePeerIds.has(recipientId);

@@ -1,4 +1,5 @@
 // Safely archives active SLP runs without destroying worktrees and restores archived runs back into execution.
+import { awaitsLeadRecovery } from "../../shared/pipeline";
 import { existsSync } from "node:fs";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { Run, RunStatus } from "../../shared/state";
@@ -327,7 +328,7 @@ export async function restoreRun(ctx: PipelineContext, runId: string): Promise<R
 
     // Reopen paused pipelines that were interrupted by archival so recoverPipelines can respawn their stage cohorts.
     for (const mutablePipeline of Object.values(mutableRun.pipelines)) {
-      if (mutablePipeline.status === "paused" && !mutablePipeline.gate) {
+      if (awaitsLeadRecovery(mutablePipeline)) {
         mutablePipeline.status = "starting";
         mutablePipeline.pausedReason = null;
         mutablePipeline.updatedAt = restoredAt;

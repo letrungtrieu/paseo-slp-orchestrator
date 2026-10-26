@@ -2,6 +2,13 @@
 import { z } from "zod";
 
 export const ProjectRoleIdSchema = z.string().regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/);
+
+// What a peer is allowed to do decides where the Lead may schedule it: advisors only discuss the plan,
+// the single developer writes code, QA peers grade the result against the locked brief.
+export const PEER_KINDS = ["advisor", "developer", "qa"] as const;
+export const PeerKindSchema = z.enum(PEER_KINDS);
+export type PeerKind = z.infer<typeof PeerKindSchema>;
+
 export const ProjectRoleSchema = z.object({
   role: ProjectRoleIdSchema,
   name: z.string().min(1),
@@ -9,6 +16,8 @@ export const ProjectRoleSchema = z.object({
   // Null means inherit the corresponding model/thinking choice from the run's SLP form.
   model: z.string().nullable().default(null),
   thinking: z.string().nullable().default(null),
+  // Null when the front matter has no `kind:`; peerKindOf then infers it from the role id for older projects.
+  kind: PeerKindSchema.nullable().default(null),
   // Preserve all front matter for the Lead, while keeping the actual peer workflow separate.
   frontMatter: z.string(),
   workflow: z.string().min(1),
@@ -25,3 +34,15 @@ export const ProjectPromptConfigSchema = z.object({
   peers: z.array(ProjectRoleSchema),
 });
 export type ProjectPromptConfig = z.infer<typeof ProjectPromptConfigSchema>;
+
+// Projects created before `kind:` existed still need a sensible kind, so the role id decides:
+// review/design/research style names advise, test/QA names grade, everything else writes code.
+const ADVISOR_ROLE_PATTERN = /(review|audit|architect|design|advis|research|consult|analyst)/;
+const QA_ROLE_PATTERN = /(^|-)(qa|test|tester|testing|verif|playtest)/;
+
+export function peerKindOf(role: Pick<ProjectRole, "role" | "kind">): PeerKind {
+  if (role.kind) return role.kind;
+  if (QA_ROLE_PATTERN.test(role.role)) return "qa";
+  if (ADVISOR_ROLE_PATTERN.test(role.role)) return "advisor";
+  return "developer";
+}

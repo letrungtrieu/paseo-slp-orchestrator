@@ -62,7 +62,10 @@ describe("dynamic pipeline startup", () => {
       const peerCreationSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === peerAgentId)?.spec;
       expect(peerCreationSpec?.workspaceId).toBe(pipeline.workspaceId);
     }
-    expect(stage.peerAgentIds.map((agentId) => run.agents[agentId].projectRole)).toEqual(["reviewer", "developer"]);
+    expect(stage.peerAgentIds.map((agentId) => run.agents[agentId].projectRole)).toEqual(["reviewer", "architect"]);
+    // Stage kinds are inferred from the peers' kinds and persisted so the engine can enforce them.
+    expect(pipeline.stages.map((pipelineStage) => pipelineStage.kind)).toEqual(["planning", "implement"]);
+    expect(pipeline.brief).toBeNull();
     expect(stage.peerAgentIds.every((agentId) => run.agents[agentId].pipelineId === pipelineId)).toBe(true);
     expect(stage.peerAgentIds.every((agentId) => run.agents[agentId].stageId === stage.id)).toBe(true);
   });

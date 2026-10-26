@@ -41,14 +41,15 @@ describe("peer question audit RPC", () => {
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const reviewerId = flow.agentId(runId, "reviewer", stage.id);
-    const developerId = flow.agentId(runId, "developer", stage.id);
-    await askAndAnswer(flow, reviewerId, developerId, "Which retry cap applies?", "3 attempts.");
-    await flow.callAs(reviewerId, "slp_ask", { toAgentId: developerId, question: "Still open?" });
+    // Peers may only ask their Lead, so the audited exchange runs between the reviewer and the stage Lead.
+    const leadId = flow.agentId(runId, "forked_lead", stage.id);
+    await askAndAnswer(flow, reviewerId, leadId, "Which retry cap applies?", "3 attempts.");
+    await flow.callAs(reviewerId, "slp_ask", { toAgentId: leadId, question: "Still open?" });
 
     const audit = await rpc.call<{ questions: PeerQuestionView[]; metrics: PeerQuestionMetrics }>(listPeerQuestionsRpc, { runId, limit: 50 });
     expect(audit.questions).toHaveLength(2);
     expect(audit.questions.find((view) => view.question === "Which retry cap applies?")).toMatchObject({
-      status: "answered", answer: "3 attempts.", fromLabel: "reviewer", toLabel: "developer",
+      status: "answered", answer: "3 attempts.", fromLabel: "reviewer", toLabel: "master_lead/Flow test #1",
     });
     expect(audit.metrics).toMatchObject({ total: 2, answered: 1, pending: 1, answerRate: 1 });
 
@@ -82,6 +83,7 @@ describe("run RPCs", () => {
     // Project selection prepares editable files but must not create a run or a pipeline.
     expect(configuration.directory).toBe(`${flow.repoPath}/.slp`);
     expect(configuration.peers.map((peer) => peer.role).sort()).toEqual([
+      "architect",
       "developer",
       "qa-engineer",
       "reviewer",

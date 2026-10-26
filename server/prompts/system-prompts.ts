@@ -1,6 +1,6 @@
 // Compose the agent system prompt directly from project-authored .slp Markdown files and dynamic stage context.
 import { isPipelineLeadRole, type SlpRole } from "../../shared/roles";
-import type { ProjectPromptConfig } from "../../shared/project-prompts";
+import { peerKindOf, type ProjectPromptConfig } from "../../shared/project-prompts";
 import { defaultProjectPrompts, peerRole, qaLeadDefinition } from "../project-prompts/defaults";
 import { DEFAULT_WORKFLOWS } from "./default-workflows";
 
@@ -60,7 +60,8 @@ export function systemPromptFor(
     promptSections.push("AVAILABLE PROJECT PEERS (.slp/peers summary metadata only; select by role ID):");
     for (const peerDefinition of projectPrompts.peers) {
       promptSections.push(
-        `Role ID: ${peerDefinition.role} (${peerDefinition.name}) — ${peerDefinition.description}\nSOURCE: ${peerDefinition.sourcePath}\n---\n${peerDefinition.frontMatter}\n---`,
+        // The kind is printed even when inferred, because it decides which stage the Lead may put the peer in.
+        `Role ID: ${peerDefinition.role} (${peerDefinition.name}, kind: ${peerKindOf(peerDefinition)}) — ${peerDefinition.description}\nSOURCE: ${peerDefinition.sourcePath}\n---\n${peerDefinition.frontMatter}\n---`,
       );
     }
   }

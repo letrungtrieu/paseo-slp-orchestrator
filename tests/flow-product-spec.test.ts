@@ -78,7 +78,7 @@ describe("product spec phase", () => {
 
   it("tells the Supervisor to get explicit human approval of the five-section spec before delegating", () => {
     const supervisorPrompt = systemPromptFor("supervisor");
-    expect(supervisorPrompt).toContain("PRODUCT SPEC BEFORE DELEGATION");
+    expect(supervisorPrompt).toContain("Product spec before delegation");
     expect(supervisorPrompt).toContain("explicitly approves");
     expect(supervisorPrompt).toContain("Given <context> When <user action> Then <visible result>");
   });

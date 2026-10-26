@@ -9,6 +9,7 @@ import {
   type ShellWatchdogSettings,
   type SlpSettings,
 } from "../shared/settings";
+import type { OrchestrationSettings } from "../shared/orchestration";
 import type { useProviderCatalog } from "./use-provider-catalog";
 import { materializeRoleDefaults, resolveRoleProviderSelection } from "./models/provider-selection";
 
@@ -51,6 +52,10 @@ export function useSlpSettings(catalog: ReturnType<typeof useProviderCatalog>) {
     changeShellWatchdog: (shellWatchdog: ShellWatchdogSettings) => {
       // Persist the shell heartbeat timeout immediately so running sweepers pick up the updated threshold.
       saveConfiguration({ ...configuration, shellWatchdog });
+    },
+    changeOrchestration: (orchestration: OrchestrationSettings) => {
+      // Applies to runs started afterwards; running runs keep the policy they snapshotted at start.
+      saveConfiguration({ ...configuration, orchestration });
     },
   };
 }

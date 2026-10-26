@@ -2,6 +2,7 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { RunModeSchema } from "./roles";
+import { OrchestrationSettingsSchema } from "./orchestration";
 
 export const PROVIDER_ROLES = ["supervisor", "lead", "peer"] as const;
 export type ProviderRole = (typeof PROVIDER_ROLES)[number];
@@ -33,6 +34,8 @@ export const SlpSettingsSchema = z.object({
   }).prefault({}),
   // Heartbeat watchdog configuration for detecting silent/hung peer shell commands without burning model tokens.
   shellWatchdog: ShellWatchdogSettingsSchema.prefault({}),
+  // Peer forking and the rework cap are snapshotted into each run when it starts.
+  orchestration: OrchestrationSettingsSchema.prefault({}),
 });
 export type SlpSettings = z.infer<typeof SlpSettingsSchema>;
 

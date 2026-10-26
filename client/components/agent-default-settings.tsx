@@ -1,6 +1,7 @@
 import { Text, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { DEFAULT_SLP_SETTINGS } from "../../shared/settings";
+import { OrchestrationSettingsFields } from "./orchestration-settings-fields";
 import type { UiStyles } from "../styles";
 import type { useProviderCatalog } from "../use-provider-catalog";
 import type { useSlpSettings } from "../use-slp-settings";
@@ -112,6 +113,9 @@ export function AgentDefaultSettings({ styles, theme, catalog, settings }: Agent
           }}
         />
       </View>
+      <OrchestrationSettingsFields styles={styles} theme={theme} disabled={disabled}
+        orchestration={settings.configuration.orchestration ?? DEFAULT_SLP_SETTINGS.orchestration}
+        onChange={settings.changeOrchestration} />
       {/* Only actionable failures add text; successful selections remain compact and save automatically. */}
       {settings.error ? (
         <View style={styles.stack}>

@@ -131,10 +131,25 @@ describe("slp-manager project skill provisioning", () => {
       defaultProjectPrompts().peers.map((seededPeer) => [seededPeer.role, parseYaml(seededPeer.frontMatter).tier]),
     );
     expect(seededPeerTiers).toEqual({
+      "architect": "feature",
       "developer": "feature",
       "qa-engineer": "integration",
       "reviewer": "feature",
       "security-reviewer": "feature",
+    });
+  });
+
+  // Kinds decide stage placement and write access, so every seed declares one explicitly.
+  it("seeds exactly one developer, one QA grader and planning advisors", () => {
+    const seededPeerKinds = Object.fromEntries(
+      defaultProjectPrompts().peers.map((seededPeer) => [seededPeer.role, parseYaml(seededPeer.frontMatter).kind]),
+    );
+    expect(seededPeerKinds).toEqual({
+      "architect": "advisor",
+      "developer": "developer",
+      "qa-engineer": "qa",
+      "reviewer": "advisor",
+      "security-reviewer": "advisor",
     });
   });
 

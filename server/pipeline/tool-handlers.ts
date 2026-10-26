@@ -10,7 +10,7 @@ import { finalizePipeline } from "./finalize-pipeline";
 import { createPipelineWorktree } from "./pipeline-workspaces";
 import { delegate, presentToManager, report, requestRework } from "./run-lifecycle";
 import { listPipelines, readPipeline, readRun } from "./read-tools";
-import { approveStage, resumePipeline } from "./stage-control";
+import { approveStage, relayHumanDecision, resumePipeline } from "./stage-control";
 import { answerQuestion } from "./peer-messaging/answer-question";
 import { askQuestion } from "./peer-messaging/ask-question";
 import { awaitAnswer } from "./peer-messaging/await-answer";
@@ -41,11 +41,12 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_await_answer: (ctx, caller, input, abortSignal) => awaitAnswer(ctx, caller, input, abortSignal),
   slp_answer: (ctx, caller, input) => answerQuestion(ctx, caller, input),
   slp_stage_report: (ctx, caller, input) => submitStageReport(ctx, caller, input),
-  slp_approve_stage: (ctx, caller, input) => approveStage(ctx, caller, input.summary),
+  slp_approve_stage: (ctx, caller, input) => approveStage(ctx, caller, input),
   slp_stage_rework: (ctx, caller, input) => requestStageRework(ctx, caller, input),
   slp_escalate: (ctx, caller, input) => escalateStage(ctx, caller, input.reason),
   slp_delegate: (ctx, caller, input) => delegate(ctx, caller.runId, input),
   slp_request_rework: (ctx, caller, input) => requestRework(ctx, caller.runId, input.feedback),
+  slp_relay_decision: (ctx, caller, input) => relayHumanDecision(ctx, caller.runId, input.pipelineId, input.decision),
   slp_present_to_manager: (ctx, caller, input) => presentToManager(ctx, caller.runId, input.report),
   slp_report: (ctx, caller, input) => report(ctx, caller.runId, input.summary, caller.agentId),
   slp_revive_agent: (ctx, caller, input) => reviveAgentsOnDemand(ctx, caller, input),

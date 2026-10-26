@@ -17,7 +17,7 @@ Thay vì ép mọi dự án vào một quy trình cứng nhắc, SLP cho phép b
    - [5.2. Cấu hình Role Workflows trong thư mục `.slp/`](#52-cấu-hình-role-workflows-trong-thư-mục-slp)
    - [5.3. Cấu trúc định nghĩa Pipeline (`slp_define_pipeline`)](#53-cấu-trúc-định-nghĩa-pipeline-slp_define_pipeline)
    - [5.4. Lưu trữ dữ liệu SQLite & Biến môi trường (`SLP_HOME`)](#54-lưu-trữ-dữ-liệu-sqlite--biến-môi-trường-slp_home)
-6. [Bảng tra cứu toàn bộ 17 công cụ MCP (`slp-bus`)](#6-bảng-tra-cứu-toàn-bộ-17-công-cụ-mcp-slp-bus)
+6. [Bảng tra cứu công cụ MCP (`slp-bus`)](#6-bảng-tra-cứu-công-cụ-mcp-slp-bus)
 7. [Cơ chế tự phục hồi & Hồi sinh Agent (Self-Healing & Revival)](#7-cơ-chế-tự-phục-hồi--hồi-sinh-agent-self-healing--revival)
 8. [Hướng dẫn sử dụng & Bộ công cụ dòng lệnh (`tools/bin/`)](#8-hướng-dẫn-sử-dụng--bộ-công-cụ-dòng-lệnh-toolsbin)
 
@@ -70,7 +70,7 @@ flowchart TD
 | **`master_lead`** | 1 / Run | **Read / Write** (Trên nhánh tích hợp `integrationBranch` & quản lý Worktree) | Kiến trúc sư trưởng kiêm người sở hữu nhánh tích hợp. Khảo sát codebase, tạo Git worktree bằng `slp_create_worktree`, thiết kế cấu trúc Pipeline nhiều Stage bằng `slp_define_pipeline`, xử lý các trường hợp bế tắc (`escalate`), kiểm tra & merge kết quả từ pipeline worktree vào nhánh tích hợp (`slp_finalize_pipeline`) và báo cáo cho `Supervisor` (`slp_report`). |
 | **`forked_lead`** | 1 / Stage | **Read-Only** (Trên worktree của Pipeline) | Điều phối viên của **một Stage cụ thể** (được fork từ ngữ cảnh của `Master Lead` hoặc khởi tạo với đầy đủ trạng thái Pipeline). Theo dõi các Peer trong Stage, đối chiếu bằng chứng thực tế trong worktree với mục tiêu Stage (`stage.goal`), quyết định duyệt Stage (`slp_approve_stage`), yêu cầu Peer sửa lại (`slp_stage_rework`), hoặc báo cáo bế tắc lên `Master Lead` (`slp_escalate`). |
 | **`qa_lead`** | 1 / Run | **Read-Only** (Trong QA worktree = nhánh tích hợp `integrationBranch`) | Được spawn cùng lúc với các Lead, nhận cùng yêu cầu và danh sách Lead để chuẩn bị kế hoạch test (unit, automation, manual theo `.slp/standards/TEST_POLICY.md`). Mọi Lead merge nhánh của mình vào nhánh QA và tự giải quyết conflict. Sau khi feature cuối cùng merge xong, QA Lead định nghĩa pipeline QA ngay trong QA worktree, peer fork từ phiên của nó để test và sửa lỗi (QA Lead không tự sửa code), đóng pipeline bằng `slp_finalize_pipeline` rồi là người duy nhất được gọi `slp_report`. Yêu cầu rework của `Supervisor` cũng quay về QA Lead. |
-| **`peer`** | $1..N$ / Stage | **Read / Write** (Chia sẻ chung `pipeline.worktree`) | Chuyên gia thực thi công việc trong một Stage theo đúng quy trình trong `.slp/peers/<ROLE>.md` (ví dụ: `developer`, `reviewer`, `qa-engineer`, `security-reviewer`...). Các Peer trong cùng một Stage có quyền ngang nhau, có thể hỏi nhau qua `slp_ask` (chờ câu trả lời), báo tin một chiều qua `slp_notify` và nộp bằng chứng hoàn thành qua `slp_stage_report`. |
+| **`peer`** | $1..N$ / Stage | **Read / Write** (Chia sẻ chung `pipeline.worktree`) | Chuyên gia thực thi công việc trong một Stage theo đúng quy trình trong `.slp/peers/<ROLE>.md` (ví dụ: `developer`, `reviewer`, `qa-engineer`, `security-reviewer`...). Mỗi Peer có một `kind`: `advisor` (chỉ tham gia Stage planning, chỉ đọc), `developer` (người duy nhất được ghi code trong Stage) hoặc `qa` (chấm bảng điểm, chỉ đọc). Peer **chỉ** liên lạc với Lead của mình qua `slp_ask` / `slp_notify` và nộp kết quả qua `slp_stage_report`. Xem mục 4.2. |
 
 ---
 
@@ -99,7 +99,7 @@ flowchart TD
 - Hook `before("agent.permission_Requested")` đóng vai trò tường lửa cấp ứng dụng:
   - Tự động **chấp thuận (allow)** mọi lời gọi tới MCP server `slp-bus`.
   - Tự động **từ chối (deny)** mọi thao tác sửa/ghi file từ `Supervisor` và `Forked Lead` (đảm bảo tính khách quan của người giám sát và điều phối viên Stage).
-  - Chỉ cho phép các `Peer` ghi file bên trong phạm vi `pipeline.worktree` được giao.
+  - Chỉ cho phép các `Peer` có `kind: developer` ghi file bên trong phạm vi `pipeline.worktree` được giao; Peer `advisor` và `qa` luôn chỉ đọc (kể cả lệnh shell có tính ghi như `git commit`, `rm`, `mkdir`).
 
 ---
 
@@ -127,9 +127,9 @@ sequenceDiagram
     FL->>Peer1: 6a. Gửi Stage Briefing (Markdown) [awaitTool: slp_stage_report]
     FL->>Peer2: 6b. Gửi Stage Briefing (Markdown) [awaitTool: slp_stage_report]
 
-    par Thực thi & Phản biện ngang hàng trong Stage k
-        Peer1->>Peer2: 7. slp_ask({ toAgentId, question }) — Peer1 bị chặn trong lời gọi tool
-        Peer2->>Peer1: 8. slp_answer({ questionId, answer }) — trả về làm kết quả của slp_ask
+    par Peer chỉ trao đổi với Lead (không có kênh Peer ↔ Peer)
+        Peer1->>FL: 7. slp_ask({ toAgentId: Lead, question }) — Peer1 bị chặn trong lời gọi tool
+        FL->>Peer1: 8. slp_answer({ questionId, answer }) — trả về làm kết quả của slp_ask
         Peer1->>FL: 9a. slp_stage_report({ status: "completed", summary, findings })
         Peer2->>FL: 9b. slp_stage_report({ status: "completed", summary, findings })
     end
@@ -215,7 +215,7 @@ sequenceDiagram
 | **QA Lead → Supervisor** | Báo cáo hoàn thành | `slp_report` | Chỉ được chấp nhận sau khi một pipeline QA đã đóng sau lần merge feature cuối cùng. Ghi `finalReport` vào SQLite, chuyển Run sang `reporting`, đẩy báo cáo vào `mailbox` của `Supervisor` kèm nghĩa vụ `awaitTool = "slp_present_to_manager"`. |
 | **Master Lead ↔ Forked Lead** | Khởi tạo Stage / Escalate / Resume | `slp_define_pipeline`<br/>`slp_escalate`<br/>`slp_resume_pipeline` | Khi Stage bị `escalate` (hoặc dừng ở Gate của chế độ `STEP_BY_STEP_DEBUG` / `SEMI_AUTO`), Pipeline chuyển sang `paused` và đánh thức `Master Lead` với nghĩa vụ `slp_resume_pipeline`. |
 | **Forked Lead ↔ Peers** | Giao việc / Báo cáo / Rework | `slp_stage_report`<br/>`slp_stage_rework`<br/>`slp_approve_stage` | Các Peer nộp bằng chứng qua `slp_stage_report`. Khi tất cả Peer hoàn tất, `Forked Lead` mới được đánh thức để duyệt (`slp_approve_stage`) hoặc yêu cầu làm lại (`slp_stage_rework`). |
-| **Peer ↔ Peer (Cùng Stage & Xuyên Stage)** | Thảo luận, Phản biện & Hỏi đáp giữa các công đoạn | `slp_ask` / `slp_answer` / `slp_notify` | Trao đổi trực tiếp giữa các Peer trong cùng một Stage, với `Forked Lead`, hoặc **giữa Peer ở Stage hiện tại với các Peer ở những Stage trước đã hoàn thành** trong cùng Pipeline. `slp_ask` là **câu hỏi chặn** (trả về câu trả lời ngay trong lời gọi tool); `slp_notify` là **thông báo một chiều** (không chờ, không cần trả lời). |
+| **Peer → Lead** | Hỏi đáp, thông báo | `slp_ask` / `slp_answer` / `slp_notify` | Peer chỉ được liên lạc với Lead của Stage; bus từ chối mọi tin nhắn Peer ↔ Peer. Lead có thể hỏi Peer trong pipeline của mình. `slp_ask` là **câu hỏi chặn** (trả về câu trả lời ngay trong lời gọi tool); `slp_notify` là **thông báo một chiều**. |
 
 ### 4.1. Cơ chế câu hỏi chặn (`slp_ask`) và thông báo (`slp_notify`)
 Bus chia tin nhắn giữa các agent thành hai loại có hành vi khác hẳn nhau:
@@ -240,30 +240,20 @@ Sổ `questions` là nguồn dữ liệu chính; việc đánh thức chỉ đ�
 tools/bin/slp-rpc slp.questions.list '{"runId":"<id>","limit":100}'
 ```
 
-### 4.2. Bốn quy tắc kỹ thuật bắt buộc trong `systemPrompt` của Lead và Peer:
-1. **Giao tiếp kỹ thuật bằng số liệu (Mandatory Data/Metrics Communication)**:
-   - Mọi thông điệp và báo cáo kỹ thuật (`slp_ask`, `slp_answer`, `slp_notify`, `slp_stage_report`, `slp_approve_stage`, `slp_stage_rework`, `slp_finalize_pipeline`, `slp_report`) **bắt buộc** phải trình bày rõ cho từng chức năng/hàm:
-     1. **Logic xử lý cụ thể (Exact Logic/Mechanism)**: Thuật toán, công thức hoặc luồng biến đổi trạng thái kèm đường dẫn file/dòng lệnh.
-     2. **Đầu vào kỳ vọng (Expected Inputs)**: Kiểu dữ liệu, miền giá trị, kích thước/đơn vị, điều kiện biên hoặc tiền điều kiện.
-     3. **Đầu ra kỳ vọng / Số liệu đo đạc (Expected Outputs / Metrics)**: Giá trị trả về, số lượng phần tử, sai số, độ phức tạp, hoặc nếu hàm không trả về con số thì **bắt buộc nêu rõ kết quả thực tế đạt được / chuyển đổi trạng thái quan sát được** khi chạy logic đó.
-2. **Quy tắc trình bày luận điểm phương pháp & so sánh đánh đổi bắt buộc cho Developer (`DEVELOPER_PEER_CONTRACT`)**:
-   - Ngoài số liệu `Input → Logic → Output`, mọi Peer đóng vai trò Developer (`developer`, `dev`, `implementer`, `software-engineer`...) **bắt buộc** phải trình bày rõ luận điểm về phương pháp đã sử dụng qua từng bước số liệu và lý do loại bỏ các phương án thay thế:
-     1. **Phương pháp đã chọn & Bài toán giải quyết**: Nêu rõ đã sử dụng kỹ thuật/thuật toán `A` nào để xử lý vấn đề `B` nào.
-     2. **Diễn tiến số liệu qua từng bước (Step-by-Step Quantitative Progression)**: Trình bày rõ dữ liệu đầu vào `C` biến đổi qua từng bước xử lý như thế nào để ra kết quả `D` trong thời gian thực thi hoặc độ phức tạp `E`.
-     3. **Lý do không chọn phương án khác (Rejected Alternatives & Trade-Off Rationale)**: Nêu rõ tại sao **không** sử dụng kỹ thuật `F` vì lý do kỹ thuật/số liệu `G` (ví dụ: độ phức tạp cao hơn, làm sai lệch biên hình học, thất bại ở edge case, hoặc sinh dữ liệu thừa).
-     - *Mẫu trình bày bắt buộc*: `"Tôi đã sử dụng kỹ thuật A để xử lý vấn đề B, kết quả là với dữ liệu C được kết quả D trong thời gian E (qua từng bước số liệu: Bước 1: ... -> Bước 2: ... -> Kết quả: ...). Tôi không sử dụng kỹ thuật F để xử lý tại vì G..."`
-3. **Lead kiểm duyệt chống dư thừa & rác hệ thống (Strict Lead Anti-Bloat & Data Hygiene Review)**:
-   - `Forked Lead` (trước khi gọi `slp_approve_stage`) và `Master Lead` (trước khi gọi `slp_finalize_pipeline` / `slp_report`) bắt buộc đối chiếu từng số liệu của Peer với `goal`:
-     - Kiểm tra dữ liệu/logic sinh ra có bị **thiếu** trường hợp nào hoặc **thừa** phần tử nào không.
-     - Kiểm tra có **gây rác hệ thống** (file tạm, artefact chụp màn hình vứt bừa bãi trong git status, state/cấu trúc dữ liệu trung gian dư thừa, dead code, log rác) hay không.
-     - Kiểm tra từng cấu trúc dữ liệu/hàm sinh ra **có thực sự cần thiết** để giải quyết bài toán hay không; nếu thừa phải gọi `slp_stage_rework` yêu cầu dọn sạch.
-4. **Quy tắc kiểm thử & bằng chứng chụp màn hình bắt buộc cho QA (`QA_PEER_CONTRACT`)**:
-   - Mọi Peer đóng vai trò QA (`qa-engineer`) bắt buộc thực hiện và báo cáo đủ 5 mục:
-     1. **Phân tích các trường hợp biên (Edge-Case Analysis)** dựa trên logic, đầu vào và đầu ra kỳ vọng (giá trị rỗng, cực trị, hình học suy biến/lõm, lỗi đầu vào, race condition...).
-     2. **Phân loại Kiểm thử Tự động vs. Kiểm thử Thủ công (Automation vs. Manual Test Matrix)** và trực tiếp chạy các bài test tự động kèm số liệu pass/fail.
-     3. **Đánh giá mức độ ảnh hưởng đến giao diện (UI / Visual Impact Assessment)**: Xác định rõ thay đổi có tác động tới UI/canvas/layout hay không và tác động như thế nào.
-     4. **Cơ chế chụp ảnh màn hình bằng chứng (Screenshot Evidence Mechanism)**: Tìm hoặc xây dựng cơ chế khởi chạy ứng dụng/cửa sổ thực tế hoặc kịch bản chụp màn hình tự động để lưu file ảnh bằng chứng xác thực kết quả hoàn thành hoặc ghi nhận lỗi (lưu ở đường dẫn kiểm chứng, không để lại file rác chưa đóng gói trong git worktree).
-     5. **Đối chiếu trực tiếp với Peer của Stage trước** qua `slp_ask` nếu phát hiện bất kỳ sai lệch nào giữa logic/số liệu đã báo cáo và hành vi thực tế.
+### 4.2. Brief khóa, một developer và bảng điểm QA (chống over-engineering)
+
+Các Peer và Lead từng làm quá phạm vi được giao. Thiết kế hiện tại dựa trên kinh nghiệm công bố của Anthropic (multi-agent research, harness planner/generator/evaluator) và Cognition (chỉ một luồng ghi code). Engine áp các quy tắc sau:
+
+1. **Hình dạng pipeline feature được kiểm tra khi `slp_define_pipeline`:** `[planning]? -> implement`.
+   - `planning` (tùy chọn, luôn là Stage đầu): chỉ Peer `kind: advisor` (ví dụ `architect`, `reviewer`, `security-reviewer`). Họ không viết code, chỉ thảo luận kỹ thuật/thiết kế với Lead và báo cáo đề xuất.
+   - `implement`: đúng **một** Peer `kind: developer`, không ai khác.
+   - Pipeline feature không tự chấm điểm: Stage `verify` chỉ có trong pipeline của QA Lead.
+2. **Brief khóa:** `{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }`. Lead đưa brief khi duyệt Stage planning (`slp_approve_stage({ summary, brief })`), hoặc truyền `pipeline.brief` ngay khi định nghĩa nếu không có planning. Sau đó brief bị khóa; developer phải làm đúng brief, muốn khác thì `slp_escalate`. Advisor bị archive khi planning đóng.
+3. **Bảng điểm QA:** Trong pipeline QA, Stage `verify` gồm Peer `kind: qa` (chấm điểm, chỉ đọc) và tối đa một developer sửa lỗi. QA nộp `slp_stage_report` kèm `scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]` và `observations` (những gì ngoài tiêu chí, không chấm). QA Lead đọc bảng điểm và **tự quyết định**: duyệt hoặc gửi `slp_stage_rework` cho developer; sau khi developer báo sửa xong, engine tự động yêu cầu QA chấm lại rồi mới đánh thức QA Lead. Developer trong Stage verify không nhận việc cho tới khi có yêu cầu sửa.
+4. **Giới hạn rework (mặc định 3 vòng/Stage, cấu hình được):** hết số vòng, `slp_stage_rework` bị từ chối; Lead phải duyệt hoặc `slp_escalate`. Khi đó pipeline dừng với `awaitingHumanDecision`, Supervisor nhận bảng điểm mới nhất, trình bày cho bạn và chuyển quyết định về Lead bằng `slp_relay_decision({ pipelineId, decision })` (bộ đếm vòng được đặt lại). Lead không thể tự `slp_resume_pipeline` trong lúc chờ.
+5. **Prompt mặc định:** bỏ các cụm `MANDATORY`/`MUST`, bỏ yêu cầu "trình bày phương án bị loại" và "liệt kê mọi edge case"; thay bằng quy tắc "chỉ làm những gì acceptance criteria và brief yêu cầu" và báo cáo bằng dữ kiện (file đã sửa, lệnh đã chạy, kết quả).
+
+> `.slp/` của dự án đã có từ trước **không tự cập nhật**. Peer cũ không có `kind:` sẽ được suy ra từ tên role (review/architect/design/research → advisor, qa/test → qa, còn lại → developer); nên khai báo `kind:` rõ ràng.
 
 ---
 
@@ -289,6 +279,8 @@ Bạn có thể mở cấu hình tại thanh bên **SLP Orchestrator** (màn hì
 | **Supervisor / Lead / Peer — Model** | Lưu mặc định toàn Host | Chọn `provider/model` (ví dụ: `claude/claude-sonnet-4-5`, `antigravity/gemini-2.5-pro`, `codex/o3`...) cho từng tầng:<ul><li>**Supervisor**: Nên chọn model có khả năng đọc hiểu yêu cầu và kiểm tra chéo tốt.</li><li>**Lead**: Áp dụng cho cả `Master Lead` và các `Forked Lead`. *(Mẹo: Nếu chọn provider là `claude`, các `Forked Lead` sẽ tận dụng được tính năng native session fork của Claude; các provider khác vẫn hoạt động bình thường nhờ cơ chế dựng ngữ cảnh từ SQLite)*.</li><li>**Peer**: Model mặc định cho tất cả các Peer trong các Stage (trừ khi file `.slp/peers/<ROLE>.md` ghi đè bằng trường `model:` riêng).</li></ul> |
 | **Supervisor / Lead / Peer — Thinking** | Lưu mặc định toàn Host | Mức độ suy luận sâu (`thinkingOptionId`, ví dụ: `low`, `medium`, `high`, `xhigh` tùy theo model hỗ trợ). Giúp kiểm soát cân bằng giữa tốc độ/chi phí và độ sâu tư duy cho từng vai trò. |
 | **Supervisor / Lead / Peer — Permission** | Lưu mặc định toàn Host | Chế độ cấp quyền thực thi công cụ (`permissionModeId`) của từng Provider. Mặc định khi chưa chỉnh, SLP tự động chọn chế độ **Unattended / Full Access** của Provider đó để các Agent có thể chạy tự động không bị chặn hỏi quyền thủ công, kết hợp với hook kiểm soát biên giới đọc/ghi của SLP. |
+| **Fork peers from the Lead session** | Lưu mặc định toàn Host (chụp vào Run lúc bắt đầu) | Mặc định **Off**: Peer khởi tạo sạch và chỉ làm việc theo briefing (brief khóa). Bật **On** để Peer fork phiên của Lead (khi provider hỗ trợ) nhằm so sánh hiệu quả. Run tạo trước khi có cài đặt này vẫn fork như cũ. |
+| **Max rework rounds per stage before asking you** | Lưu mặc định toàn Host (chụp vào Run lúc bắt đầu) | Mặc định **3**. Số lần `slp_stage_rework` tối đa mỗi Stage; hết số vòng thì Lead phải duyệt hoặc escalate để bạn quyết định qua Supervisor. |
 
 #### Giải thích chi tiết 3 chế độ vận hành (`Mode`):
 
@@ -310,10 +302,11 @@ Khi bạn chọn một dự án trong SLP, nếu dự án chưa có thư mục `
 ├── LEAD.md                    # Cấu hình & quy trình làm việc của Master Lead / Forked Lead
 ├── QA_LEAD.md                 # Cấu hình & quy trình làm việc của QA Lead (tự tạo lại nếu thiếu)
 └── peers/                     # Thư mục chứa định nghĩa tất cả các Peer chuyên môn của dự án
-    ├── DEVELOPER.md           # role: developer
-    ├── REVIEWER.md            # role: reviewer
-    ├── QA_ENGINEER.md         # role: qa-engineer
-    └── SECURITY_REVIEWER.md   # role: security-reviewer
+    ├── ARCHITECT.md           # role: architect          (kind: advisor)
+    ├── DEVELOPER.md           # role: developer          (kind: developer)
+    ├── QA_ENGINEER.md         # role: qa-engineer        (kind: qa)
+    ├── REVIEWER.md            # role: reviewer           (kind: advisor)
+    └── SECURITY_REVIEWER.md   # role: security-reviewer  (kind: advisor)
 ```
 
 > **Lưu ý quan trọng**:
@@ -332,6 +325,7 @@ name: QA Engineer
 description: Kiểm thử hành vi thực tế, kiểm tra các trường hợp biên (edge cases) và độ phủ hồi quy.
 model:
 thinking:
+kind: qa
 ---
 
 # Workflow
@@ -353,6 +347,7 @@ Focus on exercising the delivered behavior, regression coverage, boundary condit
 | **`description`** | **Bắt buộc** | Mô tả ngắn gọn chuyên môn và nhiệm vụ của vai trò này. **Cực kỳ quan trọng**: Toàn bộ `role`, `name`, `description` và YAML front-matter của các file trong `.slp/peers/*.md` được tiêm trực tiếp vào `systemPrompt` của **`Master Lead`**. Nhờ đọc `description` này, `Master Lead` mới biết dự án có những chuyên gia nào để tự động chọn và ghép vào các Stage phù hợp! |
 | **`model`** | Tùy chọn | Ghi đè (override) model riêng cho vai trò này:<ul><li>Nếu **để trống / `null`**: Tự động **kế thừa** model đã chọn ở mục `Supervisor` / `Lead` / `Peer` trên form Start run.</li><li>Nếu ghi **`provider/model-id`** đầy đủ (ví dụ: `claude/claude-opus-4-6`): Sử dụng đúng provider và model đó cho vai trò này (và tự động ánh xạ lại chế độ quyền Full Access tương ứng của provider mới).</li><li>Nếu chỉ ghi **`model-id` ngắn**: Giữ nguyên provider đã chọn trên form nhưng đổi sang model đó.</li></ul> |
 | **`thinking`** | Tùy chọn | Ghi đè mức độ suy luận (`thinkingOptionId`) riêng cho vai trò này (ví dụ: `high`). Nếu để trống, tự động kế thừa lựa chọn `Thinking` trên form Start run. |
+| **`kind`** | Khuyên dùng | `advisor`, `developer` hoặc `qa`. Quyết định Stage mà Peer được tham gia và quyền ghi (chỉ `developer` được ghi). Bỏ trống thì engine đoán theo tên role. |
 | **Các trường YAML tùy ý khác** | Tùy chọn | Bạn có thể thêm các trường metadata nghiệp vụ tùy ý (như `features`, `tech_stack`, `owned_paths`...) vào YAML front-matter của `.slp/peers/*.md`. Vì nguyên khối YAML front-matter được đưa vào `systemPrompt` của `Master Lead`, `Master Lead` sẽ đọc được các thông tin này để phân công đúng chuyên gia cho từng module! |
 | **Phần thân Markdown (`# Workflow`)** | **Bắt buộc** | Quy trình làm việc chi tiết dành riêng cho Agent mang vai trò đó. Phần thân này **không** làm nặng prompt của `Master Lead`, mà chỉ được nạp vào `systemPrompt` của đúng `Peer` (hoặc `Supervisor` / `Lead`) khi Agent đó được tạo ra. |
 
@@ -372,35 +367,23 @@ Khi `Master Lead` thiết kế Pipeline, nó gửi một cấu trúc JSON vào c
   "pipeline": {
     "name": "auth-token-rotation",
     "version": "1.0",
-    "worktree": "/home/dev/.paseo/worktrees/project/slp-a1b2c3d4-auth-token-rotation",
-    "description": "Triển khai cơ chế xoay vòng refresh token và kiểm thử bảo mật.",
+    "description": "Triển khai cơ chế xoay vòng refresh token.",
     "stages": [
       {
-        "name": "architecture-and-implementation",
-        "goal": "Thiết kế và lập trình cơ chế xoay vòng refresh token kèm unit test đầy đủ.",
+        "name": "planning",
+        "kind": "planning",
+        "goal": "Chọn cách xoay vòng token và khóa brief.",
         "peers": [
-          {
-            "role": "developer",
-            "task": "Cập nhật dịch vụ xác thực và thêm unit test cho luồng xoay vòng token."
-          },
-          {
-            "role": "security-reviewer",
-            "task": "Kiểm tra nguy cơ replay attack và phối hợp trực tiếp với developer ngay trong lúc thiết kế."
-          }
+          { "role": "architect", "task": "Đề xuất vị trí và cấu trúc đơn giản nhất cho luồng xoay vòng token." },
+          { "role": "security-reviewer", "task": "Chỉ ra rủi ro replay attack mà brief cần bao phủ." }
         ]
       },
       {
-        "name": "code-review-and-qa",
-        "goal": "Đảm bảo chất lượng mã nguồn và vượt qua toàn bộ bài kiểm thử tích hợp.",
+        "name": "implement",
+        "kind": "implement",
+        "goal": "Xây dựng đúng brief đã khóa.",
         "peers": [
-          {
-            "role": "reviewer",
-            "task": "Review kiến trúc, độ sạch của code và tính nhất quán của API."
-          },
-          {
-            "role": "qa-engineer",
-            "task": "Chạy bộ kiểm thử hồi quy và kiểm tra các kịch bản token hết hạn/bị thu hồi."
-          }
+          { "role": "developer", "task": "Cập nhật dịch vụ xác thực và thêm unit test cho luồng xoay vòng token." }
         ]
       }
     ]
@@ -408,8 +391,26 @@ Khi `Master Lead` thiết kế Pipeline, nó gửi một cấu trúc JSON vào c
 }
 ```
 
+Lead đóng Stage planning bằng:
+
+```json
+{
+  "summary": "Dùng refresh token một lần + danh sách thu hồi.",
+  "brief": {
+    "approach": "Mỗi lần refresh cấp token mới và thu hồi token cũ.",
+    "criteria": [
+      { "id": "C1", "requirement": "Token cũ bị từ chối sau khi refresh.", "verification": "Unit test auth.refresh.spec" }
+    ],
+    "inScope": ["src/auth/refresh.ts"],
+    "outOfScope": ["Đăng nhập đa thiết bị"]
+  }
+}
+```
+
 - **`worktree`**: Đường dẫn Git worktree đã được tạo bằng `slp_create_worktree`. Tất cả các Stage và Peer trong Pipeline này đều làm việc chung trên worktree đó.
-- **`stages`**: Mảng thứ tự các giai đoạn. Stage sau chỉ được mở khi Stage trước đã được `Forked Lead` duyệt (`slp_approve_stage`).
+- **`stages`**: Mảng thứ tự các giai đoạn, đúng hình dạng `[planning]? -> implement` (xem mục 4.2). Stage sau chỉ được mở khi Lead duyệt Stage trước (`slp_approve_stage`).
+- **`kind`** (tùy chọn): `planning`, `implement` hoặc `verify`; bỏ trống thì engine suy ra từ `kind` của các Peer.
+- **`brief`** (cấp pipeline): bắt buộc khi pipeline không có Stage planning.
 - **`goal`**: Mục tiêu chung của cả Stage — tiêu chuẩn để `Forked Lead` nghiệm thu Stage đó.
 - **`peers`**: Danh sách từ $1..N$ Peer cùng tham gia Stage. Mỗi phần tử gồm `role` (khớp với `role` trong `.slp/peers/*.md`) và `task` (nhiệm vụ cụ thể của Peer đó trong Stage).
 
@@ -425,7 +426,7 @@ Khi `Master Lead` thiết kế Pipeline, nó gửi một cấu trúc JSON vào c
 
 ---
 
-## 6. Bảng tra cứu toàn bộ 17 công cụ MCP (`slp-bus`)
+## 6. Bảng tra cứu công cụ MCP (`slp-bus`)
 
 Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ thuộc vai trò của mình:
 
@@ -436,6 +437,7 @@ Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ th
 | **`slp_delegate`** | `{ acceptanceCriteria: string (min 20 ký tự) }` | Ủy quyền yêu cầu và tiêu chí nghiệm thu cho `Master Lead` để bắt đầu lập kế hoạch Pipeline. **Kết thúc lượt sau khi gọi.** |
 | **`slp_present_to_manager`** | `{ report: string }` | Xác nhận kết quả tích hợp đã đạt yêu cầu và trình bày báo cáo cuối cùng cho người dùng duyệt (mở cổng `final_approval`). **Kết thúc lượt sau khi gọi.** |
 | **`slp_request_rework`** | `{ feedback: string }` | Từ chối kết quả của `Master Lead` và yêu cầu làm lại kèm phản hồi chi tiết (chuyển Run về `planning` và yêu cầu `Master Lead` tạo Pipeline mới). **Kết thúc lượt sau khi gọi.** |
+| **`slp_relay_decision`** | `{ pipelineId: string, decision: string }` | Chuyển quyết định của bạn cho một pipeline đã hết số vòng rework về Lead; đặt lại bộ đếm vòng và tiếp tục Stage. **Kết thúc lượt sau khi gọi.** |
 
 ### 6.2. Công cụ của `Master Lead`
 
@@ -451,7 +453,7 @@ Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ th
 
 | Tên công cụ | Tham số đầu vào | Công dụng & Hành vi |
 | :--- | :--- | :--- |
-| **`slp_approve_stage`** | `{ summary: string }` | Nghiệm thu và duyệt Stage hiện tại khi mục tiêu (`goal`) đã hoàn thành; giữ sống các Peer của Stage trung gian để Stage sau có thể hỏi đáp (và đóng toàn bộ Peer/Forked Lead khi kết thúc Stage cuối cùng của Pipeline). **Kết thúc lượt sau khi gọi.** |
+| **`slp_approve_stage`** | `{ summary: string, brief?: Brief }` (brief bắt buộc khi đóng Stage planning) | Nghiệm thu và duyệt Stage hiện tại khi mục tiêu (`goal`) đã hoàn thành; giữ sống các Peer của Stage trung gian để Stage sau có thể hỏi đáp (và đóng toàn bộ Peer/Forked Lead khi kết thúc Stage cuối cùng của Pipeline). **Kết thúc lượt sau khi gọi.** |
 | **`slp_stage_rework`** | `{ agentIds?: string[], feedback: string }` | Yêu cầu một số (hoặc toàn bộ, nếu để mảng rỗng `[]`) Peer trong Stage hiện tại làm lại kèm hướng dẫn chi tiết. **Kết thúc lượt sau khi gọi.** |
 | **`slp_ask`** | `{ toAgentId: string, question: string }` | Câu hỏi chặn gửi cho Peer cùng Stage, `Forked Lead`, Peer ở Stage trước đã hoàn thành, hoặc Lead anh em. Trả về câu trả lời (chờ tối đa ~40 giây mỗi lời gọi) hoặc `questionId` để chờ tiếp. |
 | **`slp_await_answer`** | `{ questionId: string }` | Tiếp tục chờ câu trả lời của một câu hỏi đã hỏi; đồng thời trả về các câu hỏi gửi tới mình trong lúc chờ. |
@@ -463,7 +465,7 @@ Mỗi Agent chỉ nhìn thấy và chỉ được phép gọi các công cụ th
 
 | Tên công cụ | Tham số đầu vào | Công dụng & Hành vi |
 | :--- | :--- | :--- |
-| **`slp_stage_report`** | `{ summary: string, findings?: string[], status?: "completed" \| "blocked" }` | Nộp báo cáo kết quả và bằng chứng thực thi của Peer cho `Forked Lead`. **Kết thúc lượt sau khi gọi.** |
+| **`slp_stage_report`** | `{ summary: string, findings?: string[], status?: "completed" \| "blocked", scorecard?: ScorecardEntry[], observations?: string[] }` (Peer `qa` bắt buộc có `scorecard`) | Nộp báo cáo kết quả và bằng chứng thực thi của Peer cho `Forked Lead`. **Kết thúc lượt sau khi gọi.** |
 | **`slp_escalate`** | `{ reason: string }` | Báo cáo tình trạng bị chặn (`status: "blocked"`) để đánh thức `Forked Lead` xử lý ngay lập tức. **Kết thúc lượt sau khi gọi.** |
 
 ### 6.5. Công cụ dùng chung (Tra cứu & Phục hồi sự cố)

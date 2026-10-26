@@ -81,10 +81,10 @@ describe("QA phase", () => {
     const qaPeerSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === qaPeerId)!.spec;
     expect(qaPeerSpec.peerWorktreePath).toBe(handedOverRun.devCwd);
     expect(qaPeerSpec.parentAgentId).toBe(qaLeadId);
-    // The QA peer resumes the QA Lead's session so it inherits the QA plan built during preparation.
-    expect(qaPeerSpec.extraOptions).toBeTruthy();
+    // With the default policy the grader starts clean (no fork), so it judges only what its briefing lists.
+    expect(qaPeerSpec.extraOptions).toBeUndefined();
 
-    // A defect fixed by the QA peer is committed on the QA branch itself.
+    // A fix made on the QA branch (by a verify-stage developer) is committed there directly.
     commitFiles(handedOverRun.devCwd, { "src/qa-fix.ts": "export const qaFixed = true;\n" }, "QA fix");
     await completePipeline(flow, runId, qaPipelineId);
     const prematureReport = await flow.callAs(qaLeadId, "slp_report", { summary: "Skipping closure." });

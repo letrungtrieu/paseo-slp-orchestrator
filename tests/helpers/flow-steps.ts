@@ -7,42 +7,56 @@ import type { BusToolOutcome } from "../../server/bus/http-mcp";
 import type { Flow } from "./flow-fixture";
 import { commitFiles, runGitSync } from "./git-fixture";
 
+// Planning advisors hand the Lead a brief that locks the developer's scope; tests reuse one compact example.
+export const SAMPLE_BRIEF = {
+  approach: "Parse the CSV with the existing reader and add one import service.",
+  criteria: [{ id: "C1", requirement: "Every valid CSV row becomes an invoice with a two-decimal total.", verification: "Run the billing import unit test." }],
+  inScope: ["src/billing-import.ts"],
+  outOfScope: ["Editing invoices"],
+};
+
+// The enforced feature shape: advisors plan, then exactly one developer implements the locked brief.
 export const DEFAULT_PIPELINE: PipelineDefinition = {
   name: "billing-import",
   version: "1.0",
   worktree: "pipeline-billing-import",
-  description: "Implement, review and verify the billing import flow.",
+  description: "Plan and implement the billing import flow.",
   stages: [
     {
-      name: "review-codebase",
-      goal: "Understand the existing billing boundaries before changing code.",
+      name: "planning",
+      goal: "Choose the billing import approach and lock the brief.",
       peers: [
-        { role: "reviewer", task: "Review the codebase and report its important boundaries." },
-        { role: "developer", task: "Prepare a small change plan from the review findings." },
+        { role: "reviewer", task: "Compare parsing techniques and recommend one." },
+        { role: "architect", task: "Propose where the import service lives." },
       ],
     },
     {
       name: "coding",
-      goal: "Implement the accepted billing import behavior in the shared worktree.",
+      goal: "Implement the locked brief in the shared worktree.",
       peers: [{ role: "developer", task: "Implement the billing import behavior and report evidence." }],
-    },
-    {
-      name: "qa",
-      goal: "Exercise the completed behavior and report any quality risks.",
-      peers: [{ role: "qa_engineer", task: "Run focused checks and report the observed behavior." }],
     },
   ],
 };
 
+// Same shape under another name for tests that need a second, independent pipeline identity.
 export const TWO_PEER_PIPELINE: PipelineDefinition = {
   ...DEFAULT_PIPELINE,
   name: "billing-review",
-  stages: [DEFAULT_PIPELINE.stages[0]],
 };
 
 export const SECOND_STAGE_PIPELINE: PipelineDefinition = {
   ...DEFAULT_PIPELINE,
   name: "billing-sequential",
+};
+
+// Smallest valid feature pipeline: no planning, so the brief comes with the definition.
+export const SINGLE_DEVELOPER_PIPELINE: PipelineDefinition = {
+  name: "billing-quickfix",
+  version: "1.0",
+  worktree: "pipeline-billing-quickfix",
+  description: "Implement a small billing fix directly from a brief.",
+  brief: SAMPLE_BRIEF,
+  stages: [{ name: "coding", goal: "Implement the brief.", peers: [{ role: "developer", task: "Implement the fix." }] }],
 };
 
 // Polling is needed because stage creation is deliberately detached from the defining tool call.
@@ -118,17 +132,26 @@ export async function waitForStage(flow: Flow, runId: string, pipelineId: string
   });
 }
 
+// QA graders must attach a scorecard; every other kind reports plain evidence.
+export function passingScorecard(summary = "Evidence collected") {
+  return [{ criterionId: "C1", status: "pass", reason: summary, evidence: "unit test output" }];
+}
+
 export async function reportPeer(flow: Flow, runId: string, pipelineId: string, peerRole: string, summary = "Evidence collected"): Promise<void> {
   const stage = currentStage(flow, runId, pipelineId);
   const peerId = flow.agentId(runId, peerRole, stage.id);
-  const response = await flow.callAs(peerId, "slp_stage_report", { summary, findings: [summary], status: "completed" });
+  const isGrader = /(^|[-_])qa/.test(peerRole);
+  const response = await flow.callAs(peerId, "slp_stage_report", {
+    summary, findings: [summary], status: "completed", ...(isGrader ? { scorecard: passingScorecard(summary) } : {}),
+  });
   if (response.isError) throw new Error(response.text);
 }
 
 export async function approveCurrentStage(flow: Flow, runId: string, pipelineId: string, summary = "The stage goal is met."): Promise<void> {
   const approvedStage = currentStage(flow, runId, pipelineId);
   const coordinatorId = flow.agentId(runId, "forked_lead", approvedStage.id);
-  const response = await flow.callAs(coordinatorId, "slp_approve_stage", { summary });
+  // Planning approval must carry the brief that locks the next stage's scope.
+  const response = await flow.callAs(coordinatorId, "slp_approve_stage", approvedStage.kind === "planning" ? { summary, brief: SAMPLE_BRIEF } : { summary });
   if (response.isError) throw new Error(response.text);
   // Stage closure archives the old cohort and asynchronously spawns the next stage's agents;
   // callers must wait until either the pipeline finishes/pauses or the new cohort is running.

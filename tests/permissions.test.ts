@@ -24,6 +24,18 @@ function contextFor(role: SlpRole, overrides: Partial<PermissionContext> = {}): 
 const isAllowed = (decision: ReturnType<typeof decidePermission>) => decision.behavior === "allow";
 
 describe("dynamic stage write permissions", () => {
+  // Only the developer writes; advisors and QA graders judge the worktree, so they must not change it.
+  it.each(["advisor", "qa"] as const)("keeps an active %s peer read-only for files and mutating shell", (peerKind) => {
+    const readOnlyPeer = contextFor("peer", { peerKind });
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), readOnlyPeer))).toBe(false);
+    expect(isAllowed(decidePermission(shellRequest("git commit -am wip"), readOnlyPeer))).toBe(false);
+    // Reading and running tests stays possible so they can still investigate and grade.
+    expect(isAllowed(decidePermission(shellRequest("npm test"), readOnlyPeer))).toBe(true);
+    const developerPeer = contextFor("peer", { peerKind: "developer" });
+    expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), developerPeer))).toBe(true);
+    expect(isAllowed(decidePermission(shellRequest("git commit -am wip"), developerPeer))).toBe(true);
+  });
+
   it("keeps a peer read-only before its stage becomes active", () => {
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), contextFor("peer", { stageActive: false })))).toBe(false);
   });

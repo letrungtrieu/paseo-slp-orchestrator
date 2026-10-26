@@ -1,64 +1,69 @@
 import { describe, expect, it } from "vitest";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, TWO_PEER_PIPELINE, approveCurrentStage, askAndAnswer, currentStage, delegateToLead, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
+import { SAMPLE_BRIEF, SAMPLE_PRODUCT_SPEC, TWO_PEER_PIPELINE, approveCurrentStage, askAndAnswer, currentStage, eventually, reportPeer, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
 describe("stage coordination", () => {
-  it("keeps the Forked Lead idle at stage start and delivers the full stage goal and roster once peers report", async () => {
+  it("keeps the Lead idle at stage start and delivers the goal, roster and brief instructions once advisors report", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const coordinatorId = flow.agentId(runId, "forked_lead", stage.id);
 
-    // Forked Lead stays idle without an empty startup turn while peers work.
+    // The Lead stays idle without an empty startup turn while the planning advisors work.
     expect(flow.mailTo(runId, coordinatorId)).toEqual([]);
     expect(stage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].role)).toEqual(["peer", "peer"]);
+    // Advisors are told they only talk to the Lead and never see a peer roster to chat with.
+    const advisorBriefing = flow.mailTo(runId, flow.agentId(runId, "reviewer", stage.id)).at(-1)?.text ?? "";
+    expect(advisorBriefing).toContain("You are an **advisor**");
+    expect(advisorBriefing).not.toContain("Stage Peer Roster");
 
-    await reportPeer(flow, runId, pipelineId, "reviewer", "Boundary review finished.");
-    await reportPeer(flow, runId, pipelineId, "developer", "Implementation plan ready.");
+    await reportPeer(flow, runId, pipelineId, "reviewer", "Recommend the streaming CSV reader.");
+    await reportPeer(flow, runId, pipelineId, "architect", "Put the import service next to the billing module.");
 
     const reviewBriefing = flow.mailTo(runId, coordinatorId).at(-1)?.text ?? "";
     expect(reviewBriefing).toContain(stage.goal);
     expect(reviewBriefing).toContain("reviewer");
-    expect(reviewBriefing).toContain("developer");
-    expect(reviewBriefing).toContain("slp_approve_stage");
+    expect(reviewBriefing).toContain("architect");
+    expect(reviewBriefing).toContain("slp_approve_stage({ summary, brief:");
   });
 
-  it("lets a peer ask a blocking question and keeps the report obligation untouched", async () => {
+  it("lets a peer ask its Lead a blocking question but not another peer, keeping the report obligation untouched", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
     const reviewerId = flow.agentId(runId, "reviewer", stage.id);
-    const developerId = flow.agentId(runId, "developer", stage.id);
+    const architectId = flow.agentId(runId, "architect", stage.id);
+    const leadId = flow.agentId(runId, "forked_lead", stage.id);
     const reviewerObligationBefore = flow.run(runId).agents[reviewerId].awaitingTool;
+
+    // Peer-to-peer threads are where scope crept in, so the bus refuses them outright.
+    const peerToPeer = await flow.callAs(reviewerId, "slp_ask", { toAgentId: architectId, question: "Should we add caching?" });
+    expect(peerToPeer.isError).toBe(true);
+    expect(peerToPeer.text).toContain("only contact their Lead");
 
     const { askOutcome, questionId } = await askAndAnswer(
       flow,
       reviewerId,
-      developerId,
-      "The import boundary needs an idempotency check.",
-      "Added: duplicate import ids return { ok: true, duplicate: true } without a second write.",
+      leadId,
+      "Must the import be idempotent?",
+      "Yes: duplicate import ids return { ok: true, duplicate: true } without a second write.",
     );
     expect(askOutcome.isError).toBe(false);
     expect(askOutcome.text).toContain("duplicate: true");
     // Both sides of the exchange appear in the stage history next to the peer reports.
     const stageMessages = flow.pipeline(runId, pipelineId)!.stages[0].messages;
     expect(stageMessages.map((entry) => entry.message)).toEqual([
-      "The import boundary needs an idempotency check.",
+      "Must the import be idempotent?",
       expect.stringContaining("duplicate: true"),
     ]);
     // Waiting on a question is not a deferred obligation: the asker still owes exactly what it owed before.
     expect(flow.run(runId).agents[reviewerId].awaitingTool).toBe(reviewerObligationBefore);
     expect(flow.store.questions.require(questionId).status).toBe("answered");
-
-    await reportPeer(flow, runId, pipelineId, "developer", "Idempotency check added and verified.");
-    await reportPeer(flow, runId, pipelineId, "reviewer", "Boundary and retry behavior reviewed.");
-    expect(currentStage(flow, runId, pipelineId).reports).toHaveLength(2);
-    expect(currentStage(flow, runId, pipelineId).status).toBe("running");
   });
 
-  it("allows only the Forked Lead to request rework and close the stage", async () => {
+  it("allows only the Lead to request rework, locks the brief on planning approval and retires the advisors", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
@@ -71,35 +76,56 @@ describe("stage coordination", () => {
 
     const rework = await flow.callAs(coordinatorId, "slp_stage_rework", {
       agentIds: [reviewerId],
-      feedback: "Re-check the retry behavior against the shared stage goal.",
+      feedback: "Compare only the two parsers already in the repo.",
     });
     expect(rework.isError).toBe(false);
-    expect(flow.mailTo(runId, reviewerId).at(-1)?.text).toContain("Re-check the retry behavior");
+    expect(flow.mailTo(runId, reviewerId).at(-1)?.text).toContain("Compare only the two parsers");
 
-    await reportPeer(flow, runId, pipelineId, "reviewer", "Retry behavior is now covered.");
-    await reportPeer(flow, runId, pipelineId, "developer", "Developer implementation is ready.");
+    await reportPeer(flow, runId, pipelineId, "reviewer", "The streaming reader wins.");
+    await reportPeer(flow, runId, pipelineId, "architect", "One service file is enough.");
+    // Closing planning without the brief would leave the developer without a contract.
+    const approvalWithoutBrief = await flow.callAs(coordinatorId, "slp_approve_stage", { summary: "Plan agreed." });
+    expect(approvalWithoutBrief.isError).toBe(true);
+    expect(approvalWithoutBrief.text).toContain("requires brief");
+
     await approveCurrentStage(flow, runId, pipelineId);
-    expect(flow.pipeline(runId, pipelineId)!.stages[0].status).toBe("completed");
-    // Peers and Lead stay alive while the pipeline is 'completed' so the Lead can merge and consult peers on conflicts.
-    expect(flow.gateway.archivedAgentIds).not.toContain(reviewerId);
-    expect(flow.gateway.archivedAgentIds).not.toContain(coordinatorId);
-    expect(flow.mailTo(runId, coordinatorId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
+    const buildingPipeline = flow.pipeline(runId, pipelineId)!;
+    expect(buildingPipeline.brief).toEqual(SAMPLE_BRIEF);
+    expect(buildingPipeline.briefLockedAt).toBeTruthy();
+    // Advisors only shape the plan; they are retired before the developer starts.
+    await eventually(() => expect(flow.gateway.archivedAgentIds).toContain(reviewerId));
+    const codingStage = currentStage(flow, runId, pipelineId);
+    const developerId = flow.agentId(runId, "developer", codingStage.id);
+    const developerBriefing = flow.mailTo(runId, developerId).at(-1)?.text ?? "";
+    expect(developerBriefing).toContain("Locked Brief");
+    expect(developerBriefing).toContain(SAMPLE_BRIEF.criteria[0].requirement);
+    expect(developerBriefing).toContain("only developer");
 
+    // The brief cannot be rewritten once locked.
+    await reportPeer(flow, runId, pipelineId, "developer", "Import service implemented and tested.");
+    const relock = await flow.callAs(coordinatorId, "slp_approve_stage", { summary: "Done.", brief: SAMPLE_BRIEF });
+    expect(relock.isError).toBe(true);
+    expect(relock.text).toContain("locked");
+
+    await approveCurrentStage(flow, runId, pipelineId);
+    expect(flow.mailTo(runId, coordinatorId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
     const finalization = await flow.callAs(coordinatorId, "slp_finalize_pipeline", {
       summary: "Stage changes verified and merged cleanly.",
     });
     expect(finalization.isError).toBe(false);
-    expect(flow.gateway.archivedAgentIds).toContain(reviewerId);
+    expect(flow.gateway.archivedAgentIds).toContain(developerId);
     // The feature Lead's job ends at the merge; the QA Lead takes over and owes its QA pipeline next.
     const handedOverRun = flow.run(runId);
     expect(handedOverRun.agents[coordinatorId].awaitingTool).toBeNull();
     expect(handedOverRun.masterLeadAgentId).toBe(handedOverRun.qaLeadAgentId);
     expect(handedOverRun.status).toBe("planning");
     expect(flow.mailTo(runId, handedOverRun.qaLeadAgentId).at(-1)?.awaitTool).toBe("slp_define_pipeline");
+    // The QA Lead receives the locked brief so its graders know what to score.
+    expect(flow.mailTo(runId, handedOverRun.qaLeadAgentId).at(-1)?.text).toContain(SAMPLE_BRIEF.criteria[0].requirement);
   });
 
-  it("spawns N dedicated Leads in immediate worktrees on parallel slp_delegate, lets sibling Leads align contracts via slp_send_peer_message, and forks stage Peers directly from their owning Lead", async () => {
-    const flow = await createFlow({ mode: "FULL_AUTO" });
+  it("spawns N dedicated Leads in immediate worktrees on parallel slp_delegate, lets sibling Leads align contracts via slp_ask, and forks stage Peers from their owning Lead when forking is enabled", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO", orchestration: { forkPeers: true } });
     const runId = await flow.startRun();
 
     // Supervisor analyzes the requirement and delegates two parallel features (`auth-api` and `checkout-ui`) with shared context.
@@ -164,6 +190,7 @@ describe("stage coordination", () => {
         name: "auth-api",
         version: "1.0",
         description: "Auth API pipeline",
+        brief: SAMPLE_BRIEF,
         stages: [
           {
             name: "implement-auth",
@@ -182,6 +209,7 @@ describe("stage coordination", () => {
         name: "checkout-ui",
         version: "1.0",
         description: "Checkout UI pipeline",
+        brief: SAMPLE_BRIEF,
         stages: [
           {
             name: "implement-checkout",
@@ -223,15 +251,15 @@ describe("stage coordination", () => {
   });
 
   it("falls back to global peer config when a .slp/peers model does not match Lead's provider so native session forking still succeeds", async () => {
-    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const flow = await createFlow({ mode: "FULL_AUTO", orchestration: { forkPeers: true } });
     const runId = await flow.startRun();
-    // Configure Lead on claude/claude-sonnet-4-6, Reviewer on a matching claude model, and Developer on a mismatched codex model.
+    // Configure Lead on claude/claude-sonnet-4-6, Reviewer on a matching claude model, and Architect on a mismatched codex model.
     flow.store.mutate(runId, (mutableRun) => {
       mutableRun.promptConfig!.lead.model = "claude/claude-sonnet-4-6";
       const reviewerRole = mutableRun.promptConfig!.peers.find((peer) => peer.role === "reviewer")!;
-      const developerRole = mutableRun.promptConfig!.peers.find((peer) => peer.role === "developer")!;
+      const architectRole = mutableRun.promptConfig!.peers.find((peer) => peer.role === "architect")!;
       reviewerRole.model = "claude-opus-4-6";
-      developerRole.model = "codex/gpt-5.4";
+      architectRole.model = "codex/gpt-5.4";
     });
     await flow.callAsRole(runId, "supervisor", null, "slp_delegate", {
       acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
@@ -255,7 +283,7 @@ describe("stage coordination", () => {
     const reviewerCreatedSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === reviewerPeerId)?.spec;
     const developerCreatedSpec = flow.gateway.createdAgents.find(({ record }) => record.agentId === developerPeerId)?.spec;
 
-    // Reviewer's short model ID matches Lead's claude provider, whereas Developer's codex model falls back to global claude/sonnet.
+    // Reviewer's short model ID matches Lead's claude provider, whereas Architect's codex model falls back to global claude/sonnet.
     expect(reviewerCreatedSpec?.provider).toBe("claude/claude-opus-4-6");
     expect(developerCreatedSpec?.provider).toBe("claude/sonnet");
     expect(reviewerCreatedSpec?.extraOptions).toEqual({

@@ -38,25 +38,25 @@ SLP orchestrates multi-agent software delivery across three runtime tiers (\`sup
    - Receives the full roster of all sibling Leads and concurrent features being built in parallel (\`agentId\`, \`featureName\`, \`worktreePath\`, \`branch\`, \`acceptanceCriteria\`).
    - Receives its own human-approved \`productSpec\` as the implementation contract, plus the QA Lead's id and the QA branch it merges into. Implement the spec's screens, states and scenarios exactly; record any deviation with its reason in the \`slp_finalize_pipeline\` summary.
    - **Cross-Lead Alignment:** Uses \`slp_ask({ toAgentId, question })\` (blocking; the answer is returned by the call) to align shared APIs, schemas, routes, and end-to-end flows with sibling Leads during planning, execution, or merge resolution.
-   - **Stage Planning:** Receives the **YAML front matter** of every file in \`.slp/peers/**/*.md\` in its \`systemPrompt\` (as the available peer catalog) and calls \`slp_define_pipeline\` to define dynamic stages (\`stages: [{ name, goal, peers: [{ role, task }] }]\`).
-   - **Direct Supervision & Forking:** Supervises each stage via \`slp_approve_stage\` or \`slp_stage_rework\`, handles hung peer commands via \`slp_handle_peer_shell\`, and merges its completed feature branch into the QA branch via \`slp_finalize_pipeline\` (resolving merge conflicts there). Feature Leads never report to the Supervisor and never run heavy verification; they are retired once every feature is merged.
+   - **Stage Planning:** Receives the **YAML front matter** (plus each peer's \`kind\`) of every file in \`.slp/peers/**/*.md\` in its \`systemPrompt\` and calls \`slp_define_pipeline\`. The engine enforces the feature shape \`[planning]? -> implement\`: an optional planning stage with \`kind: advisor\` peers who only discuss techniques/design with the Lead, then exactly one implement stage with exactly one \`kind: developer\` peer. The planning approval (\`slp_approve_stage({ summary, brief })\`) or the definition itself carries the **brief** (\`{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }\`), which is locked for every later stage.
+   - **Direct Supervision:** Supervises each stage via \`slp_approve_stage\` or \`slp_stage_rework\` (limited per stage by the run's rework cap, default 3; at the cap the Lead approves or calls \`slp_escalate\` and the human decides through the Supervisor), handles hung peer commands via \`slp_handle_peer_shell\`, and merges its completed feature branch into the QA branch via \`slp_finalize_pipeline\` (resolving merge conflicts there). Feature Leads never report to the Supervisor and never run heavy verification; they are retired once every feature is merged.
 
    **QA Lead (\`.slp/QA_LEAD.md\`, runtime role \`qa_lead\`):**
    - Spawned together with the feature Leads and briefed with the same requirements plus the full Lead roster, so it prepares the QA plan (unit, automation and manual testing per \`TEST_POLICY.md\`) while features are built.
    - **Read-only:** file writes and mutating shell commands are denied; every test run, investigation and fix is done by stage peers it spawns.
-   - \`slp_define_pipeline\` is rejected until the engine hands over the merged QA branch (after the last feature merge). QA pipelines always run in the QA worktree, one at a time, and their peers fork from the QA Lead's session.
+   - \`slp_define_pipeline\` is rejected until the engine hands over the merged QA branch (after the last feature merge). QA pipelines always run in the QA worktree, one at a time, with \`verify\` stages: \`kind: qa\` peers grade every brief criterion and product spec scenario in a scorecard (pass/fail/blocked + reason + evidence), and at most one \`kind: developer\` peer fixes only when the QA Lead sends \`slp_stage_rework\`; the graders then re-grade automatically. The QA Lead decides from the scorecard alone.
    - Closes the approved QA pipeline with \`slp_finalize_pipeline\` (no merge), then calls \`slp_report\`, which is only accepted after a QA pipeline closed after the last feature merge.
 
 3. **Tier 3 — Stage Peers (\`.slp/peers/**/*.md\`, runtime role \`peer\`):**
-   - Every stage Peer runs in the **exact same worktree** as its owning Lead (feature Lead or QA Lead) and **forks directly from that Lead's session**, inheriting the Lead's codebase discovery, sibling-Lead contract agreements, and prior stage outcomes without re-investigating from scratch.
-   - Peers remain alive across stages of their pipeline so downstream peers (e.g., QA, reviewers, security/performance auditors) can question upstream peers (e.g., architects, engineers) directly via \`slp_ask\`.
+   - Every stage Peer runs in the **exact same worktree** as its owning Lead. Whether it forks the Lead's session is a run setting (off by default); without a fork it works only from its stage mail (goal, task, acceptance criteria, locked brief).
+   - Peers talk **only to their Lead** (\`slp_ask\` / \`slp_notify\`); peer-to-peer messages are rejected. Advisors are retired when planning closes. Advisors and QA graders are read-only; only the developer writes.
    - Each Peer executes its assigned stage task and submits structured evidence via \`slp_stage_report\` (or escalates blockers via \`slp_escalate\`).
 
 ---
 
 ## 2. Organizing \`.slp/\` by Functional Groups & Shared Standards
 
-While a brand-new repository is initially seeded with 4 flat default peers (\`DEVELOPER.md\`, \`QA_ENGINEER.md\`, \`REVIEWER.md\`, \`SECURITY_REVIEWER.md\`), **when tailoring \`.slp/\` for any real project, you should analyze the project's domain and organize \`.slp/peers/\` into functional subdirectories** alongside a \`.slp/standards/\` folder for shared engineering and delivery rules.
+While a brand-new repository is initially seeded with 5 flat default peers (\`DEVELOPER.md\` kind developer, \`QA_ENGINEER.md\` kind qa, and the advisors \`ARCHITECT.md\`, \`REVIEWER.md\`, \`SECURITY_REVIEWER.md\`), **when tailoring \`.slp/\` for any real project, you should analyze the project's domain and organize \`.slp/peers/\` into functional subdirectories** alongside a \`.slp/standards/\` folder for shared engineering and delivery rules.
 
 ### Generic Grouped Layout Pattern (Adapt Groups to the Project)
 
@@ -97,9 +97,10 @@ When asked to design or upgrade \`.slp\` for a repository:
    - \`design/\`: Product, UX, domain-model, or system designers who verify specification fidelity.
    - \`research/\`: Technical researchers for complex algorithms, protocols, or external SDK spikes.
    - **Domain-specific groups:** Add groups that fit the specific project type (for example: \`data-ml/\` for AI pipelines, \`billing-ledger/\` for fintech, \`art-audio/\` for games, \`embedded/\` for IoT).
-   - Replace the flat starter files (\`DEVELOPER.md\`, \`REVIEWER.md\`, \`QA_ENGINEER.md\`, \`SECURITY_REVIEWER.md\`) once specialized grouped peers cover their responsibilities. Delete any legacy \`.slp/peers/END_USER_UAT.md\` (role \`end-user\`) left by older SLP versions: verifying the merged build is the QA Lead's job, so a separate UAT peer only duplicates it.
-3. **Assign a Test Tier to Every Peer (\`tier:\` front matter):** Peers that build or review code inside parallel feature pipelines get \`tier: feature\` and may run only the \`fast\` commands of \`TEST_POLICY.md\`. Peers whose work needs an engine, emulator, container stack, browser E2E or a real-environment manual test get \`tier: integration\`; they are scheduled only after all feature branches are merged, never inside a feature pipeline. Write each peer's test instructions from the exact commands, frameworks, folders and naming conventions recorded in \`TEST_POLICY.md\`.
-4. **Extract Shared Project Rules into \`.slp/standards/\`:**
+   - Replace the flat starter files (\`DEVELOPER.md\`, \`ARCHITECT.md\`, \`REVIEWER.md\`, \`QA_ENGINEER.md\`, \`SECURITY_REVIEWER.md\`) once specialized grouped peers cover their responsibilities. Delete any legacy \`.slp/peers/END_USER_UAT.md\` (role \`end-user\`) left by older SLP versions: verifying the merged build is the QA Lead's job, so a separate UAT peer only duplicates it.
+3. **Assign a Kind to Every Peer (\`kind:\` front matter):** \`advisor\` (planning only, read-only: architects, reviewers, researchers, security advisors), \`developer\` (the single writer of a stage) or \`qa\` (read-only graders in the QA pipeline). Keep the catalog small: one developer per stack area, one or two advisors, and the QA graders the investigation needs.
+4. **Assign a Test Tier to Every Peer (\`tier:\` front matter):** Peers that build or review code inside parallel feature pipelines get \`tier: feature\` and may run only the \`fast\` commands of \`TEST_POLICY.md\`. Peers whose work needs an engine, emulator, container stack, browser E2E or a real-environment manual test get \`tier: integration\`; they are scheduled only after all feature branches are merged, never inside a feature pipeline. Write each peer's test instructions from the exact commands, frameworks, folders and naming conventions recorded in \`TEST_POLICY.md\`.
+5. **Extract Shared Project Rules into \`.slp/standards/\`:**
    - Put shared coding conventions, architectural boundaries, feature delivery maps, test/performance budgets, and Definition of Done in \`.slp/standards/*.md\`.
    - Have \`SUPERVISOR.md\`, \`LEAD.md\`, \`QA_LEAD.md\`, and each peer in \`.slp/peers/<group>/*.md\` reference \`.slp/standards/*.md\` so project-wide standards live in one place instead of being duplicated across every peer file.
 
@@ -127,6 +128,7 @@ name: Backend & API Engineer
 description: Implements domain services, data access layers, and API endpoints with automated unit/integration tests and measurable latency/query metrics.
 model:
 thinking:
+kind: developer
 tier: feature
 domains:
   - domain services and state transitions
@@ -140,25 +142,22 @@ skills: []
 ROLE: Pipeline peer (Backend & API Engineer). Apply this domain workflow to your stage assignment.
 
 ## 1. Domain & Engineering Rules
-- You are forked directly from your pipeline's Lead in the shared feature worktree and inherit the Lead's codebase investigation, sibling-Lead contract agreements, and prior stage outcomes; build directly on that context instead of re-investigating the repository from scratch.
-- Read the stage goal, your brief, the current stage peer roster, prior stage results, and any shared standards under \`.slp/standards/\` (plus any provider skills listed in your front matter \`skills\`) before acting.
+- Build exactly what the locked brief describes: everything in scope, nothing out of scope, no extra abstractions or features. If the brief cannot be built as written, call \`slp_escalate\`.
+- Read the stage goal, your task, the locked brief and any shared standards under \`.slp/standards/\` (plus any provider skills listed in your front matter \`skills\`) before acting.
 - Keep domain logic modular, strongly typed, and unit-testable in isolation from transport or UI layers.
 - TEST TIER: You are a \`tier: feature\` peer. Write unit tests following the conventions in \`.slp/standards/TEST_POLICY.md\` and run ONLY its \`fast\` tier commands. Never start a heavy resource listed there (engine editor, emulator, container stack, browser E2E); record anything that needs one as a hand-off item for the integration QA pipeline in \`slp_stage_report\`.
 - Work only in the pipeline worktree and only within the permission mode granted to this stage.
-- Coordinate shared-file edits and commits directly with fellow peers via \`slp_ask\` / \`slp_notify\`; report any work that remains uncommitted.
+- Ask only your Lead (\`slp_ask\` / \`slp_notify\`); other peers are not reachable. Commit your work and report anything left uncommitted.
 
-## 2. Method Contract (Mandatory in \`slp_stage_report\`)
-1. Chosen Method & Problem Mapping: State technique/algorithm/pattern A chosen to solve problem B.
-2. Step-by-Step Quantitative Progression: Present input data C -> processing steps -> output D with measured cost/complexity E (latency, memory, query count, test pass counts).
-3. Rejected Alternatives & Rationale: Explain which alternative technique F was rejected and why G.
+## 2. Report
+- Files changed, commands run with their results, and any brief criterion you could not meet and why. Explain a design trade-off only when it is not obvious, in one or two sentences.
 
 ## 3. Shared SLP Peer Protocol
 - When your work and evidence are ready, call \`slp_stage_report\` with structured findings and status (\`completed\` or \`blocked\`).
 - Do not approve the stage yourself. The Lead independently decides whether the evidence meets the goal and either approves or requests rework.
 - Communicate with other agents only through MCP tools from server "${BUS_SERVER_NAME}". Never use the paseo CLI, curl, or an external messaging path.
 - Pipeline definitions, stage reports and communication history live in SQLite. Read them with the available \`slp_\` tools; read-only queries do not end your turn.
-- STRICT TECHNICAL METRICS & INPUT/LOGIC/OUTPUT RULE (MANDATORY): Every technical communication (\`slp_ask\`, \`slp_answer\`, \`slp_notify\`, \`slp_stage_report\`) MUST be backed by concrete metrics and technical data. For every function, feature or logic block discussed or delivered, explicitly state: (1) the exact logic/mechanism, (2) the expected input parameters/data/preconditions, and (3) the expected output data/metrics (or exact observable runtime outcome/state transition). Vague prose without concrete input/logic/output or runtime outcome evidence is strictly prohibited.
-- CROSS-STAGE PEER LIFECYCLE: Stage peers remain alive across all stages of a pipeline until integration. Use \`slp_ask\` to question peers from current or earlier stages or your Lead when upstream contracts are unclear.
+- Keep it simple: build only what the acceptance criteria and the locked brief require.
 - LOCAL BRANCH HYGIENE & NO REMOTE PUSH: Pipeline branches (\`slp/*\`) are strictly temporary local branches. Never run \`git push\` or publish temporary branches to any remote.
 - After \`slp_stage_report\` or \`slp_escalate\` succeeds, END YOUR TURN.
 \`\`\`
@@ -169,10 +168,11 @@ ROLE: Pipeline peer (Backend & API Engineer). Apply this domain workflow to your
 3. \`name\` *(optional, non-empty string)*: Human-friendly display title. Defaults to \`role\` if omitted.
 4. \`model\` *(optional, string or empty)*:
    - Leave empty (\`model:\`) to inherit the run's Peer model configuration.
-   - **Important Fork Constraint:** Because stage peers fork directly from their owning Lead's session, any \`model\` specified in \`.slp/peers/**/*.md\` **must belong to the Lead's provider** (e.g., if Lead runs on \`claude/*\`, a peer can specify \`claude-sonnet-4-6\` or \`claude/claude-opus-4-6\`). If a peer specifies a model from a different provider or an unknown model, SLP automatically falls back to the global Peer model config.
+   - **Fork Constraint (when the run enables peer forking):** a forked peer resumes its owning Lead's session, so any \`model\` specified in \`.slp/peers/**/*.md\` **must belong to the Lead's provider** (e.g., if Lead runs on \`claude/*\`, a peer can specify \`claude-sonnet-4-6\` or \`claude/claude-opus-4-6\`). If a peer specifies a model from a different provider or an unknown model, SLP automatically falls back to the global Peer model config.
 5. \`thinking\` *(optional, string or empty)*: Reasoning effort option ID (e.g., \`low\`, \`medium\`, \`high\`). Leave empty to inherit.
-6. \`tier\` *(required for every generated peer: \`feature\` or \`integration\`)*: Tells the Lead where the peer may be scheduled. \`feature\` peers run inside parallel feature pipelines and execute only \`fast\` tier tests; \`integration\` peers run only in the final QA pipeline on the merged integration branch, where heavy resources are used one at a time. The value is injected into the Lead's peer catalog with the rest of the front matter.
-7. **Custom Metadata Keys (\`domains\`, \`skills\`, \`features\`, etc.)** *(recommended)*: \`FrontMatterSchema\` preserves arbitrary extra YAML keys. Because the **entire raw YAML front matter block** of every peer is injected into the Lead's \`systemPrompt\` under \`AVAILABLE PROJECT PEERS\`, listing \`domains:\` (spec sections/modules owned) and \`skills:\` (provider skills the peer uses) helps the Lead assemble the exact right specialist team for each stage!
+6. \`kind\` *(required for every generated peer: \`advisor\`, \`developer\` or \`qa\`)*: Decides the stage the peer may join and its write access (only \`developer\` writes). When omitted, the engine guesses from the role id (review/architect/design/research -> advisor, qa/test -> qa, otherwise developer), so always set it explicitly.
+7. \`tier\` *(required for every generated peer: \`feature\` or \`integration\`)*: Tells the Lead where the peer may be scheduled. \`feature\` peers run inside parallel feature pipelines and execute only \`fast\` tier tests; \`integration\` peers run only in the final QA pipeline on the merged integration branch, where heavy resources are used one at a time. The value is injected into the Lead's peer catalog with the rest of the front matter.
+8. **Custom Metadata Keys (\`domains\`, \`skills\`, \`features\`, etc.)** *(recommended)*: \`FrontMatterSchema\` preserves arbitrary extra YAML keys. Because the **entire raw YAML front matter block** of every peer is injected into the Lead's \`systemPrompt\` under \`AVAILABLE PROJECT PEERS\`, listing \`domains:\` (spec sections/modules owned) and \`skills:\` (provider skills the peer uses) helps the Lead assemble the exact right specialist team for each stage!
 
 ---
 
@@ -184,16 +184,16 @@ When customizing \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, or peer files (for ex
 1. **Front Matter:** Keep \`role: supervisor\` and a non-empty \`description\`. (\`model\` in \`SUPERVISOR.md\` can be a short model ID or a full \`provider/model\` ID).
 2. **Read-Only Invariant:** Supervisor must remain **READ-ONLY** on the repository (it never edits source files or commits code directly).
 3. **Delegation Tool (\`slp_delegate\`):** Preserve instructions to decompose requests into 1 cohesive task (\`{ acceptanceCriteria, productSpec }\`) or \`N\` parallel features (\`{ tasks: [{ name, acceptanceCriteria, productSpec }], sharedContext? }\`) via \`slp_delegate\`, passing shared standards/contracts in \`sharedContext\`. Every feature must carry its human-approved \`productSpec\`; a delegation without one is rejected.
-4. **Verification & Completion Tools:** Preserve instructions to inspect pipelines with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_get_run\`, and \`git diff\`, revive stalled agents with \`slp_revive_agent\`, reject incomplete work with \`slp_request_rework\`, and accept verified work with \`slp_present_to_manager\`.
+4. **Verification & Completion Tools:** Preserve instructions to inspect pipelines with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_get_run\`, and \`git diff\`, revive stalled agents with \`slp_revive_agent\`, reject incomplete work with \`slp_request_rework\`, and accept verified work with \`slp_present_to_manager\`. Keep the human-decision rule: when a Lead hits the rework cap, present its scorecard to the human and pass the answer back with \`slp_relay_decision({ pipelineId, decision })\`.
 5. **Product Spec Before Delegation:** Preserve the five-section product spec template (screens and elements, states, Given/When/Then interactions, business rules, out of scope), the rule to get explicit human approval first, and passing it unchanged as \`productSpec\`. Adapt the section names to the project (for example HUD, input and feedback for games; endpoints and payloads for APIs) but keep the scenarios.
-6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_delegate\`, \`slp_request_rework\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
+6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_delegate\`, \`slp_request_rework\`, \`slp_relay_decision\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
 
 ### Mandatory Checklist When Editing \`.slp/LEAD.md\`
 1. **Front Matter:** Keep \`role: master-lead\` (or \`role: lead\`) and a non-empty \`description\`. Note that changing \`model\` in \`LEAD.md\` to another provider switches the Lead's provider (and affects which peer models are compatible when forking).
 2. **Sibling Lead Alignment:** Preserve instructions to inspect concurrent sibling features and align shared contracts/APIs/routes with sibling Leads via \`slp_ask({ toAgentId, question })\`.
-3. **Pipeline Definition (\`slp_define_pipeline\`):** Preserve instructions to define stages using role IDs from the \`.slp/peers\` catalog (\`{ pipeline: { name, version, description, stages: [{ name, goal, peers: [{ role, task }] }] } }\`), without inventing a \`systemPrompt\` field inside stage definitions. You can recommend project-specific stage shapes (e.g., \`design-contracts\` -> \`implement\` -> \`verify-and-review\`) referencing your grouped peer role IDs!
+3. **Pipeline Definition (\`slp_define_pipeline\`):** Preserve instructions to define stages using role IDs from the \`.slp/peers\` catalog (\`{ pipeline: { name, version, description, stages: [{ name, kind?, goal, peers: [{ role, task }] }], brief? } }\`), without inventing a \`systemPrompt\` field. Keep the enforced shape \`[planning with advisors]? -> implement with one developer\` and the locked brief; recommend which advisors to use for which kind of problem, and say that small, clear changes skip planning and pass the brief directly.
 4. **Stage Supervision & Lifecycle Tools:** Preserve instructions for:
-   - \`slp_approve_stage\` and \`slp_stage_rework\` (reviewing peer reports and diffs),
+   - \`slp_approve_stage\` (with \`brief\` when closing planning) and \`slp_stage_rework\` (judging reports against the brief, never asking for work outside it; at the rework cap, approve or \`slp_escalate\`),
    - \`slp_handle_peer_shell\` (handling hung peer shell commands flagged by the watchdog),
    - \`slp_finalize_pipeline\` (merging the completed feature worktree branch into the QA branch). Feature Leads do not have \`slp_report\`; do not instruct them to report.
 5. **Test Tier Policy:** Keep the rule that feature pipelines schedule only \`tier: feature\` peers and run only the \`fast\` tier of \`.slp/standards/TEST_POLICY.md\`, leaving \`engine\`/\`integration\` tier work to the final QA pipeline after all feature branches are merged.
@@ -204,15 +204,15 @@ When customizing \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, or peer files (for ex
 1. **Front Matter:** Keep \`role: qa-lead\` and a non-empty \`description\`. A \`model\` here applies to the QA Lead only; keep it on the Lead provider so QA peers can fork its session.
 2. **Two Phases:** Preserve the preparation phase (study unit, automation and manual testing from \`TEST_POLICY.md\`, ask feature Leads, do NOT define a pipeline) and the post-handover phase (define the QA pipeline over the merged QA branch, omitting \`worktree\`).
 3. **Never Edit Code:** Preserve the rule that the QA Lead only spawns peers for testing and fixing; the runtime denies its writes anyway, so instructions to edit would stall it.
-4. **Project-Specific QA Stages:** Describe the stage shape from the investigation (for example build and fast suites -> engine/E2E suites -> real-environment manual journeys -> fix and re-verify), referencing \`tier: integration\` peers, and never two peers using the same heavy resource in one stage.
+4. **Project-Specific QA Stages:** Describe the verify stages from the investigation (for example build and fast suites -> engine/E2E suites -> real-environment manual journeys), each with \`kind: qa\` graders and at most one \`kind: developer\` fixer, referencing \`tier: integration\` peers, and never two peers using the same heavy resource in one stage. Keep the scorecard loop: the QA Lead decides from the graded criteria and sends fixes with \`slp_stage_rework\`; at the rework cap it approves or calls \`slp_escalate\`.
 5. **Close Then Report:** Keep \`slp_finalize_pipeline\` (closes the QA pipeline, nothing is merged) followed by \`slp_report\`, and the instruction that Supervisor rework arrives here as a new QA pipeline with a new name.
 6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_handle_peer_shell\`, \`slp_finalize_pipeline\` or \`slp_report\` succeeds, END YOUR TURN."*
 
 ### Mandatory Checklist When Editing Any \`.slp/peers/<group>/*.md\` File
 1. **Front Matter:** Ensure \`role\` is unique across all group folders, lowercase-hyphenated compatible, not a reserved root role (\`supervisor\`, \`lead\`, \`master-lead\`, \`qa-lead\`), and has a clear \`description\`.
-2. **Fork Awareness:** Remind the peer that it forks directly from its Lead in the shared feature worktree and should build on the Lead's investigation rather than re-scanning the entire repo from scratch.
-3. **MCP Tool Obligations:** Ensure the workflow instructs the peer to submit its findings via \`slp_stage_report\` (or \`slp_escalate\` when blocked), collaborate with peers/Lead via \`slp_ask\` / \`slp_notify\` and answer incoming questions with \`slp_answer\`, and **never** attempt to approve the stage itself.
-4. **Metrics & Evidence Contract:** Keep the requirement to provide concrete Input / Logic / Output metrics (and visual/screenshot evidence for UI/QA roles, or step-by-step methodology + rejected alternatives for engineering roles).
+2. **Brief First:** The peer works from its stage mail (goal, task, locked brief) whether or not it is forked, and stays inside the brief.
+3. **MCP Tool Obligations:** Ensure the workflow instructs the peer to submit via \`slp_stage_report\` (QA graders with a \`scorecard\` entry per criterion plus \`observations\`), escalate with \`slp_escalate\`, ask only its Lead via \`slp_ask\` / \`slp_notify\`, answer the Lead's questions with \`slp_answer\`, and **never** approve the stage itself.
+4. **Proportionate Evidence:** Ask for facts (files changed, commands and results, screenshot paths only for visual criteria), not mandatory essays; drop any "MANDATORY" method contracts or "enumerate all edge cases" rules from older files.
 5. **Test Tier:** Ensure \`tier\` is \`feature\` or \`integration\` and that the workflow names the exact test commands, folders and conventions from \`.slp/standards/TEST_POLICY.md\` allowed for that tier.
 6. **Turn Termination Rule:** Keep the instruction: *"After \`slp_stage_report\` or \`slp_escalate\` succeeds, END YOUR TURN."*
 
@@ -225,7 +225,7 @@ Whenever you create or modify any file in \`.slp/\`:
 2. Confirm that \`role\` and \`description\` are non-empty strings, YAML keys are unique, and the Markdown body after \`---\` is non-empty.
 3. Confirm that no two files across any \`.slp/peers/<group>/\` subdirectories normalize to the same \`role\` slug.
 4. Confirm that \`.slp/standards/TEST_POLICY.md\` exists, every command in its \`fast\` tier was actually run during the investigation (with measured time and peak memory), and every heavy resource lists its process signatures.
-5. Confirm that every peer declares \`tier: feature\` or \`tier: integration\`, that no \`feature\` peer is instructed to run an \`engine\` or \`integration\` tier command, and that each peer's test instructions match the conventions recorded in \`TEST_POLICY.md\`.
+5. Confirm that every peer declares \`kind\` and \`tier: feature\` or \`tier: integration\`, that no \`feature\` peer is instructed to run an \`engine\` or \`integration\` tier command, and that each peer's test instructions match the conventions recorded in \`TEST_POLICY.md\`.
 6. Confirm that all mandatory \`slp_*\` tool names, \`${BUS_SERVER_NAME}\` transport rules, local-branch hygiene (\`no git push\`), and turn-ending instructions remain intact in the Markdown body.
 
 ## 6. Upgrading an Existing \`.slp\` to the Current Structure
@@ -235,7 +235,7 @@ Run this checklist when a project's \`.slp\` was generated before the current en
 1. **Supervisor:** every \`slp_delegate\` call needs the human-approved \`productSpec\` (see Tier 1). Remove any instruction to call \`slp_report\` or to wait for a feature Lead's report; only the QA Lead reports.
 2. **Lead (\`.slp/LEAD.md\`):** remove every instruction to call \`slp_report\`, to spawn an End-User UAT pipeline, or to merge into the base branch. A feature Lead's last duty is \`slp_finalize_pipeline\` into the QA branch; the engine then hands verification to the QA Lead.
 3. **QA Lead (\`.slp/QA_LEAD.md\`):** the plugin re-seeds this file when it is missing. Customize it in place and keep its two phases; never put QA stages into \`LEAD.md\`.
-4. **Peers:** add \`tier: feature\` or \`tier: integration\` to every peer's front matter, as decided by the investigation. Feature-tier peers may run only the \`fast\` tier of \`TEST_POLICY.md\`.
+4. **Peers:** add \`kind: advisor|developer|qa\` and \`tier: feature\` or \`tier: integration\` to every peer's front matter, as decided by the investigation. Remove instructions to talk to other peers or to follow "MANDATORY" metric/method contracts. Feature-tier peers may run only the \`fast\` tier of \`TEST_POLICY.md\`.
 5. **Legacy \`.slp/peers/END_USER_UAT.md\`:** read it first and move any project-specific journeys into the QA Lead's plan or into an \`integration\` tier peer. Delete the file only after the human confirms, and remove or rename every reference to the \`end-user\` role with it.
 6. **Standards:** create \`.slp/standards/TEST_POLICY.md\` from the investigation. Without it, feature pipelines have no test-tier boundary.
 

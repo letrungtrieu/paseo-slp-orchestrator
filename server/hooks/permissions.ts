@@ -2,6 +2,7 @@
 // The agent's current pipeline/stage identity is the authorization boundary for writes.
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type { PeerKind } from "../../shared/project-prompts";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import { PROTECTED_TASK_FILES, matchesAnyScope } from "../git/scope";
 
@@ -14,6 +15,8 @@ export interface PermissionContext {
   // False means this agent belongs to an archived or no-longer-current stage.
   stageActive: boolean;
   archived: boolean;
+  // Null for non-peers and for callers predating peer kinds; only "advisor" and "qa" restrict a live peer.
+  peerKind?: PeerKind | null;
   // True when a Forked Lead is merging its completed pipeline branch and resolving conflicts.
   finalizingPipeline?: boolean;
   // Additional worktree paths (such as the pipeline worktree) writable by a finalizing Forked Lead.
@@ -67,6 +70,11 @@ export function extractShellCommand(request: AgentPermissionRequest): string | n
   return Array.isArray(commandField) ? commandField.join(" ") : null;
 }
 
+// Advisors only discuss the plan and QA only grades, so neither may change the worktree they judge.
+function isReadOnlyPeer(context: PermissionContext): boolean {
+  return context.peerKind === "advisor" || context.peerKind === "qa";
+}
+
 function roleMayWritePath(context: PermissionContext, relativePath: string): boolean {
   // Runtime artifacts remain protected even when a peer has a whole-worktree grant.
   if ((PROTECTED_TASK_FILES as readonly string[]).includes(relativePath)) return false;
@@ -83,6 +91,7 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
       return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;
+      if (isReadOnlyPeer(context)) return false;
       // An empty scope is the explicit whole-worktree default for a live pipeline peer.
       return context.writableScope.length === 0 || matchesAnyScope(relativePath, context.writableScope);
     }
@@ -119,6 +128,7 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
     return { behavior: "deny", message: "Pushing is not part of the pipeline." };
   }
   const peerMayMutate = context.role === "peer"
+    && !isReadOnlyPeer(context)
     && context.stageActive
     && Boolean(context.pipelineId && context.stageId);
   const mayMutate = !context.archived && context.stageActive

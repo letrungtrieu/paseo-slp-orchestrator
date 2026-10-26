@@ -4,6 +4,7 @@ import { RunModeSchema, SlpRoleSchema } from "./roles";
 import { StoredAcceptanceReportSchema, StoredPeerReportSchema } from "./reports";
 import { ProjectPromptConfigSchema } from "./project-prompts";
 import { PipelineStateSchema } from "./pipeline";
+import { OrchestrationSettingsSchema } from "./orchestration";
 
 // Re-export historical names because persisted-run readers and the old task card still use them.
 // New pipeline code imports its contracts from shared/pipeline.ts instead of this compatibility layer.
@@ -128,6 +129,8 @@ export const RunSchema = z.object({
   mode: RunModeSchema,
   status: RunStatusSchema,
   providers: ProviderChoicesSchema,
+  // Null for runs created before the setting existed; read it through runOrchestration().
+  orchestration: OrchestrationSettingsSchema.nullable().default(null),
   // Missing markers on old SQLite rows intentionally remain legacy until a new run opts in.
   engineVersion: RunEngineVersionSchema.default("legacy"),
   // Null until the Supervisor delegates, so a run in 'initializing' is still a valid stored object.

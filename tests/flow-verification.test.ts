@@ -12,12 +12,12 @@ describe("peer evidence and stage decisions", () => {
     const coordinatorId = flow.agentId(runId, "forked_lead", stage.id);
 
     await reportPeer(flow, runId, pipelineId, "reviewer", "Review found a retry boundary.");
-    // Coordinator is not woken prematurely while developer still owes slp_stage_report.
+    // Coordinator is not woken prematurely while the architect still owes slp_stage_report.
     expect(flow.mailTo(runId, coordinatorId).filter((message) => message.awaitTool === "slp_approve_stage")).toHaveLength(0);
 
-    await reportPeer(flow, runId, pipelineId, "developer", "The proposed change preserves the boundary.");
+    await reportPeer(flow, runId, pipelineId, "architect", "The proposed change preserves the boundary.");
 
-    expect(currentStage(flow, runId, pipelineId).reports.map((report) => report.role)).toEqual(["reviewer", "developer"]);
+    expect(currentStage(flow, runId, pipelineId).reports.map((report) => report.role)).toEqual(["reviewer", "architect"]);
     const approvalMessages = flow.mailTo(runId, coordinatorId).filter((message) => message.awaitTool === "slp_approve_stage");
     expect(approvalMessages).toHaveLength(1);
     expect(approvalMessages[0].text).toContain("Review found a retry boundary.");
@@ -50,7 +50,7 @@ describe("peer evidence and stage decisions", () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, TWO_PEER_PIPELINE);
     const stage = currentStage(flow, runId, pipelineId);
-    const peerId = flow.agentId(runId, "developer", stage.id);
+    const peerId = flow.agentId(runId, "architect", stage.id);
 
     const approval = await flow.callAs(peerId, "slp_approve_stage", { summary: "done" });
     expect(approval).toMatchObject({ isError: true });

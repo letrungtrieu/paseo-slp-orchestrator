@@ -5,7 +5,8 @@ import { ROLE_LABELS, isPipelineLeadRole } from "../../shared/roles";
 import type { MailboxMessage } from "../../shared/state";
 import { resolveAgentSettings } from "../project-prompts/agent-settings";
 import { peerRole } from "../project-prompts/defaults";
-import type { PipelineContext } from "./context";
+import { runOrchestration } from "../../shared/orchestration";
+import { archiveAgentLogged, type PipelineContext } from "./context";
 import {
   coordinatorRevivalBriefing,
   peerRosterUpdateNotice,
@@ -16,6 +17,7 @@ import {
 import { pausePipeline, requirePipeline } from "./stage-context";
 import { fallbackLeadIdFor, isQaPipeline } from "./qa/qa-phase-state";
 import { stageMail } from "./stage-mail";
+import { verifyStageCast } from "./verify-loop";
 
 // Recovery ticks and an approval tool may arrive together; only one may create or retire a cohort.
 const advancingPipelines = new Set<string>();
@@ -61,6 +63,8 @@ async function forkLeadSessionOptionsForPeer(
   peerRoleId: string,
 ): Promise<Record<string, unknown> | undefined> {
   const run = ctx.store.require(runId);
+  // Forking is a per-run choice: without it the peer starts clean and relies on the brief in its stage mail.
+  if (!runOrchestration(run).forkPeers) return undefined;
   const pipeline = requirePipeline(run, pipelineId);
   const stage = pipeline.stages[pipeline.currentStageIndex];
   const owningLeadId = stage?.forkedLeadAgentId ?? pipeline.leadAgentId ?? fallbackLeadIdFor(run, pipeline);
@@ -352,9 +356,13 @@ function activateStage(ctx: PipelineContext, runId: string, pipelineId: string, 
   const messages: MailboxMessage[] = [];
   if (!activationChanges.wasStageAlreadyStarted) {
     // Keep the Forked Lead idle until peers submit stage reports or send a direct question, saving an empty startup turn.
+    // A verify stage's developer stays dormant until the Lead sends a fix, so it never "fixes" before anything was graded.
+    const dormantDeveloperId = stage.kind === "verify" ? verifyStageCast(run, stage).developerAgentId : null;
     messages.push(
-      ...stage.peerAgentIds.map((agentId, peerIndex) =>
-        promptMessage(agentId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report"),
+      ...stage.peerAgentIds.flatMap((agentId, peerIndex) =>
+        agentId === dormantDeveloperId
+          ? []
+          : [promptMessage(agentId, peerStageBriefing(run, pipeline, stage, peerIndex), "slp_stage_report")],
       ),
     );
   } else {
@@ -469,4 +477,10 @@ async function finishStage(ctx: PipelineContext, runId: string, pipelineId: stri
       );
     }
   });
+  // Advisors only shape the brief; retiring them after planning keeps them from steering the build afterwards.
+  if (stage.kind === "planning") {
+    for (const advisorAgentId of stage.peerAgentIds.filter(Boolean)) {
+      await archiveAgentLogged(ctx, runId, null, advisorAgentId);
+    }
+  }
 }

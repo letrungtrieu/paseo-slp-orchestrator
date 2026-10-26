@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { normalizePipelineRoleId, type PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, SAMPLE_PRODUCT_SPEC, currentStage, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_BRIEF, SAMPLE_PRODUCT_SPEC, currentStage, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -13,6 +13,7 @@ describe("project business roles", () => {
 
     // Recursive discovery reads .slp/peers/ in lexicographical filename order.
     expect(configuration.peers.map((peer) => peer.role)).toEqual([
+      "architect",
       "developer",
       "qa-engineer",
       "reviewer",
@@ -28,19 +29,21 @@ describe("project business roles", () => {
     const pipeline: PipelineDefinition = {
       ...DEFAULT_PIPELINE,
       name: "normalized-role",
+      brief: SAMPLE_BRIEF,
+      // A Lead may spell the role like a human; the developer role is normalized the same way as any other.
       stages: [{
-        name: "qa-normalization",
-        goal: "Use the configured QA workflow.",
-        peers: [{ role: "qa_engineer", task: "Run the configured QA checks." }],
+        name: "dev-normalization",
+        goal: "Use the configured developer workflow.",
+        peers: [{ role: "Developer", task: "Implement the change." }],
       }],
     };
     const { runId, pipelineId } = await startedRunWithPipeline(flow, pipeline);
     const stage = currentStage(flow, runId, pipelineId);
-    const peerId = flow.agentId(runId, "qa_engineer", stage.id);
+    const peerId = flow.agentId(runId, "developer", stage.id);
 
     expect(normalizePipelineRoleId(" QA_engineer ")).toBe("qa-engineer");
-    expect(flow.run(runId).agents[peerId].projectRole).toBe("qa-engineer");
-    expect(flow.gateway.createdAgents.find(({ record }) => record.agentId === peerId)?.spec.title).toContain("QA Engineer");
+    expect(flow.run(runId).agents[peerId].projectRole).toBe("developer");
+    expect(flow.gateway.createdAgents.find(({ record }) => record.agentId === peerId)?.spec.title).toContain("Developer");
   });
 
   it("rejects a business role absent from the project's .slp snapshot", async () => {

@@ -1,7 +1,11 @@
 // Every fresh cohort receives the same goal, roster and durable handover before any peer starts work.
 import type { PipelineState, StageState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
+import { runOrchestration } from "../../shared/orchestration";
+import { peerKindOf } from "../../shared/project-prompts";
+import { peerRole } from "../project-prompts/defaults";
 import type { StagePromptContext } from "../prompts/system-prompts";
+import { briefSection, formatStageReports, peerKindGuidance } from "./stage-briefing-sections";
 
 export function stagePromptContext(pipeline: PipelineState, stage: StageState, task: string): StagePromptContext {
   // The goal and assignment are system context even before the final roster is activated through the mailbox.
@@ -21,109 +25,97 @@ export function stagePromptContext(pipeline: PipelineState, stage: StageState, t
   };
 }
 
-export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageState, currentPeerIndex?: number): string {
-  // Format roster and prior stage outcomes as readable Markdown instead of raw JSON so prompts remain easy to scan in chat.
-  const rosterLines = stage.peerAgentIds.map((agentId, peerIndex) => {
-    const peerAssignment = stage.peers[peerIndex];
-    if (peerIndex === currentPeerIndex) {
-      return `- **${peerAssignment.role}** (\`${agentId}\` — you)`;
-    }
-    return `- **${peerAssignment.role}** (\`${agentId}\`): ${peerAssignment.task}`;
-  });
-  const completedStages = pipeline.stages.slice(0, pipeline.currentStageIndex);
-  const previousStageLines = completedStages.map((previousStage) =>
+function stageContextSection(pipeline: PipelineState, stage: StageState): string {
+  const owningLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? "pending";
+  return [
+    "### Stage Context",
+    `- **Pipeline**: ${pipeline.name} (\`${pipeline.id}\`) — ${pipeline.description}`,
+    `- **Stage**: ${stage.name} (\`${stage.id}\`, ${stage.kind ?? "stage"})`,
+    `- **Worktree**: \`${pipeline.worktree}\``,
+    `- **Stage Goal**: ${stage.goal}`,
+    `- **Lead (your only contact)**: \`${owningLeadId}\``,
+  ].join("\n");
+}
+
+// Shared tail of every stage briefing: acceptance criteria, the locked brief and what earlier stages concluded.
+function stageBackgroundSections(run: Run, pipeline: PipelineState): string[] {
+  const sections: string[] = [];
+  if (run.criteria) sections.push(`### Overall Acceptance Criteria\n${run.criteria}`);
+  const lockedBrief = briefSection(run, pipeline);
+  if (lockedBrief) sections.push(lockedBrief);
+  const previousStageLines = pipeline.stages.slice(0, pipeline.currentStageIndex).map((previousStage) =>
     `- **${previousStage.name}** (${previousStage.goal}): ${previousStage.result?.summary ?? "Approved"}`,
   );
-  // Expose live peers from earlier completed stages so downstream peers can directly question them via slp_ask.
-  const priorStagePeerLines = completedStages.flatMap((previousStage) =>
-    previousStage.peerAgentIds.flatMap((priorPeerAgentId, priorPeerIndex) => {
-      if (!priorPeerAgentId || run.agents[priorPeerAgentId]?.archivedAt) return [];
-      const priorAssignment = previousStage.peers[priorPeerIndex];
-      const latestPeerReport = [...previousStage.reports]
-        .reverse()
-        .find((reportEntry) => reportEntry.agentId === priorPeerAgentId);
-      const reportSummarySuffix = latestPeerReport ? ` — Latest report: ${latestPeerReport.summary}` : "";
-      return [
-        `- [Stage **${previousStage.name}**] **${priorAssignment?.role ?? "peer"}** (\`${priorPeerAgentId}\`): ${priorAssignment?.task ?? ""}${reportSummarySuffix}`,
-      ];
-    }),
-  );
-  const owningLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? "pending";
-  const sections = [
-    [
-      "### Stage Context",
-      `- **Pipeline**: ${pipeline.name} (\`${pipeline.id}\`) — ${pipeline.description}`,
-      `- **Stage**: ${stage.name} (\`${stage.id}\`)`,
-      `- **Worktree**: \`${pipeline.worktree}\``,
-      `- **Stage Goal**: ${stage.goal}`,
-      `- **Lead (Coordinator)**: \`${owningLeadId}\``,
-    ].join("\n"),
+  if (previousStageLines.length > 0) sections.push(`### Previous Stage Results\n${previousStageLines.join("\n")}`);
+  return sections;
+}
+
+export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
+  // The coordinator alone sees the roster: peers talk to the Lead, never to each other.
+  const rosterLines = stage.peerAgentIds.map((agentId, peerIndex) => {
+    const peerAssignment = stage.peers[peerIndex];
+    return `- **${peerAssignment.role}** (\`${agentId}\`): ${peerAssignment.task}`;
+  });
+  return [
+    stageContextSection(pipeline, stage),
     `### Stage Peer Roster\n${rosterLines.join("\n")}`,
-  ];
-  if (run.criteria) {
-    sections.push(`### Overall Acceptance Criteria\n${run.criteria}`);
-  }
-  if (previousStageLines.length > 0) {
-    sections.push(`### Previous Stage Results\n${previousStageLines.join("\n")}`);
-  }
-  if (priorStagePeerLines.length > 0) {
-    sections.push(
-      `### Prior Stage Peers (Available for Cross-Stage Questions via slp_ask)\n${priorStagePeerLines.join("\n")}`,
-    );
-  }
-  return sections.join("\n\n");
+    ...stageBackgroundSections(run, pipeline),
+  ].join("\n\n");
 }
 
 export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: StageState, peerIndex: number): string {
   const assignment = stage.peers[peerIndex];
-  const hasPriorStagePeers = pipeline.currentStageIndex > 0;
-  const crossStageHint = hasPriorStagePeers
-    ? " Peers from earlier stages remain active in this pipeline—if you need clarification on upstream logic or assumptions, ask them directly via `slp_ask` using their IDs from **Prior Stage Peers**."
-    : "";
-  // Tailor collaboration instructions so a single peer does not waste a turn looking for sibling peers to message.
-  const coordinationGuidance = stage.peers.length === 1
-    ? `You are the sole peer in this stage.${crossStageHint} Apply your configured \`.slp\` workflow in the worktree and submit evidence with \`slp_stage_report\` (or use \`slp_escalate\` if blocked). The Lead decides when this stage is complete.`
-    : `All stage peers are equal participants. Stay focused on the shared goal, collaborate with current-stage or prior-stage peers via \`slp_ask\` (needs an answer) or \`slp_notify\` (information only) when needed, apply your configured \`.slp\` workflow, and submit evidence with \`slp_stage_report\`. The Lead decides when this stage is complete.`;
+  const peerKind = peerKindOf(peerRole(run.promptConfig, assignment.role));
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,
-    coordinationGuidance,
-    stageBriefing(run, pipeline, stage, peerIndex),
+    peerKindGuidance(peerKind, stage),
+    stageContextSection(pipeline, stage),
+    ...stageBackgroundSections(run, pipeline),
   ].join("\n\n");
+}
+
+function reworkBudgetLine(run: Run, stage: StageState): string {
+  const { maxReworkRounds } = runOrchestration(run);
+  return `Rework rounds used: ${stage.reworkRounds}/${maxReworkRounds}. At the cap you either approve or call slp_escalate, and the human decides through the Supervisor.`;
+}
+
+// Planning ends in the brief, so its coordinator is reminded that approval carries that contract.
+function coordinatorDecisionGuidance(stage: StageState): string {
+  if (stage.kind === "planning") {
+    return "Discuss the approach with the advisors, choose the simplest option that meets the acceptance criteria, then call `slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })`. The brief is locked after approval.";
+  }
+  if (stage.kind === "verify") {
+    return "Decide from the QA scorecards: approve with `slp_approve_stage`, or send a fix to the developer with `slp_stage_rework` (the graders re-score automatically after the fix). Observations outside the criteria are your judgement call.";
+  }
+  return "Judge the developer's report against the locked brief. Approve with `slp_approve_stage`, or request a correction with `slp_stage_rework`. Do not ask for work outside the brief.";
 }
 
 export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
   // The Lead judges the goal according to its configured .slp/LEAD.md workflow.
   return [
-    "You are the **Lead** controlling this stage from its start until closure. Apply your configured `.slp` workflow to direct peers through `slp_ask`, `slp_notify` or `slp_stage_rework`, inspect their evidence and the worktree, and decide when the result is acceptable with `slp_approve_stage({summary})` (or use `slp_escalate` if blocked beyond your authority).",
+    `You are the **Lead** controlling this stage until closure. ${coordinatorDecisionGuidance(stage)} Use \`slp_escalate\` if blocked beyond your authority.`,
+    reworkBudgetLine(run, stage),
     stageBriefing(run, pipeline, stage),
   ].join("\n\n");
-}
-
-function formatStageReports(reports: StageState["reports"]): string {
-  return reports.map((peerReport) => {
-    const findingsText = peerReport.findings.length > 0
-      ? `\n  Findings:\n${peerReport.findings.map((finding) => `  - ${finding}`).join("\n")}`
-      : "";
-    return `- **${peerReport.role}** (\`${peerReport.agentId}\`) [${peerReport.status}]: ${peerReport.summary}${findingsText}`;
-  }).join("\n");
 }
 
 // When a Lead session dies mid-stage after peers already reported, include their saved reports so the replacement can act immediately.
 export function coordinatorRevivalBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
   const baseBriefing = coordinatorStageBriefing(run, pipeline, stage);
   if (stage.reports.length === 0) return baseBriefing;
-  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formatStageReports(stage.reports)}\n\nReview the submitted reports against goal '${stage.goal}' according to your configured \`.slp\` workflow. Direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\` when you accept the result.`;
+  return `${baseBriefing}\n\n### Submitted Stage Peer Reports\n${formatStageReports(stage.reports)}\n\nDecide on the submitted reports according to your configured \`.slp\` workflow: \`slp_stage_rework\` or \`slp_approve_stage\`.`;
 }
 
 // A coordinator that already holds the goal, roster and earlier reports only needs what changed;
 // resending the full briefing each round made its context grow quadratically with every rework.
-export function coordinatorReportUpdateBriefing(stage: StageState, firstNewReportIndex: number): string {
+export function coordinatorReportUpdateBriefing(run: Run, stage: StageState, firstNewReportIndex: number): string {
   const newReports = stage.reports.slice(firstNewReportIndex);
   return [
     `### New Peer Report(s) For Stage '${stage.name}' (${newReports.length} new, ${stage.reports.length} total)`,
     formatStageReports(newReports),
-    `You already hold this stage's goal ('${stage.goal}'), roster and the earlier reports. Judge the new evidence against that goal according to your configured \`.slp\` workflow, then direct more work with \`slp_stage_rework\` or approve with \`slp_approve_stage\`. Call \`slp_get_pipeline\` if you need the full report history.`,
+    reworkBudgetLine(run, stage),
+    `You already hold this stage's goal ('${stage.goal}'), brief and the earlier reports. ${coordinatorDecisionGuidance(stage)} Call \`slp_get_pipeline\` if you need the full history.`,
   ].join("\n\n");
 }
 

@@ -1,5 +1,6 @@
 // Detects and respawns dead, archived or wedged Lead and Peer sessions
 // while preserving healthy sibling peers and re-queueing the exact pending workflow obligation.
+import { awaitsLeadRecovery } from "../../shared/pipeline";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { AgentRecord, Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
@@ -228,7 +229,7 @@ export async function markStageParticipantForRevival(
     currentStage.peerAgentIds = currentStage.peerAgentIds.map((peerId) => (peerId === targetAgentId ? "" : peerId));
     currentStage.status = "starting";
     // Reopen a pipeline that paused due to agent failure so stage recovery can spawn the replacement cohort member.
-    if (targetPipeline.status === "paused" && !targetPipeline.gate) {
+    if (awaitsLeadRecovery(targetPipeline)) {
       targetPipeline.status = "starting";
       targetPipeline.pausedReason = null;
     }

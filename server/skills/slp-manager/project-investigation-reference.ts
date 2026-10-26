@@ -80,7 +80,7 @@ Write \`.slp/standards/TEST_POLICY.md\` from \`TEST_POLICY_TEMPLATE.md\`. Every 
 
 ## Phase 6: Derive the Peers From the Findings
 
-1. **Feature-tier peers (\`tier: feature\`):** one engineer peer per area with distinct conventions (for example gameplay logic versus UI, backend versus frontend), plus a reviewer. Their workflows cite the exact \`fast\` commands, test folders, naming, and mocking approach from \`TEST_POLICY.md\`, and require work needing a heavy resource to be handed off in \`slp_stage_report\`.
+1. **Feature-tier peers (\`tier: feature\`):** one \`kind: developer\` engineer peer per area with distinct conventions (for example gameplay logic versus UI, backend versus frontend), plus one or two \`kind: advisor\` planning peers (architect, technical reviewer). Only one developer works per pipeline. Their workflows cite the exact \`fast\` commands, test folders, naming, and mocking approach from \`TEST_POLICY.md\`, and require work needing a heavy resource to be handed off in \`slp_stage_report\`.
 2. **Integration-tier peers (\`tier: integration\`):** an automation QA peer that runs the \`engine\`/\`integration\` automated suites on the merged build; a real-environment tester that follows the Phase 3 bring-up procedure and critical journeys and captures the recorded evidence types; add performance, security or device-compatibility peers only when the project has budgets or risks for them.
 3. **Do not create peers for stacks that are not present,** and merge roles that would have almost no distinct work.
 4. **Report a summary to the human:** detected stacks, tier table, heavy resources with \`max_concurrent\`, generated peers with their tier, and every \`UNVERIFIED\`/\`PROPOSED\` item that needs confirmation.

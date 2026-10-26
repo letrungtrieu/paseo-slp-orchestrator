@@ -4,37 +4,36 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { PipelineDefinition } from "../shared/pipeline";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, approveCurrentStage, askAndAnswer, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, localSlpBranches, SAMPLE_PRODUCT_SPEC, reportPeer, startedRunWithPipeline, verifyAndReportFromQaLead } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, SAMPLE_BRIEF, approveCurrentStage, askAndAnswer, commitPipelineWork, completePipeline, currentStage, delegateToLead, eventually, localSlpBranches, SAMPLE_PRODUCT_SPEC, reportPeer, startedRunWithPipeline, verifyAndReportFromQaLead } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
 describe("pipeline completion and integration", () => {
-  it("creates a fresh peer cohort per stage, keeps prior peers alive across stages and merge consultation, and archives all cohorts on integration", async () => {
+  it("creates a fresh cohort per stage, retires the advisors after planning, and archives the developer on integration", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
     const { runId, pipelineId } = await startedRunWithPipeline(flow, DEFAULT_PIPELINE);
     const firstStage = currentStage(flow, runId, pipelineId);
-    const firstPeerCohort = [...firstStage.peerAgentIds];
+    const advisorCohort = [...firstStage.peerAgentIds];
     for (const assignment of firstStage.peers) await reportPeer(flow, runId, pipelineId, assignment.role);
     await approveCurrentStage(flow, runId, pipelineId);
 
     const secondStage = currentStage(flow, runId, pipelineId);
     expect(secondStage.id).not.toBe(firstStage.id);
-    expect(secondStage.peerAgentIds.some((agentId) => firstPeerCohort.includes(agentId))).toBe(false);
-    // Stage 1 peers remain alive during Stage 2 for cross-stage consultation, and are listed in Stage 2's briefing.
-    for (const peerAgentId of firstStage.peerAgentIds) {
-      expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
-    }
+    expect(secondStage.peerAgentIds.some((agentId) => advisorCohort.includes(agentId))).toBe(false);
+    // Advisors shaped the brief; they are retired so they cannot steer the build, and the developer reads the brief instead.
+    await eventually(() => {
+      for (const advisorAgentId of advisorCohort) expect(flow.gateway.archivedAgentIds).toContain(advisorAgentId);
+    });
     const secondStageBriefing = flow.mailTo(runId, secondStage.peerAgentIds[0]).at(-1)?.text ?? "";
-    expect(secondStageBriefing).toContain("Prior Stage Peers");
-    expect(secondStageBriefing).toContain(firstStage.peerAgentIds[0]);
+    expect(secondStageBriefing).toContain("Locked Brief");
+    expect(secondStageBriefing).not.toContain("Prior Stage Peers");
     expect(secondStage.peerAgentIds.map((agentId) => flow.run(runId).agents[agentId].projectRole)).toEqual(["developer"]);
 
     await completePipeline(flow, runId, pipelineId);
     const owningLeadId = flow.pipeline(runId, pipelineId)!.stages.at(-1)!.forkedLeadAgentId!;
-    // Peers remain alive while the Lead prepares to merge the completed pipeline branch.
-    for (const peerAgentId of firstStage.peerAgentIds) {
-      expect(flow.gateway.archivedAgentIds).not.toContain(peerAgentId);
-    }
+    const developerId = secondStage.peerAgentIds[0];
+    // The developer stays alive while the Lead prepares to merge, so merge conflicts can still be explained.
+    expect(flow.gateway.archivedAgentIds).not.toContain(developerId);
     expect(flow.mailTo(runId, owningLeadId).at(-1)?.awaitTool).toBe("slp_finalize_pipeline");
     // Flushing the mailbox must deliver slp_finalize_pipeline to the Lead while pipeline.status is 'completed'.
     const deliveredFinalizeCount = await flow.deliverMail(runId);
@@ -45,7 +44,7 @@ describe("pipeline completion and integration", () => {
       summary: "Lead verified and merged the completed pipeline.",
     });
     expect(finalization.isError).toBe(false);
-    for (const agentId of firstPeerCohort) expect(flow.gateway.archivedAgentIds).toContain(agentId);
+    expect(flow.gateway.archivedAgentIds).toContain(developerId);
     // The merge ends the feature Lead's duty; the QA Lead now owes its QA pipeline instead of the Lead owing a report.
     expect(flow.run(runId).agents[owningLeadId].awaitingTool).toBeNull();
     expect(flow.run(runId).masterLeadAgentId).toBe(flow.run(runId).qaLeadAgentId);
@@ -101,6 +100,7 @@ describe("pipeline completion and integration", () => {
       version: "1.0.0",
       worktree: "pending",
       description: "Authentication feature pipeline",
+      brief: SAMPLE_BRIEF,
       stages: [{ name: "impl", goal: "Implement auth config", peers: [{ role: "developer", task: "Add auth setting" }] }],
     });
     // Define a second concurrent feature pipeline touching the same shared file to trigger a merge conflict.
@@ -115,6 +115,7 @@ describe("pipeline completion and integration", () => {
             version: "1.0.0",
             worktree: secondWorktree.cwd,
             description: "Billing feature pipeline",
+            brief: SAMPLE_BRIEF,
             stages: [{ name: "impl", goal: "Implement billing config", peers: [{ role: "developer", task: "Add billing setting" }] }],
           },
         })
@@ -240,23 +241,23 @@ describe("pipeline completion and integration", () => {
     const runId = await flow.startRun();
     await delegateToLead(flow, runId);
 
-    // Master Lead decomposes the spec into two parallel multi-stage task pipelines in a single tool call without pre-creating worktrees.
+    // Master Lead decomposes the spec into two parallel planning -> implement pipelines in a single tool call without pre-creating worktrees.
     const batchDefine = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {
       pipelines: [
         {
           name: "parallel-task-api",
           description: "Build API endpoints",
           stages: [
+            { name: "plan", goal: "Plan API", peers: [{ role: "architect", task: "Design API endpoints" }] },
             { name: "implement", goal: "Implement API", peers: [{ role: "developer", task: "Write API endpoints" }] },
-            { name: "verify", goal: "Verify API", peers: [{ role: "qa-engineer", task: "Test API endpoints" }] },
           ],
         },
         {
           name: "parallel-task-ui",
           description: "Build UI components",
           stages: [
+            { name: "plan", goal: "Plan UI", peers: [{ role: "architect", task: "Design UI views" }] },
             { name: "implement", goal: "Implement UI", peers: [{ role: "developer", task: "Write UI views" }] },
-            { name: "verify", goal: "Verify UI", peers: [{ role: "qa-engineer", task: "Test UI views" }] },
           ],
         },
       ],
@@ -282,10 +283,10 @@ describe("pipeline completion and integration", () => {
     expect(flow.run(runId).agents[uiStage1LeadId].parentAgentId).toBe(flow.run(runId).masterLeadAgentId);
 
     // Advance both pipelines to Stage 2 and verify each task reuses its dedicated Forked Lead rather than spawning a second Forked Lead.
-    await reportPeer(flow, runId, apiPipelineId, "developer", "API implemented");
-    await reportPeer(flow, runId, uiPipelineId, "developer", "UI implemented");
-    await approveCurrentStage(flow, runId, apiPipelineId, "API implementation approved");
-    await approveCurrentStage(flow, runId, uiPipelineId, "UI implementation approved");
+    await reportPeer(flow, runId, apiPipelineId, "architect", "API designed");
+    await reportPeer(flow, runId, uiPipelineId, "architect", "UI designed");
+    await approveCurrentStage(flow, runId, apiPipelineId, "API plan approved");
+    await approveCurrentStage(flow, runId, uiPipelineId, "UI plan approved");
 
     expect(currentStage(flow, runId, apiPipelineId).forkedLeadAgentId).toBe(apiStage1LeadId);
     expect(currentStage(flow, runId, uiPipelineId).forkedLeadAgentId).toBe(uiStage1LeadId);
