@@ -201,7 +201,8 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   slp_board_save_spec: {
     roles: ["supervisor"],
-    description: "Create or update the human-approved Spec on a Kanban ticket, recording a new Spec revision and Git-style diff.",
+    // Explicitly cover both initial drafts and revisions so the Supervisor saves Specs to Kanban before human approval.
+    description: "Create or update a Product Spec (initial draft or revision) on a project Kanban ticket (e.g. SLP-1), recording a Spec revision and Git-style diff. Always call this when drafting or updating a Product Spec for the human instead of only pasting the spec in chat.",
     input: z.object({
       ticketId: z.string().trim().min(1).optional(),
       title: z.string().trim().min(1).optional(),

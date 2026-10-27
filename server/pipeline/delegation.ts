@@ -192,10 +192,19 @@ export async function delegate(
         leadRecord.featureCriteria = task.acceptanceCriteria;
         leadRecord.featureSpec = task.productSpec ?? null;
       }
+      // Preserve a descriptive title saved earlier via slp_board_save_spec when single-feature delegation fell back to run.title.
+      const unboundRunTicket = ctx.store.board
+        .listByRun(runId)
+        .find((candidateTicket) => !candidateTicket.leadAgentId);
+      const effectiveTicketTitle =
+        typeof rawInput !== "string" && (!rawInput.tasks || rawInput.tasks.length === 0) && unboundRunTicket
+          ? unboundRunTicket.title
+          : task.name;
       // Persist each delegated feature as a project-scoped Kanban ticket in the SPEC column.
       ctx.store.board.saveSpec({
         repoPath: mutableRun.repoPath,
-        title: task.name,
+        ticketIdOrKey: unboundRunTicket && provisionedLeads.length === 1 ? unboundRunTicket.id : undefined,
+        title: effectiveTicketTitle,
         acceptanceCriteria: task.acceptanceCriteria,
         specContent: task.productSpec ?? overallProductSpec ?? task.acceptanceCriteria,
         author: "supervisor",

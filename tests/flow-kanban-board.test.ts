@@ -11,8 +11,10 @@ import type { BoardTicket } from "../shared/board";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import {
   SAMPLE_BRIEF,
+  SAMPLE_PRODUCT_SPEC,
   SINGLE_DEVELOPER_PIPELINE,
   currentStage,
+  delegateToLead,
   eventually,
   startedRunWithPipeline,
 } from "./helpers/flow-steps";
@@ -224,5 +226,31 @@ describe("Kanban Spec & Brief board workflow", () => {
       const refreshedTicket = flow.ctx.store.board.find("SLP-1", flow.repoPath)!;
       expect(refreshedTicket.items.find((bullet) => bullet.id === "C2")?.status).toBe("implemented");
     });
+  });
+
+  it("reuses the pre-saved Kanban Spec ticket when the Supervisor drafts via slp_board_save_spec before slp_delegate", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const runId = await flow.startRun();
+    const supervisorAgentId = flow.run(runId).supervisorAgentId;
+
+    // Supervisor drafts the 5-section Product Spec onto the Kanban board before human approval and delegation.
+    const draftSpecCall = await flow.callAs(supervisorAgentId, "slp_board_save_spec", {
+      title: "Fix Swim Colliders & Remove Debug Buttons",
+      acceptanceCriteria: "Billing import works end to end and its behavior is independently verified.",
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Initial 5-section Product Spec draft for review",
+    });
+    expect(draftSpecCall.isError).toBe(false);
+    const savedDraftPayload = JSON.parse(draftSpecCall.text) as { ticketKey: string; currentSpecRev: number };
+    expect(savedDraftPayload.ticketKey).toBe("SLP-1");
+    expect(savedDraftPayload.currentSpecRev).toBe(1);
+
+    // After human approval, slp_delegate binds the spawned Lead to the existing SLP-1 ticket without creating SLP-2.
+    await delegateToLead(flow, runId);
+    const projectTickets = flow.ctx.store.board.listByRepo(flow.repoPath);
+    expect(projectTickets).toHaveLength(1);
+    expect(projectTickets[0].ticketKey).toBe("SLP-1");
+    expect(projectTickets[0].title).toBe("Fix Swim Colliders & Remove Debug Buttons");
+    expect(projectTickets[0].leadAgentId).toBe(flow.run(runId).masterLeadAgentId);
   });
 });

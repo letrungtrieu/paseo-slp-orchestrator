@@ -140,13 +140,16 @@ export class BoardStore {
     const database = this.resolveDatabase();
     return transaction(database, () => {
       const nowIso = new Date().toISOString();
-      // Reuse an existing ticket in the same repository when matched by explicit key or case-insensitive feature title.
+      // Reuse an existing ticket in the same repository when matched by explicit key, feature title, or an unbound draft in the same run.
       const existingTicket =
         (input.ticketIdOrKey ? this.find(input.ticketIdOrKey, input.repoPath) : null) ??
         (input.title
           ? this.listByRepo(input.repoPath).find(
               (candidateTicket) => candidateTicket.title.toLowerCase() === input.title!.trim().toLowerCase(),
             ) ?? null
+          : null) ??
+        (input.activeRunId
+          ? this.listByRun(input.activeRunId).find((candidateTicket) => !candidateTicket.leadAgentId) ?? null
           : null);
 
       const previousSpecRevision = existingTicket?.specRevisions.at(-1) ?? null;
