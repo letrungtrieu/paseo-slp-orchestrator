@@ -329,6 +329,31 @@ export async function definePipeline(
           leadRecord.worktreePath = workspace.cwd;
           leadRecord.featureName = leadRecord.featureName ?? pipeline.name;
         }
+        // Synchronize feature pipelines with the project Kanban board so Brief bullets and pipeline links stay current.
+        if (pipeline.kind === "feature" && pipeline.brief) {
+          ctx.store.board.syncPipelineBriefToTicket({
+            repoPath: mutableRun.repoPath,
+            runId,
+            pipelineId: pipeline.id,
+            pipelineName: pipeline.name,
+            leadAgentId,
+            brief: pipeline.brief,
+            reason: "Defined with pipeline",
+            fallbackCriteria: leadRecord?.featureCriteria ?? mutableRun.criteria ?? "",
+            fallbackSpec: leadRecord?.featureSpec ?? mutableRun.productSpec,
+          });
+        } else if (pipeline.kind === "feature") {
+          ctx.store.board.saveSpec({
+            repoPath: mutableRun.repoPath,
+            title: pipeline.name,
+            acceptanceCriteria: leadRecord?.featureCriteria ?? mutableRun.criteria ?? "",
+            specContent: leadRecord?.featureSpec ?? mutableRun.productSpec ?? mutableRun.criteria ?? pipeline.description,
+            author: "supervisor",
+            activeRunId: runId,
+            activePipelineId: pipeline.id,
+            leadAgentId,
+          });
+        }
       }
       mutableRun.status = "running";
       const callerLeadRecord = mutableRun.agents[callerLeadId];

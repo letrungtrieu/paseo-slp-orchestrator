@@ -192,6 +192,17 @@ export async function delegate(
         leadRecord.featureCriteria = task.acceptanceCriteria;
         leadRecord.featureSpec = task.productSpec ?? null;
       }
+      // Persist each delegated feature as a project-scoped Kanban ticket in the SPEC column.
+      ctx.store.board.saveSpec({
+        repoPath: mutableRun.repoPath,
+        title: task.name,
+        acceptanceCriteria: task.acceptanceCriteria,
+        specContent: task.productSpec ?? overallProductSpec ?? task.acceptanceCriteria,
+        author: "supervisor",
+        summary: "Delegated feature specification",
+        activeRunId: runId,
+        leadAgentId: agentId,
+      });
     }
     // Deliver each Lead's assignment alongside the full roster of sibling Leads so parallel features stay aligned.
     for (const currentLead of provisionedLeads) {

@@ -22,8 +22,9 @@ const lastSweeperNudgeByAgent = new Map<string, string>();
 const NUDGE_GRACE_PERIOD_MS = 10_000;
 
 function agentOwnsCurrentStage(run: Run, agentRecord: AgentRecord): boolean {
+  // Paused peers are intentionally idle while their Lead updates the Brief, so they must not be nudged.
   if (run.engineVersion !== "dynamic-stages-v1" || run.status !== "running"
-    || !agentRecord.pipelineId || !agentRecord.stageId || agentRecord.archivedAt) return false;
+    || !agentRecord.pipelineId || !agentRecord.stageId || agentRecord.archivedAt || agentRecord.pausedAt) return false;
   const pipeline = run.pipelines[agentRecord.pipelineId];
   if (!pipeline) return false;
   // The pipeline's Lead continues to own the pipeline while merging its branch via slp_finalize_pipeline.

@@ -29,6 +29,33 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
   ctx.store.mutate(run.id, (mutableRun) => {
     // Follow-up reports append evidence instead of erasing the discussion that led to the latest conclusion.
     stage.reports.push(report);
+    // Keep the project Kanban ticket in sync with developer implementation reports and QA scorecards.
+    if (peerKind === "qa" && submission.scorecard?.length) {
+      const targetTickets = ctx.store.board.listByRun(mutableRun.id);
+      for (const candidateTicket of targetTickets) {
+        ctx.store.board.scoreItems({
+          ticketIdOrKey: candidateTicket.id,
+          repoPath: mutableRun.repoPath,
+          gradedBy: caller.agentId,
+          scorecard: submission.scorecard,
+        });
+      }
+    } else if (peerKind === "developer" && report.status === "completed") {
+      const pipelineTicket = ctx.store.board.findByPipeline(pipeline.id);
+      if (pipelineTicket) {
+        for (const bulletItem of pipelineTicket.items) {
+          if (bulletItem.scope === "in" && (bulletItem.status === "todo" || bulletItem.status === "in_progress" || bulletItem.status === "rework")) {
+            ctx.store.board.updateItemProgress({
+              ticketIdOrKey: pipelineTicket.id,
+              repoPath: mutableRun.repoPath,
+              itemId: bulletItem.id,
+              status: "implemented",
+              note: submission.summary,
+            });
+          }
+        }
+      }
+    }
     agent.awaitingTool = null;
     agent.awaitingSince = null;
     agent.nudges = 0;
@@ -85,7 +112,7 @@ export function submitStageReport(ctx: PipelineContext, caller: BusCaller, submi
 }
 
 export function requestStageRework(ctx: PipelineContext, caller: BusCaller, input: { agentIds: string[]; feedback: string }): string {
-  const { run, stage, agent } = requireStageLead(ctx, caller);
+  const { run, pipeline, stage, agent } = requireStageLead(ctx, caller);
   const { maxReworkRounds } = runOrchestration(run);
   // The cap stops endless polishing: after it, the human decides instead of another model round.
   if (stage.reworkRounds >= maxReworkRounds) {
@@ -101,6 +128,17 @@ export function requestStageRework(ctx: PipelineContext, caller: BusCaller, inpu
   const reworkRound = stage.reworkRounds + 1;
   ctx.store.mutate(run.id, () => {
     stage.reworkRounds = reworkRound;
+    // Reflect the rework transition on the project Kanban board so the ticket moves to REWORK immediately.
+    const targetTickets = pipeline.kind === "qa"
+      ? ctx.store.board.listByRun(run.id)
+      : [ctx.store.board.findByPipeline(pipeline.id)].filter((ticket): ticket is NonNullable<typeof ticket> => Boolean(ticket));
+    for (const ticketToRework of targetTickets) {
+      ctx.store.board.markRework({
+        ticketIdOrKey: ticketToRework.id,
+        repoPath: run.repoPath,
+        feedback: input.feedback,
+      });
+    }
     for (const recipientId of recipients) {
       // All prior reports remain stage history; the rework message is appended to it.
       stage.messages.push({ id: randomUUID(), fromAgentId: caller.agentId, toAgentId: recipientId,

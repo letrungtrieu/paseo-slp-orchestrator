@@ -3,6 +3,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { RunModeSchema } from "./roles";
+import { BoardTicketSchema } from "./board";
 import { CommLogEntrySchema, RunSchema, RunStatusSchema } from "./state";
 import { ProjectRoleSchema } from "./project-prompts";
 import { PeerQuestionMetricsSchema, PeerQuestionStatusSchema, PeerQuestionViewSchema } from "./peer-questions";
@@ -166,4 +167,35 @@ export const listPeerQuestionsRpc = defineRpc({
     limit: z.number().int().min(1).max(2000).default(500),
   }),
   output: z.object({ questions: z.array(PeerQuestionViewSchema), metrics: PeerQuestionMetricsSchema }),
+});
+
+// Returns all Kanban tickets for a project repository (or the repository of the selected run) with live agent statuses.
+export const listBoardTicketsRpc = defineRpc({
+  name: "slp.board.list",
+  input: z.object({
+    repoPath: z.string().optional(),
+    runId: z.string().optional(),
+  }),
+  output: z.object({
+    repoPath: z.string(),
+    tickets: z.array(BoardTicketSchema),
+  }),
+});
+
+// Saves a human-authored Spec creation or edit from the Kanban UI, computes the Git-style diff, and notifies the Supervisor.
+export const saveBoardSpecFromUiRpc = defineRpc({
+  name: "slp.board.save_spec",
+  input: z.object({
+    repoPath: z.string().min(1),
+    runId: z.string().optional(),
+    ticketId: z.string().optional(),
+    title: z.string().trim().min(1),
+    acceptanceCriteria: z.string().optional(),
+    specContent: z.string().trim().min(1),
+    summary: z.string().optional(),
+  }),
+  output: z.object({
+    ticket: BoardTicketSchema,
+    notifiedSupervisor: z.boolean(),
+  }),
 });

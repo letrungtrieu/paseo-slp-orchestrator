@@ -3,9 +3,14 @@
 import { z } from "zod";
 import { SLP_ROLES, type SlpRole } from "../../shared/roles";
 import {
+  BriefItemInputSchema,
+  BriefItemStatusSchema,
+} from "../../shared/board";
+import {
   DelegationSubmissionSchema,
   PipelineBriefSchema,
   PipelineEnvelopeSchema,
+  ScorecardEntrySchema,
   StageReportSubmissionSchema,
 } from "../../shared/pipeline";
 
@@ -160,6 +165,88 @@ export const BUS_TOOL_DEFINITIONS = {
     roles: SLP_ROLES,
     description: "Read the run's acceptance criteria, status and pipeline summaries.",
     input: z.object({}),
+  },
+  // Enables a Lead to immediately pause its child peers while updating the Brief or resolving a Spec change.
+  slp_pause_peers: {
+    roles: ["master_lead", "qa_lead"],
+    description: "Immediately pause active child stage peers (interrupting their current turn/shell and locking writes) while you revise the Brief or handle a Spec update.",
+    input: z.object({
+      pipelineId: pipelineIdField.optional(),
+      peerAgentIds: z.array(z.string().trim().min(1)).optional(),
+      reason: z.string().trim().min(1),
+    }),
+  },
+  // Restores write permissions and wakes paused child peers with updated Brief guidance.
+  slp_resume_peers: {
+    roles: ["master_lead", "qa_lead"],
+    description: "Resume child stage peers previously paused with slp_pause_peers and deliver updated Brief guidance.",
+    input: z.object({
+      pipelineId: pipelineIdField.optional(),
+      peerAgentIds: z.array(z.string().trim().min(1)).optional(),
+      guidance: z.string().trim().min(1),
+    }),
+  },
+  // Jira-like project Kanban board tools for reading and updating Spec -> Brief -> Score -> Rework.
+  slp_board_list_tickets: {
+    roles: SLP_ROLES,
+    description: "List project Kanban tickets (Spec -> Brief -> Score -> Rework), revision numbers, and active agents.",
+    input: z.object({}),
+  },
+  slp_board_get_ticket: {
+    roles: SLP_ROLES,
+    description: "Read a Kanban ticket's current Spec, Spec diff, Brief bullet items, Brief diff, QA scores, and rework items.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional().describe("Ticket key (e.g. SLP-1) or id; defaults to caller's ticket"),
+    }),
+  },
+  slp_board_save_spec: {
+    roles: ["supervisor"],
+    description: "Create or update the human-approved Spec on a Kanban ticket, recording a new Spec revision and Git-style diff.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      title: z.string().trim().min(1).optional(),
+      acceptanceCriteria: z.string().trim().min(1).optional(),
+      spec: z.string().trim().min(1),
+      summary: z.string().trim().min(1).optional(),
+    }),
+  },
+  slp_board_notify_lead: {
+    roles: ["supervisor"],
+    description: "Notify the active Lead about a Spec revision and diff so the Lead can pause its peers and update the Brief.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      toAgentId: z.string().trim().min(1).optional(),
+      message: z.string().trim().min(1),
+    }),
+  },
+  slp_board_update_brief: {
+    roles: ["master_lead", "qa_lead"],
+    description: "Create or update a ticket's Brief bullet items (for example from a Spec diff or when switching technical approaches after an implementation/merge conflict). Records a new Brief revision and diff.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      pipelineId: pipelineIdField.optional(),
+      reason: z.string().trim().min(1).describe("Why the Brief is being created or changed (e.g. conflict resolution or Spec diff)"),
+      approach: z.string().trim().min(1),
+      items: z.array(BriefItemInputSchema).min(1),
+    }),
+  },
+  slp_board_update_item: {
+    roles: ["master_lead", "qa_lead", "peer"],
+    description: "Update the implementation status and notes of a specific Brief bullet item on the Kanban ticket.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      itemId: z.string().trim().min(1),
+      status: BriefItemStatusSchema,
+      note: z.string().trim().min(1).optional(),
+    }),
+  },
+  slp_board_score_item: {
+    roles: ["master_lead", "qa_lead", "peer"],
+    description: "Record QA pass/fail/blocked scores and evidence for Brief bullet items on the Kanban ticket.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      scorecard: z.array(ScorecardEntrySchema).min(1),
+    }),
   },
 } as const satisfies Record<string, { roles: readonly SlpRole[]; description: string; input: z.ZodType }>;
 

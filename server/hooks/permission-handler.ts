@@ -23,8 +23,8 @@ function isFinalizingLead(run: Run, agentRecord: AgentRecord): boolean {
 }
 
 function stageIsCurrent(run: Run, agentRecord: AgentRecord): boolean {
-  // Archived agents and legacy or aborted runs must never receive new write or shell permissions.
-  if (agentRecord.archivedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
+  // Archived or Lead-paused agents and legacy or aborted runs must never receive new write or shell permissions.
+  if (agentRecord.archivedAt || agentRecord.pausedAt || run.engineVersion !== "dynamic-stages-v1" || run.status === "aborted") return false;
   if (run.status === "completed") return agentRecord.role === "supervisor" || isPipelineLeadRole(agentRecord.role);
   if (agentRecord.role === "peer") {
     if (!agentRecord.pipelineId || !agentRecord.stageId) return false;

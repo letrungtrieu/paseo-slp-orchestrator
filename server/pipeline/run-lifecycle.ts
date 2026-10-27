@@ -319,6 +319,10 @@ export async function approveMain(ctx: PipelineContext, runId: string): Promise<
       agent.awaitingTool = null;
       agent.awaitingSince = null;
     }
+    // Move all Kanban tickets belonging to this completed run into the DONE column.
+    for (const completedTicket of ctx.store.board.listByRun(runId)) {
+      ctx.store.board.setColumn(completedTicket.id, "done", mutableRun.repoPath);
+    }
   });
   ctx.logEvent(runId, { taskId: null, from: "manager", to: run.baseBranch, kind: "run.merged_to_base", summary: mergeCommit, outcome: "delivered" });
   await retireRunResources(ctx, runId);

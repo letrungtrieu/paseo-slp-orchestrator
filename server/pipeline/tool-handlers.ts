@@ -17,6 +17,16 @@ import { awaitAnswer } from "./peer-messaging/await-answer";
 import { notifyAgent } from "./peer-messaging/notify";
 import { escalateStage, requestStageRework, submitStageReport } from "./stage-messages";
 import { handlePeerShell } from "./shell-watchdog";
+import { pauseStagePeers, resumeStagePeers } from "./peer-pause";
+import {
+  getBoardTicket,
+  listBoardTickets,
+  notifyLeadAboutSpec,
+  saveBoardSpec,
+  scoreBoardBriefItems,
+  updateBoardBrief,
+  updateBoardBriefItem,
+} from "./board-tools";
 import { ToolError } from "./tool-error";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
@@ -52,6 +62,15 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_revive_agent: (ctx, caller, input) => reviveAgentsOnDemand(ctx, caller, input),
   slp_handle_peer_shell: (ctx, caller, input) => handlePeerShell(ctx, caller, input),
   slp_get_run: (ctx, caller) => readRun(ctx, caller),
+  slp_pause_peers: (ctx, caller, input) => pauseStagePeers(ctx, caller, input),
+  slp_resume_peers: (ctx, caller, input) => resumeStagePeers(ctx, caller, input),
+  slp_board_list_tickets: (ctx, caller) => listBoardTickets(ctx, caller),
+  slp_board_get_ticket: (ctx, caller, input) => getBoardTicket(ctx, caller, input),
+  slp_board_save_spec: (ctx, caller, input) => saveBoardSpec(ctx, caller, input),
+  slp_board_notify_lead: (ctx, caller, input) => notifyLeadAboutSpec(ctx, caller, input),
+  slp_board_update_brief: (ctx, caller, input) => updateBoardBrief(ctx, caller, input),
+  slp_board_update_item: (ctx, caller, input) => updateBoardBriefItem(ctx, caller, input),
+  slp_board_score_item: (ctx, caller, input) => scoreBoardBriefItems(ctx, caller, input),
 };
 
 export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {

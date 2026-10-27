@@ -16,7 +16,7 @@ export function transaction<Outcome>(database: DatabaseSync, operation: () => Ou
   }
 }
 
-const LATEST_SCHEMA_VERSION = 2;
+const LATEST_SCHEMA_VERSION = 3;
 
 // Peer questions get a relational table of their own: every ask/answer is audited, and rewriting the
 // whole Run payload for each exchange would make the synchronous write grow with the conversation.
@@ -44,6 +44,23 @@ const PEER_QUESTIONS_SCHEMA = `
   CREATE INDEX questions_by_asker ON questions(run_id, from_agent_id, status);
   CREATE INDEX questions_by_run ON questions(run_id, created_at);
   PRAGMA user_version = 2;
+`;
+
+// Project-scoped Kanban tickets live outside individual runs so Specs and Briefs persist across runs and reworks.
+const BOARD_TICKETS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS board_tickets (
+    ticket_id TEXT PRIMARY KEY,
+    repo_path TEXT NOT NULL,
+    ticket_key TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    active_run_id TEXT,
+    active_pipeline_id TEXT,
+    updated_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS board_tickets_by_repo ON board_tickets(repo_path, updated_at);
+  CREATE INDEX IF NOT EXISTS board_tickets_by_run ON board_tickets(active_run_id);
+  PRAGMA user_version = 3;
 `;
 
 export function openDatabase(databasePath: string): DatabaseSync {
@@ -84,6 +101,8 @@ export function openDatabase(databasePath: string): DatabaseSync {
     });
     // Runs after the v1 block on a fresh file, and alone on an existing v1 file: one forward-only step per version.
     if (schemaVersion < 2) transaction(database, () => database.exec(PEER_QUESTIONS_SCHEMA));
+    // Upgrade existing v2 databases and fresh databases to v3 with the project-scoped board_tickets table.
+    if (schemaVersion < 3) transaction(database, () => database.exec(BOARD_TICKETS_SCHEMA));
     return database;
   } catch (databaseError) {
     // Failed initialization must release the handle so the next reload can repair or retry it.

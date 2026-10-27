@@ -117,11 +117,32 @@ function resolveStageRoute(run: Run, caller: AgentRecord, recipient: AgentRecord
   };
 }
 
-// Mirrors the three collaboration windows of the pipeline: planning/running Lead alignment, merge-conflict
-// consultation after a pipeline completes, and day-to-day traffic inside a running stage.
+// Mirrors the collaboration windows of the pipeline: Supervisor <-> Lead spec alignment, cross-Lead alignment,
+// merge-conflict consultation after a pipeline completes, and day-to-day traffic inside a running stage.
 export function resolvePeerRoute(run: Run, caller: AgentRecord, recipientId: string): PeerRoute {
   if (caller.archivedAt) throw new ToolError("This tool requires an active agent session.");
   const recipient = run.agents[recipientId];
+  // Allow Supervisor <-> Lead communication so Spec edits by the human can be forwarded to active Leads immediately.
+  if (
+    recipient
+    && !recipient.archivedAt
+    && recipientId !== caller.agentId
+    && ((caller.role === "supervisor" && isPipelineLeadRole(recipient.role))
+      || (isPipelineLeadRole(caller.role) && recipient.role === "supervisor"))
+  ) {
+    const leadRecord = isPipelineLeadRole(caller.role) ? caller : recipient;
+    const leadPipeline = leadRecord.pipelineId ? run.pipelines[leadRecord.pipelineId] : undefined;
+    const latestStage = leadPipeline?.stages[leadPipeline.currentStageIndex] ?? leadPipeline?.stages.at(-1);
+    return {
+      scope: "cross_lead",
+      pipelineId: leadPipeline?.id ?? null,
+      historyStages: latestStage ? [latestStage] : [],
+      senderDescription: caller.role === "supervisor"
+        ? `Supervisor (${caller.agentId})`
+        : `Lead (${caller.agentId}, feature '${leadPipeline?.name ?? caller.featureName ?? "feature"}')`,
+      scopeLabel: "Supervisor-Lead",
+    };
+  }
   // Sibling Leads align shared APIs and flows across features, so this window ignores stage pointers entirely.
   if (
     ["planning", "running"].includes(run.status)

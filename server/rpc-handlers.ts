@@ -9,10 +9,12 @@ import {
   approveMainRpc,
   dismissArchiveWarningRpc,
   getRunRpc,
+  listBoardTicketsRpc,
   listPeerQuestionsRpc,
   listRunsRpc,
   restoreRunRpc,
   resumeTaskRpc,
+  saveBoardSpecFromUiRpc,
   setRunModeRpc,
   startRunRpc,
   tailLogRpc,
@@ -21,6 +23,7 @@ import {
   type RunSummary,
 } from "../shared/rpc";
 import type { Run } from "../shared/state";
+import { enrichTicketWithLiveAgents } from "./pipeline/board-tools";
 import type { PipelineContext } from "./pipeline/context";
 import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
 import { abortRun, approveMain, approveRunGate, startRun } from "./pipeline/run-lifecycle";
@@ -191,5 +194,90 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     const ledgerQuestions = ctx.store.questions.listForRun(runId, limit).filter((question) => !status || question.status === status);
     const questionViews = buildPeerQuestionViews(run, ledgerQuestions);
     return { questions: questionViews, metrics: computePeerQuestionMetrics(questionViews) };
+  });
+
+  // Returns project-scoped Kanban tickets enriched with realtime agent activity from the active run.
+  server.handle(listBoardTicketsRpc, ({ repoPath, runId }, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const matchedRun = runId
+      ? ctx.store.find(runId)
+      : [...ctx.store.list()]
+          .filter((candidateRun) => !repoPath || candidateRun.repoPath === repoPath)
+          .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
+    const effectiveRepoPath = repoPath?.trim() || matchedRun?.repoPath || "";
+    if (!effectiveRepoPath) return { repoPath: "", tickets: [] };
+    const storedTickets = ctx.store.board.listByRepo(effectiveRepoPath);
+    return {
+      repoPath: effectiveRepoPath,
+      tickets: storedTickets.map((ticket) => {
+        const ticketRun = (ticket.activeRunId ? ctx.store.find(ticket.activeRunId) : undefined) ?? matchedRun;
+        return enrichTicketWithLiveAgents(ticketRun, ticket);
+      }),
+    };
+  });
+
+  // Persists human Spec edits from the Kanban UI and notifies the Supervisor so it can coordinate with the Lead.
+  server.handle(saveBoardSpecFromUiRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const activeRun =
+      (input.runId ? ctx.store.find(input.runId) : undefined) ??
+      [...ctx.store.list()]
+        .filter((candidateRun) => candidateRun.repoPath === input.repoPath && candidateRun.status !== "aborted")
+        .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
+
+    const savedTicket = ctx.store.board.saveSpec({
+      repoPath: input.repoPath,
+      ticketIdOrKey: input.ticketId,
+      title: input.title,
+      acceptanceCriteria: input.acceptanceCriteria,
+      specContent: input.specContent,
+      author: "human",
+      summary: input.summary,
+      activeRunId: activeRun?.id ?? null,
+    });
+
+    let notifiedSupervisor = false;
+    if (activeRun && activeRun.supervisorAgentId && !activeRun.agents[activeRun.supervisorAgentId]?.archivedAt) {
+      const latestSpecRevision = savedTicket.specRevisions.at(-1);
+      const supervisorNotice = [
+        `## Human Updated Spec on Kanban Board — Ticket \`${savedTicket.ticketKey}\` (${savedTicket.title})`,
+        `- **New Spec Revision**: \`v${savedTicket.currentSpecRev}\``,
+        `- **Summary**: ${latestSpecRevision?.summary ?? "Human edited Spec in Kanban View"}`,
+        latestSpecRevision?.diff
+          ? `### Spec Diff\n\`\`\`diff\n${latestSpecRevision.diff}\n\`\`\``
+          : `### Updated Spec\n${savedTicket.specRevisions.at(-1)?.content ?? ""}`,
+        [
+          "### Required Supervisor Action",
+          `1. Inspect the updated Spec and diff on ticket \`${savedTicket.ticketKey}\` using \`slp_board_get_ticket({ ticketId: "${savedTicket.ticketKey}" })\`.`,
+          savedTicket.leadAgentId
+            ? `2. Notify the assigned Lead (\`${savedTicket.leadAgentId}\`) via \`slp_board_notify_lead({ ticketId: "${savedTicket.ticketKey}", message: "..." })\` so the Lead pauses its stage peers (\`slp_pause_peers\`), updates the Brief bullets from the Spec diff (\`slp_board_update_brief\`), and resumes work.`
+            : "2. If this feature is ready to run, delegate it with `slp_delegate` or inform the human in Vietnamese.",
+        ].join("\n"),
+      ].filter(Boolean).join("\n\n");
+
+      ctx.store.mutate(activeRun.id, (mutableRun) => {
+        mutableRun.productSpec = input.specContent.trim();
+      });
+      ctx.mailbox.enqueue(activeRun.id, activeRun.supervisorAgentId, supervisorNotice, {
+        taskId: savedTicket.activePipelineId,
+        awaitTool: null,
+        from: "human",
+        supersedeKey: `human-spec-edit:${savedTicket.id}`,
+        summary: `Human edited Spec v${savedTicket.currentSpecRev} on ${savedTicket.ticketKey}`,
+      });
+      notifiedSupervisor = true;
+      // Flush immediately when the Supervisor is idle so the human sees instant responsiveness.
+      if (ctx.holder.isReady()) {
+        await ctx.gateway
+          .liveStatuses(activeRun.id)
+          .then((liveStatuses) => ctx.mailbox.flush(activeRun.id, liveStatuses))
+          .catch(() => undefined);
+      }
+    }
+
+    return {
+      ticket: enrichTicketWithLiveAgents(activeRun, savedTicket),
+      notifiedSupervisor,
+    };
   });
 }

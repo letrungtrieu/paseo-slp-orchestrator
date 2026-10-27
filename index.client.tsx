@@ -2,6 +2,7 @@ import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plug
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { TASK_CARD_KIND, TASK_CARD_VERSION, TaskCardSchema } from "./shared/card";
 import { InterruptedRunWarningModal } from "./client/components/run-warning-dialog";
+import { KanbanWorkspacePanel, registerWorkspaceKanbanHeaderButtons } from "./client/kanban-panel";
 import { MonitorPanel } from "./client/monitor-panel";
 import { RunControlScreen } from "./client/run-control-screen";
 import { useUiStyles } from "./client/styles";
@@ -11,6 +12,7 @@ import { SlpSettingsScreen } from "./client/settings-screen";
 // A single stable id is shared by the screen and the sidebar row so the row can tell when its own screen is the one on display.
 const RUN_SCREEN_ID = "slp";
 const MONITOR_PANEL_ID = "slp-monitor";
+const KANBAN_PANEL_ID = "slp-kanban";
 
 function SlpSidebarItem({ currentScreen, openScreen, theme, layout }: PluginSidebarItemProps) {
   const styles = useUiStyles(theme, layout.compact);
@@ -53,6 +55,14 @@ export default function contribute(client: PluginClientContext) {
       context: "workspace",
       Component: MonitorPanel,
     }),
+    // Per-project Spec & Brief Kanban workspace panel opened from the top-right workspace header icon button.
+    client.addWorkspacePanel({
+      id: KANBAN_PANEL_ID,
+      title: "Spec & Brief Kanban",
+      icon: "PanelsTopLeft",
+      context: "workspace",
+      Component: KanbanWorkspacePanel,
+    }),
     client.addCommandCenterItem({
       id: "open-slp-monitor",
       title: "Open SLP Live Tool-Call Monitor",
@@ -63,6 +73,19 @@ export default function contribute(client: PluginClientContext) {
         openPanel(MONITOR_PANEL_ID);
       },
     }),
+    // Allow opening the project-scoped Spec & Brief Kanban from Command Center (Ctrl+K / Cmd+K) as well as the header icon.
+    client.addCommandCenterItem({
+      id: "open-slp-kanban",
+      title: "Open Project Spec & Brief Kanban",
+      icon: "PanelsTopLeft",
+      context: "workspace",
+      keywords: ["slp", "kanban", "spec", "brief", "board", "jira"],
+      onSelect({ openPanel }) {
+        openPanel(KANBAN_PANEL_ID);
+      },
+    }),
+    // Register the small icon-only Kanban button in the top-right header bar (beside the VSCode icon) for every workspace.
+    registerWorkspaceKanbanHeaderButtons(client, KANBAN_PANEL_ID),
     // The card is registered with kind + version + schema: Paseo only renders rows whose payload validates, so an older stored card degrades to hidden instead of crashing.
     client.addTimelineRenderer({
       kind: TASK_CARD_KIND,

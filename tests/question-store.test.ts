@@ -38,8 +38,9 @@ describe("question ledger schema", () => {
     legacyConnection.close();
 
     const upgradedConnection = openDatabase(databasePath);
-    expect(upgradedConnection.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+    expect(upgradedConnection.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
     expect(upgradedConnection.prepare("SELECT name FROM sqlite_master WHERE name = 'questions'").get()).toBeTruthy();
+    expect(upgradedConnection.prepare("SELECT name FROM sqlite_master WHERE name = 'board_tickets'").get()).toBeTruthy();
     upgradedConnection.close();
   });
 
@@ -48,9 +49,9 @@ describe("question ledger schema", () => {
     const databasePath = join(stateDirectory, "orchestrator.sqlite3");
     openDatabase(databasePath).close();
     const futureConnection = new DatabaseSync(databasePath);
-    futureConnection.exec("PRAGMA user_version = 3;");
+    futureConnection.exec("PRAGMA user_version = 4;");
     futureConnection.close();
-    expect(() => openDatabase(databasePath)).toThrow(/Unsupported SLP database version: 3/);
+    expect(() => openDatabase(databasePath)).toThrow(/Unsupported SLP database version: 4/);
   });
 });
 

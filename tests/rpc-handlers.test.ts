@@ -2,7 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it } from "vitest";
 import { registerRpcHandlers } from "../server/rpc-handlers";
 import {
-  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, dismissArchiveWarningRpc, getRunRpc, listPeerQuestionsRpc, listRunsRpc, restoreRunRpc, resumeTaskRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc,
+  abortRunRpc, approveGateRpc, approvePipelineGateRpc, approveMainRpc, dismissArchiveWarningRpc, getRunRpc, listBoardTicketsRpc, listPeerQuestionsRpc, listRunsRpc, restoreRunRpc, resumeTaskRpc, saveBoardSpecFromUiRpc, setRunModeRpc, startRunRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc,
 } from "../shared/rpc";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import type { PeerQuestionMetrics, PeerQuestionView } from "../shared/peer-questions";
@@ -30,7 +30,7 @@ async function rpcRun(mode: "FULL_AUTO" | "STEP_BY_STEP_DEBUG" = "FULL_AUTO") {
 describe("RPC registration", () => {
   it("registers one handler per shared RPC contract", async () => {
     const { rpc } = await rpcRun();
-    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, restoreRunRpc, dismissArchiveWarningRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc, listPeerQuestionsRpc].map((contract) => contract.name).sort();
+    const expectedNames = [listRunsRpc, getRunRpc, startRunRpc, setRunModeRpc, approveGateRpc, approvePipelineGateRpc, resumeTaskRpc, approveMainRpc, abortRunRpc, restoreRunRpc, dismissArchiveWarningRpc, tailLogRpc, initializeProjectPromptsRpc, initSlpManagerSkillRpc, listPeerQuestionsRpc, listBoardTicketsRpc, saveBoardSpecFromUiRpc].map((contract) => contract.name).sort();
     expect(rpc.registeredNames()).toEqual(expectedNames);
   });
 });

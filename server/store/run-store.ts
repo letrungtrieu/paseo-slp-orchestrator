@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { CommLogEntrySchema, type AgentRecord, type CommLogEntry, type Run } from "../../shared/state";
 import type { CommLogInput } from "./comm-log";
 import { openDatabase, transaction } from "./database";
+import { BoardStore } from "./board-store";
 import { importLegacyState } from "./legacy-import";
 import { QuestionStore } from "./question-store";
 import { readRuns, writeRun } from "./run-repository";
@@ -15,6 +16,8 @@ export class RunStore {
   private closed = false;
   // Shares this store's lifecycle: the ledger resolves the connection lazily and so fails once the store is closed.
   readonly questions = new QuestionStore(() => this.database());
+  // Project-scoped Kanban board store sharing the same SQLite handle as runs and questions.
+  readonly board = new BoardStore(() => this.database());
 
   constructor(private readonly databasePath: string, private readonly legacyStatePath?: string) {}
 

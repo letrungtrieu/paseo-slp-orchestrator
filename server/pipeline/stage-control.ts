@@ -21,14 +21,13 @@ export function approveStage(
 ): string {
   const { run, pipeline, stage } = requireStageLead(ctx, caller);
   const { summary, brief } = input;
-  // The planning stage exists to produce the brief, so closing it without one would leave the developer without a contract.
-  if (stage.kind === "planning" && !brief) {
-    throw new ToolError("Approving the planning stage requires brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }. It becomes the locked contract for the next stages.");
+  // The planning stage exists to produce the initial brief; later stages may also pass an updated brief if conflicts required changing approach.
+  if (stage.kind === "planning" && !brief && !pipeline.brief) {
+    throw new ToolError("Approving the planning stage requires brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }. It becomes the contract for the next stages.");
   }
-  if (stage.kind !== "planning" && brief) {
-    throw new ToolError(pipeline.brief
-      ? "The brief is locked and cannot be changed. If it is wrong, call slp_escalate."
-      : "Only a planning stage approval sets the brief.");
+  // Keep stage approval from silently overwriting an already locked brief; intentional technical pivots go through slp_board_update_brief with an explicit reason and diff.
+  if (brief && pipeline.briefLockedAt) {
+    throw new ToolError("The pipeline brief is already locked for this pipeline; use slp_board_update_brief to revise the Brief with a reason and diff.");
   }
   const approvedAt = new Date().toISOString();
   ctx.store.mutate(run.id, () => {
@@ -38,6 +37,17 @@ export function approveStage(
     if (brief) {
       pipeline.brief = brief;
       pipeline.briefLockedAt = approvedAt;
+      ctx.store.board.syncPipelineBriefToTicket({
+        repoPath: run.repoPath,
+        runId: run.id,
+        pipelineId: pipeline.id,
+        pipelineName: pipeline.name,
+        leadAgentId: caller.agentId,
+        brief,
+        reason: `Approved stage '${stage.name}': ${summary}`,
+        fallbackCriteria: run.criteria ?? "",
+        fallbackSpec: run.productSpec,
+      });
     }
     pipeline.updatedAt = approvedAt;
     run.agents[caller.agentId].awaitingTool = null;

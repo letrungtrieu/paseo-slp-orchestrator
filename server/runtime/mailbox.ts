@@ -31,8 +31,8 @@ function stageCanReceiveMail(run: Run, recipientId: string): boolean {
   // A queued prompt must never revive a completed, aborted or legacy engine after a reload.
   if (run.engineVersion !== "dynamic-stages-v1" || run.status === "completed" || run.status === "aborted") return false;
   const agentRecord = run.agents[recipientId];
-  // Persisted archive state wins over a stale SDK directory entry after a restart.
-  if (!agentRecord || agentRecord.archivedAt) return false;
+  // Persisted archive or Lead-pause state wins over a stale SDK directory entry so paused peers stay quiet until resumed.
+  if (!agentRecord || agentRecord.archivedAt || agentRecord.pausedAt) return false;
   // Supervisor and unarchived Leads coordinate across planning, paused stages, and final integration regardless of stage pointers.
   if (agentRecord.role === "supervisor" || isPipelineLeadRole(agentRecord.role)) return true;
   if (!agentRecord.pipelineId && !agentRecord.stageId) return true;
