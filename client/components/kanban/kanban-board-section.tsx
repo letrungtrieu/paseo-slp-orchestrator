@@ -1,12 +1,19 @@
-// Project-scoped Kanban board view (Spec -> Brief -> Score -> Rework -> Done) with realtime agent badges.
+// Project-scoped Kanban board decomposing each Spec into its Brief card and individual gradable Option cards.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { BOARD_COLUMNS, type BoardColumn, type BoardTicket } from "../../../shared/board";
+import { BOARD_COLUMNS, type BoardColumn, type BoardTicket, type BriefItem } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { useBoardActions, useBoardTickets } from "../../use-board";
 import { describeRpcError, useRunList } from "../../use-run";
 import { ActionButton } from "../action-button";
+import { BriefKanbanCard, OptionKanbanCard, SpecKanbanCard } from "./kanban-cards";
+import {
+  type KanbanCardSelection,
+  partitionTicketBriefItems,
+  resolveOptionCardColumn,
+  resolveSpecColorIdentity,
+} from "./kanban-palette";
 import { TicketDetailPanel } from "./ticket-detail-panel";
 
 interface KanbanBoardSectionProps {
@@ -18,7 +25,7 @@ interface KanbanBoardSectionProps {
   onOpenSupervisor?: (supervisorAgentId: string) => void;
 }
 
-// Human-readable column headers showing the 5-step Spec -> Brief -> Score -> Rework -> Done workflow.
+// Column titles showing the flow from Supervisor Spec -> Lead Brief -> QA Score -> Rework -> Done.
 const COLUMN_TITLES: Record<BoardColumn, string> = {
   spec: "1. SPEC",
   brief: "2. BRIEF",
@@ -27,9 +34,9 @@ const COLUMN_TITLES: Record<BoardColumn, string> = {
   done: "5. DONE",
 };
 
-// Assigns a distinct accent color to each Kanban column header and card border.
+// Assigns a distinct accent color to each Kanban column header.
 function resolveColumnAccentColor(theme: PluginTheme, column: BoardColumn): string {
-  // Done is green, Rework is red, Score is amber, Brief is accent blue, and Spec is neutral muted.
+  // Done is green, Rework is red, Score is amber, Brief is accent blue, and Spec is foreground muted.
   if (column === "done") return theme.colors.statusSuccess;
   if (column === "rework") return theme.colors.statusDanger;
   if (column === "score") return theme.colors.statusWarning;
@@ -37,115 +44,20 @@ function resolveColumnAccentColor(theme: PluginTheme, column: BoardColumn): stri
   return theme.colors.foregroundMuted;
 }
 
-// Renders a compact Kanban card summarizing Spec/Brief versions, bullet progress, and live agent badges.
-function KanbanTicketCard({
-  styles,
-  theme,
-  ticket,
-  isSelected,
-  onSelect,
-}: {
-  styles: UiStyles;
-  theme: PluginTheme;
-  ticket: BoardTicket;
-  isSelected: boolean;
-  onSelect: () => void;
-}) {
-  const columnColor = resolveColumnAccentColor(theme, ticket.column);
-  // Count passing and failing in-scope bullets so the operator can gauge progress without opening the detail panel.
-  const inScopeBullets = ticket.items.filter((bullet) => bullet.scope === "in");
-  const passedBulletCount = inScopeBullets.filter((bullet) => bullet.status === "pass").length;
-  const failingBulletCount = inScopeBullets.filter(
-    (bullet) => bullet.status === "fail" || bullet.status === "rework",
-  ).length;
-  const pausedAgentCount = ticket.activeAgents.filter((agent) => Boolean(agent.pausedAt)).length;
-  // Flag when the Spec was updated after the Brief so the human knows the Lead owes a Brief diff update.
-  const isBriefOutdated =
-    ticket.currentBriefRev > 0 && ticket.lastSyncedSpecRev < ticket.currentSpecRev;
-
-  return (
-    <Pressable
-      onPress={onSelect}
-      accessibilityRole="button"
-      accessibilityLabel={`Inspect ticket ${ticket.ticketKey} ${ticket.title}`}
-      style={[
-        styles.card,
-        {
-          padding: 10,
-          borderLeftWidth: 4,
-          borderLeftColor: columnColor,
-          borderColor: isSelected ? theme.colors.accent : theme.colors.border,
-          backgroundColor: isSelected ? theme.colors.surface2 : theme.colors.surface1,
-        },
-      ]}
-    >
-      {/* Top row shows the Jira-style key (e.g. SLP-1) and current Spec/Brief revision numbers. */}
-      <View style={[styles.row, { justifyContent: "space-between" }]}>
-        <Text style={[styles.monoText, { fontWeight: "700", color: theme.colors.foreground }]}>
-          {ticket.ticketKey}
-        </Text>
-        <Text style={styles.mutedText}>
-          Spec v{ticket.currentSpecRev} · Brief v{ticket.currentBriefRev}
-        </Text>
-      </View>
-      <Text style={[styles.bodyText, { fontWeight: "600" }]} numberOfLines={2}>
-        {ticket.title}
-      </Text>
-      {/* Warn directly on the card when the Spec revision is newer than the Brief's synced Spec revision. */}
-      {isBriefOutdated ? (
-        <Text style={styles.warningText}>
-          Spec v{ticket.currentSpecRev} pending Brief sync (v{ticket.lastSyncedSpecRev})
-        </Text>
-      ) : null}
-      {/* Summarize how many Brief bullets have passed QA and how many are in rework. */}
-      {inScopeBullets.length > 0 ? (
-        <Text style={styles.mutedText}>
-          Bullets: {passedBulletCount}/{inScopeBullets.length} pass
-          {failingBulletCount > 0 ? ` · ${failingBulletCount} rework` : ""}
-        </Text>
-      ) : (
-        <Text style={styles.mutedText}>No brief bullets yet</Text>
-      )}
-      {/* Render live agent chips so the operator can watch which agents are active or paused in realtime. */}
-      {ticket.activeAgents.length > 0 ? (
-        <View style={styles.row}>
-          {ticket.activeAgents.map((activeAgent) => (
-            <View
-              key={activeAgent.agentId}
-              style={[
-                styles.chip,
-                { paddingVertical: 2, paddingHorizontal: 6 },
-                activeAgent.pausedAt
-                  ? { borderColor: theme.colors.statusWarning }
-                  : { borderColor: theme.colors.accent },
-              ]}
-            >
-              <Text
-                style={{
-                  fontSize: 11,
-                  color: activeAgent.pausedAt
-                    ? theme.colors.statusWarning
-                    : theme.colors.foreground,
-                }}
-              >
-                {activeAgent.projectRole ?? activeAgent.role}
-                {activeAgent.pausedAt ? " (PAUSED)" : ""}
-              </Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
-      {/* Explicit summary line when the Lead has paused child peers via slp_pause_peers. */}
-      {pausedAgentCount > 0 ? (
-        <Text style={styles.warningText}>
-          {pausedAgentCount} peer{pausedAgentCount === 1 ? "" : "s"} paused by Lead
-        </Text>
-      ) : null}
-    </Pressable>
-  );
+// Checks whether a given card matches the currently selected card state.
+function isCardSelected(
+  currentSelection: KanbanCardSelection | null,
+  candidateSelection: KanbanCardSelection,
+): boolean {
+  if (!currentSelection || currentSelection.kind !== candidateSelection.kind) return false;
+  if (currentSelection.ticketId !== candidateSelection.ticketId) return false;
+  if (currentSelection.kind === "option" && candidateSelection.kind === "option") {
+    return currentSelection.optionId === candidateSelection.optionId;
+  }
+  return true;
 }
 
-// Project-scoped Kanban board section showing Spec -> Brief -> Score -> Rework -> Done and live agent activity.
+// Renders the Spec -> Brief -> Option Kanban board with color-matched borders, lineage tags, and focused card inspectors.
 export function KanbanBoardSection({
   styles,
   theme,
@@ -157,13 +69,19 @@ export function KanbanBoardSection({
   const runsListQuery = useRunList();
   const allRuns = runsListQuery.data?.runs ?? [];
 
-  // Match runs belonging to this workspace's project root path, preferring an active running session.
+  // Match runs belonging to this workspace's project root path, preferring the currently active Supervisor session.
   const projectRuns = projectRepoPath
     ? allRuns.filter((runSummary) => runSummary.repoPath === projectRepoPath)
     : allRuns;
   const activeProjectRun =
     (selectedRunId ? projectRuns.find((runSummary) => runSummary.id === selectedRunId) : undefined) ??
-    projectRuns.find((runSummary) => runSummary.status === "running" && !runSummary.archivedAt) ??
+    projectRuns.find(
+      (runSummary) =>
+        !runSummary.archivedAt &&
+        runSummary.status !== "aborted" &&
+        runSummary.status !== "completed",
+    ) ??
+    projectRuns.find((runSummary) => !runSummary.archivedAt && runSummary.status !== "aborted") ??
     projectRuns[0] ??
     null;
 
@@ -178,21 +96,40 @@ export function KanbanBoardSection({
   });
   const { saveBoardSpec } = useBoardActions();
 
-  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
+  // Default to "active_supervisor" so only the Spec, Brief, and Options of the currently active Supervisor are shown.
+  const [selectedCard, setSelectedCard] = useState<KanbanCardSelection | null>(null);
+  const [filterMode, setFilterMode] = useState<"active_supervisor" | "all" | string>("active_supervisor");
   const [isCreatingSpec, setIsCreatingSpec] = useState(false);
   const [newSpecTitle, setNewSpecTitle] = useState("");
   const [newSpecCriteria, setNewSpecCriteria] = useState("");
   const [newSpecContent, setNewSpecContent] = useState("");
 
-  const boardTickets = boardQuery.data?.tickets ?? [];
-  // Keep the selected ticket open across polls, defaulting to the most recently updated ticket.
-  const selectedTicket =
-    boardTickets.find((ticket) => ticket.id === selectedTicketId) ??
-    boardTickets[0] ??
-    null;
+  const allProjectTickets = boardQuery.data?.tickets ?? [];
+  // Scope tickets belonging to the active Supervisor's run so finished/aborted runs do not clutter the board.
+  const activeSupervisorTickets = activeProjectRun
+    ? allProjectTickets.filter((ticket) => ticket.activeRunId === activeProjectRun.id)
+    : allProjectTickets;
+
+  const visibleTickets =
+    filterMode === "active_supervisor"
+      ? activeSupervisorTickets
+      : filterMode === "all"
+        ? allProjectTickets
+        : allProjectTickets.filter((ticket) => ticket.id === filterMode);
+
+  const selectedTicket = selectedCard
+    ? allProjectTickets.find((ticket) => ticket.id === selectedCard.ticketId) ?? null
+    : null;
 
   const boardErrorMessage =
     describeRpcError(boardQuery.error) ?? describeRpcError(saveBoardSpec.error);
+
+  // Toggles selection when the user clicks a Spec card, Brief card, or Option card.
+  const handleToggleCardSelection = (nextSelection: KanbanCardSelection) => {
+    setSelectedCard((previousSelection) =>
+      isCardSelected(previousSelection, nextSelection) ? null : nextSelection,
+    );
+  };
 
   const handleCreateNewSpecTicket = () => {
     if (!effectiveRepoPath || !newSpecTitle.trim() || !newSpecContent.trim()) return;
@@ -208,7 +145,7 @@ export function KanbanBoardSection({
       },
       {
         onSuccess: (createdResponse) => {
-          setSelectedTicketId(createdResponse.ticket.id);
+          setSelectedCard({ kind: "spec", ticketId: createdResponse.ticket.id });
           setIsCreatingSpec(false);
           setNewSpecTitle("");
           setNewSpecCriteria("");
@@ -218,13 +155,38 @@ export function KanbanBoardSection({
     );
   };
 
+  // Precompute all decomposed Brief cards and individual Option cards across the visible Specs.
+  const briefTicketsInColumn = visibleTickets.filter(
+    (ticket) => ticket.currentBriefRev > 0 || Boolean(ticket.approach.trim()),
+  );
+  const optionEntriesByColumn: Record<
+    Exclude<BoardColumn, "spec">,
+    Array<{ ticket: BoardTicket; optionBullet: BriefItem }>
+  > = {
+    brief: [],
+    score: [],
+    rework: [],
+    done: [],
+  };
+
+  for (const visibleTicket of visibleTickets) {
+    const { gradableOptions } = partitionTicketBriefItems(visibleTicket);
+    for (const optionBullet of gradableOptions) {
+      const targetOptionColumn = resolveOptionCardColumn(visibleTicket, optionBullet);
+      optionEntriesByColumn[targetOptionColumn].push({
+        ticket: visibleTicket,
+        optionBullet,
+      });
+    }
+  }
+
   return (
     <View style={styles.card}>
       {/* Section header shows the active project name, active run status, and the + New Spec button. */}
       <View style={[styles.row, { justifyContent: "space-between" }]}>
         <View style={{ gap: 2 }}>
           <Text style={styles.sectionTitle}>
-            {projectDisplayName ? `${projectDisplayName} · ` : ""}Spec & Brief Kanban ({boardTickets.length})
+            {projectDisplayName ? `${projectDisplayName} · ` : ""}Spec & Brief Kanban
           </Text>
           <Text style={styles.mutedText}>
             {effectiveRepoPath || "No project selected"}
@@ -244,13 +206,78 @@ export function KanbanBoardSection({
             <ActionButton
               styles={styles}
               tone={isCreatingSpec ? "secondary" : "primary"}
-              label={isCreatingSpec ? "Cancel New Spec" : "+ New Spec Ticket"}
-              accessibilityLabel="Create a new Spec ticket on the Kanban board"
+              label={isCreatingSpec ? "Cancel New Spec" : "+ New Spec"}
+              accessibilityLabel="Create a new Spec card on the Kanban board"
               onPress={() => setIsCreatingSpec((previousState) => !previousState)}
             />
           ) : null}
         </View>
       </View>
+
+      {/* Scope filter bar defaults to Active Supervisor only so finished/aborted runs stay out of the way. */}
+      {allProjectTickets.length > 0 ? (
+        <View style={styles.row}>
+          <Text style={styles.fieldLabel}>Scope:</Text>
+          <Pressable
+            onPress={() => setFilterMode("active_supervisor")}
+            style={[
+              styles.chip,
+              {
+                borderColor: filterMode === "active_supervisor" ? theme.colors.accent : theme.colors.border,
+                backgroundColor: filterMode === "active_supervisor" ? theme.colors.surface2 : theme.colors.surface1,
+              },
+            ]}
+          >
+            <Text style={styles.chipText}>
+              Active Supervisor ({activeSupervisorTickets.length})
+            </Text>
+          </Pressable>
+          {(filterMode === "all" ? allProjectTickets : activeSupervisorTickets).map((projectTicket) => {
+            const specColor = resolveSpecColorIdentity(projectTicket);
+            const isActiveFilter = filterMode === projectTicket.id;
+            return (
+              <Pressable
+                key={projectTicket.id}
+                onPress={() =>
+                  setFilterMode((previousMode) =>
+                    previousMode === projectTicket.id ? "active_supervisor" : projectTicket.id,
+                  )
+                }
+                style={[
+                  styles.chip,
+                  {
+                    borderWidth: isActiveFilter ? 2 : 1,
+                    borderColor: specColor.borderColor,
+                    backgroundColor: isActiveFilter ? specColor.badgeBackground : theme.colors.surface1,
+                  },
+                ]}
+              >
+                <Text style={{ fontSize: 11, fontWeight: "700", color: specColor.badgeTextColor }}>
+                  {projectTicket.ticketKey} → {specColor.briefTagCode}
+                </Text>
+              </Pressable>
+            );
+          })}
+          {allProjectTickets.length > activeSupervisorTickets.length ? (
+            <Pressable
+              onPress={() =>
+                setFilterMode((previousMode) =>
+                  previousMode === "all" ? "active_supervisor" : "all",
+                )
+              }
+              style={[
+                styles.chip,
+                {
+                  borderColor: filterMode === "all" ? theme.colors.accent : theme.colors.border,
+                  backgroundColor: filterMode === "all" ? theme.colors.surface2 : theme.colors.surface1,
+                },
+              ]}
+            >
+              <Text style={styles.chipText}>All History ({allProjectTickets.length})</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* Only show the manual repository path input when not already scoped to a workspace's project root. */}
       {!projectRepoPath ? (
@@ -266,10 +293,10 @@ export function KanbanBoardSection({
         </View>
       ) : null}
 
-      {/* Inline creation form for authoring a new Spec ticket directly on the Kanban board. */}
+      {/* Inline creation form for authoring a new Spec card directly on the Kanban board. */}
       {isCreatingSpec ? (
         <View style={[styles.card, { backgroundColor: theme.colors.surface2 }]}>
-          <Text style={styles.sectionTitle}>Create New Spec Ticket</Text>
+          <Text style={styles.sectionTitle}>Create New Spec Card</Text>
           <Text style={styles.fieldLabel}>Title</Text>
           <TextInput
             style={styles.input}
@@ -299,7 +326,7 @@ export function KanbanBoardSection({
             styles={styles}
             tone="primary"
             label={saveBoardSpec.isPending ? "Saving..." : "Create Spec & Notify Supervisor"}
-            accessibilityLabel="Create Spec ticket and notify Supervisor"
+            accessibilityLabel="Create Spec card and notify Supervisor"
             disabled={saveBoardSpec.isPending || !newSpecTitle.trim() || !newSpecContent.trim()}
             onPress={handleCreateNewSpecTicket}
           />
@@ -308,67 +335,140 @@ export function KanbanBoardSection({
 
       {boardErrorMessage ? <Text style={styles.dangerText}>{boardErrorMessage}</Text> : null}
 
-      {/* Horizontal 5-column Kanban board: SPEC -> BRIEF -> SCORE -> REWORK -> DONE. */}
+      {/* Horizontal 5-column Kanban board on the left and a dedicated right-hand detail sidebar when a card is selected. */}
       {!effectiveRepoPath ? (
         <Text style={styles.mutedText}>
           Open a project workspace to view its Spec & Brief Kanban board.
         </Text>
       ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={{ gap: 10 }}>
-          {BOARD_COLUMNS.map((columnKey) => {
-            const columnTickets = boardTickets.filter((ticket) => ticket.column === columnKey);
-            const columnAccent = resolveColumnAccentColor(theme, columnKey);
-            return (
-              <View
-                key={columnKey}
-                style={[
-                  styles.card,
-                  {
-                    width: 250,
-                    backgroundColor: theme.colors.surface0,
-                    borderTopWidth: 3,
-                    borderTopColor: columnAccent,
-                  },
-                ]}
-              >
-                <View style={[styles.row, { justifyContent: "space-between" }]}>
-                  <Text style={{ color: columnAccent, fontWeight: "700", fontSize: 13 }}>
-                    {COLUMN_TITLES[columnKey]}
-                  </Text>
-                  <Text style={styles.mutedText}>{columnTickets.length}</Text>
-                </View>
-                {columnTickets.length === 0 ? (
-                  <Text style={styles.mutedText}>No tickets</Text>
-                ) : (
-                  <View style={styles.stack}>
-                    {columnTickets.map((columnTicket) => (
-                      <KanbanTicketCard
-                        key={columnTicket.id}
-                        styles={styles}
-                        theme={theme}
-                        ticket={columnTicket}
-                        isSelected={selectedTicket?.id === columnTicket.id}
-                        onSelect={() => setSelectedTicketId(columnTicket.id)}
-                      />
-                    ))}
-                  </View>
-                )}
-              </View>
-            );
-          })}
-        </ScrollView>
-      )}
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12 }}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator
+            style={{ flex: 1, minWidth: 0 }}
+            contentContainerStyle={{ gap: 12 }}
+          >
+            {BOARD_COLUMNS.map((columnKey) => {
+              const columnAccent = resolveColumnAccentColor(theme, columnKey);
+              const columnCardCount =
+                columnKey === "spec"
+                  ? visibleTickets.length
+                  : columnKey === "brief"
+                    ? briefTicketsInColumn.length + optionEntriesByColumn.brief.length
+                    : optionEntriesByColumn[columnKey].length;
 
-      {/* Detail panel below the columns lets the human inspect diffs and edit the Spec of the selected ticket. */}
-      {selectedTicket ? (
-        <TicketDetailPanel
-          styles={styles}
-          theme={theme}
-          ticket={selectedTicket}
-          selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
-          onClose={() => setSelectedTicketId(null)}
-        />
-      ) : null}
+              return (
+                <View
+                  key={columnKey}
+                  style={[
+                    styles.card,
+                    {
+                      width: 280,
+                      backgroundColor: theme.colors.surface0,
+                      borderTopWidth: 3,
+                      borderTopColor: columnAccent,
+                    },
+                  ]}
+                >
+                  <View style={[styles.row, { justifyContent: "space-between" }]}>
+                    <Text style={{ color: columnAccent, fontWeight: "700", fontSize: 13 }}>
+                      {COLUMN_TITLES[columnKey]}
+                    </Text>
+                    <Text style={styles.mutedText}>{columnCardCount}</Text>
+                  </View>
+
+                  {columnCardCount === 0 ? (
+                    <Text style={styles.mutedText}>No cards</Text>
+                  ) : (
+                    <View style={styles.stack}>
+                      {/* Column 1 (SPEC) holds only the high-level Spec cards handed from Supervisor to Lead. */}
+                      {columnKey === "spec"
+                        ? visibleTickets.map((specTicket) => (
+                            <SpecKanbanCard
+                              key={`spec-card-${specTicket.id}`}
+                              styles={styles}
+                              theme={theme}
+                              ticket={specTicket}
+                              isSelected={isCardSelected(selectedCard, {
+                                kind: "spec",
+                                ticketId: specTicket.id,
+                              })}
+                              onSelect={() =>
+                                handleToggleCardSelection({ kind: "spec", ticketId: specTicket.id })
+                              }
+                            />
+                          ))
+                        : null}
+
+                      {/* Column 2 (BRIEF) holds the Lead's Brief overview cards plus any unscored Option cards. */}
+                      {columnKey === "brief"
+                        ? briefTicketsInColumn.map((briefTicket) => (
+                            <BriefKanbanCard
+                              key={`brief-card-${briefTicket.id}`}
+                              styles={styles}
+                              theme={theme}
+                              ticket={briefTicket}
+                              isSelected={isCardSelected(selectedCard, {
+                                kind: "brief",
+                                ticketId: briefTicket.id,
+                              })}
+                              onSelect={() =>
+                                handleToggleCardSelection({ kind: "brief", ticketId: briefTicket.id })
+                              }
+                            />
+                          ))
+                        : null}
+
+                      {/* Render each gradable Option (C1, C2, ...) as its own separate card in BRIEF / SCORE / REWORK / DONE. */}
+                      {columnKey !== "spec"
+                        ? optionEntriesByColumn[columnKey].map(({ ticket, optionBullet }) => (
+                            <OptionKanbanCard
+                              key={`opt-card-${ticket.id}-${optionBullet.id}`}
+                              styles={styles}
+                              theme={theme}
+                              ticket={ticket}
+                              optionBullet={optionBullet}
+                              isSelected={isCardSelected(selectedCard, {
+                                kind: "option",
+                                ticketId: ticket.id,
+                                optionId: optionBullet.id,
+                              })}
+                              onSelect={() =>
+                                handleToggleCardSelection({
+                                  kind: "option",
+                                  ticketId: ticket.id,
+                                  optionId: optionBullet.id,
+                                })
+                              }
+                            />
+                          ))
+                        : null}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+          </ScrollView>
+
+          {/* Right-hand sidebar drawer renders the focused inspector for the selected Spec, Brief, or Option card. */}
+          {selectedTicket && selectedCard ? (
+            <ScrollView
+              style={{ width: 390, maxHeight: 740, flexShrink: 0 }}
+              showsVerticalScrollIndicator
+              keyboardShouldPersistTaps="handled"
+            >
+              <TicketDetailPanel
+                styles={styles}
+                theme={theme}
+                ticket={selectedTicket}
+                selection={selectedCard}
+                selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
+                onClose={() => setSelectedCard(null)}
+              />
+            </ScrollView>
+          ) : null}
+        </View>
+      )}
     </View>
   );
 }
