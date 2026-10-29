@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { AgentModelDefinition } from "@getpaseo/protocol/agent-types";
 import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
-import { usePaseo } from "@getpaseo/plugin/client";
+import { getPaseoClient, usePaseo } from "@getpaseo/plugin/client";
 import { useQuery } from "@tanstack/react-query";
 
 export interface ProviderModelChoice {
@@ -58,12 +58,22 @@ async function loadReadyProviderSnapshot(
 }
 
 // The daemon catalog matches the provider/model list used when creating a chat agent.
-export function useProviderCatalog(repositoryPath: string) {
-  const paseo = usePaseo();
+export function useProviderCatalog(repositoryPath: string, selectedHostId?: string) {
+  const defaultPaseo = usePaseo();
+  // Resolve the selected host's PaseoApi client when available, falling back to the current surface's Paseo client.
+  const targetPaseo = useMemo(() => {
+    if (!selectedHostId) return defaultPaseo;
+    try {
+      return getPaseoClient(selectedHostId);
+    } catch {
+      return defaultPaseo;
+    }
+  }, [defaultPaseo, selectedHostId]);
+
   const catalogQuery = useQuery({
-    // Catalogs can depend on workspace context, so the selected repository belongs in the cache key.
-    queryKey: ["slp", "provider-catalog", repositoryPath],
-    queryFn: ({ signal }) => loadReadyProviderSnapshot(paseo, repositoryPath, signal),
+    // Catalogs can depend on both the target host and workspace context, so include both in the cache key.
+    queryKey: ["slp", "provider-catalog", selectedHostId ?? "default", repositoryPath],
+    queryFn: ({ signal }) => loadReadyProviderSnapshot(targetPaseo, repositoryPath, signal),
     // Polling prevents a transient empty menu while Paseo is still discovering providers.
     staleTime: 5 * 60_000,
   });

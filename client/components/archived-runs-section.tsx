@@ -39,9 +39,12 @@ export function RunsOverviewSection({
   const [restoringRunId, setRestoringRunId] = useState<string | null>(null);
 
   const runSummaries = runListQuery.data?.runs ?? [];
-  // Separate live executing runs from archived/aborted runs so operators can manage both clearly.
+  // Separate live executing runs, completed runs, and archived/aborted runs so the History tab covers every session.
   const activeRunSummaries = runSummaries.filter((runSummary) =>
     ACTIVE_RUN_STATUS_SET.has(runSummary.status),
+  );
+  const completedRunSummaries = runSummaries.filter(
+    (runSummary) => runSummary.status === "completed" && !runSummary.archivedAt,
   );
   const archivedRunSummaries = runSummaries.filter(
     (runSummary) => runSummary.status === "aborted" || Boolean(runSummary.archivedAt),
@@ -66,10 +69,6 @@ export function RunsOverviewSection({
     setConfirmingCleanupRunId(null);
     await abortRun.mutateAsync({ runId: archivedRunId, archiveOnly: false });
   };
-
-  if (activeRunSummaries.length === 0 && archivedRunSummaries.length === 0) {
-    return null;
-  }
 
   return (
     <View style={styles.stack}>
@@ -132,6 +131,59 @@ export function RunsOverviewSection({
                     label="Dừng / Archive..."
                     accessibilityLabel={`Stop or archive running SLP ${activeRun.title}`}
                     onPress={() => setConfirmingStopRun(activeRun)}
+                  />
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+
+      {/* Completed SLP sessions so operators can inspect finished runs in the History tab. */}
+      {completedRunSummaries.length > 0 ? (
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>
+            Phiên SLP đã hoàn thành ({completedRunSummaries.length})
+          </Text>
+          {completedRunSummaries.map((completedRun) => {
+            const isSelected = completedRun.id === selectedRunId;
+            return (
+              <View
+                key={completedRun.id}
+                style={[
+                  styles.stack,
+                  {
+                    padding: 10,
+                    borderRadius: 8,
+                    backgroundColor: theme.colors.surface2,
+                    borderWidth: 1,
+                    borderColor: isSelected ? theme.colors.accent : theme.colors.border,
+                  },
+                ]}
+              >
+                <View style={[styles.row, { justifyContent: "space-between" }]}>
+                  <Text style={styles.fieldLabel}>{completedRun.title}</Text>
+                  <Text style={styles.successText}>
+                    {completedRun.status} · {completedRun.mode}
+                  </Text>
+                </View>
+                <Text style={styles.mutedText}>
+                  {completedRun.repoPath} · Pipelines merged: {completedRun.mergedTaskCount}/{completedRun.taskCount}
+                </Text>
+                <View style={styles.row}>
+                  {onOpenSupervisor && completedRun.supervisorAgentId ? (
+                    <ActionButton
+                      styles={styles}
+                      label="Mở Supervisor Chat"
+                      accessibilityLabel={`Open Supervisor chat for ${completedRun.title}`}
+                      onPress={() => onOpenSupervisor(completedRun.supervisorAgentId)}
+                    />
+                  ) : null}
+                  <ActionButton
+                    styles={styles}
+                    label={isSelected ? "Đang xem chi tiết" : "Xem chi tiết"}
+                    accessibilityLabel={`Inspect completed run ${completedRun.title}`}
+                    onPress={() => onSelectRun(completedRun.id)}
                   />
                 </View>
               </View>

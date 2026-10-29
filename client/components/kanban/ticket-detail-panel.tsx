@@ -81,6 +81,7 @@ function SpecCardInspector({
       style={[
         styles.card,
         {
+          flex: 1,
           borderWidth: 2,
           borderLeftWidth: 6,
           borderColor: specColor.borderColor,
@@ -137,8 +138,9 @@ function SpecCardInspector({
       />
 
       <Text style={styles.fieldLabel}>Spec Content (Handed by Supervisor to Lead)</Text>
+      {/* Let the Spec Content editor expand vertically to fill the full height of the sidebar. */}
       <TextInput
-        style={[styles.input, { minHeight: 140, textAlignVertical: "top" }]}
+        style={[styles.input, { flex: 1, minHeight: 200, textAlignVertical: "top" }]}
         value={editedSpecContent}
         onChangeText={setEditedSpecContent}
         multiline
@@ -211,6 +213,7 @@ function BriefCardInspector({
       style={[
         styles.card,
         {
+          flex: 1,
           borderWidth: 2,
           borderLeftWidth: 6,
           borderColor: specColor.borderColor,

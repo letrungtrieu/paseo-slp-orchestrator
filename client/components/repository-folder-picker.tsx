@@ -1,49 +1,105 @@
-import { useEffect, useMemo } from "react";
-import { Text, View } from "react-native";
-import { usePaseo } from "@getpaseo/plugin/client";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+// Host and Git repository folder picker that queries open Paseo projects scoped to the selected host.
 import type { PluginTheme } from "@getpaseo/plugin";
+import { getPaseoClient, useHosts, usePaseo } from "@getpaseo/plugin/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { Text, View } from "react-native";
 import type { UiStyles } from "../styles";
 import { ActionButton } from "./action-button";
-import { SelectField } from "./select-field";
+import { SelectField, type SelectOption } from "./select-field";
 
 interface RepositoryFolderPickerProps {
   styles: UiStyles;
   theme: PluginTheme;
   selectedRepositoryPath: string;
   onSelectRepositoryPath: (folderPath: string) => void;
+  currentHost?: { id: string; label: string };
+  selectedHostId?: string;
+  onSelectHostId?: (nextHostId: string) => void;
 }
 
-// The plugin API lists Paseo projects but cannot open the app's native folder dialog.
+// Allows selecting a configured Paseo host first and then picking one of that host's open Git repositories.
 export function RepositoryFolderPicker({
   styles,
   theme,
   selectedRepositoryPath,
   onSelectRepositoryPath,
+  currentHost,
+  selectedHostId,
+  onSelectHostId,
 }: RepositoryFolderPickerProps) {
-  const paseo = usePaseo();
+  const defaultPaseo = usePaseo();
+  const configuredHosts = useHosts();
   const queryClient = useQueryClient();
+
+  // Default to the current screen's host or the first online host when no explicit host selection has been made yet.
+  const defaultHostId =
+    currentHost?.id ||
+    configuredHosts.find((hostEntry) => hostEntry.status === "online")?.serverId ||
+    configuredHosts[0]?.serverId ||
+    "local";
+
+  const [internalHostId, setInternalHostId] = useState<string>(defaultHostId);
+  const effectiveHostId = selectedHostId || internalHostId || defaultHostId;
+  const updateSelectedHostId = onSelectHostId ?? setInternalHostId;
+
+  // Build dropdown options from live configured hosts, falling back to the surface's active host if useHosts is empty.
+  const hostOptions = useMemo<SelectOption[]>(() => {
+    if (configuredHosts.length === 0) {
+      return [
+        {
+          value: currentHost?.id || "local",
+          label: currentHost?.label || "Local Host",
+          detail: "Active Paseo host",
+        },
+      ];
+    }
+    return configuredHosts.map((hostSummary) => ({
+      value: hostSummary.serverId,
+      label: hostSummary.label,
+      detail: `${hostSummary.status} · ${hostSummary.serverId}`,
+    }));
+  }, [configuredHosts, currentHost?.id, currentHost?.label]);
+
+  const selectedHostSummary = configuredHosts.find(
+    (hostSummary) => hostSummary.serverId === effectiveHostId,
+  );
+  const isSelectedHostOffline =
+    selectedHostSummary !== undefined && selectedHostSummary.status !== "online";
+
+  // Borrow the selected host's PaseoApi client when online; fall back to the surface's default Paseo client for the active host.
+  const targetHostPaseoClient = useMemo(() => {
+    if (!effectiveHostId || effectiveHostId === currentHost?.id) {
+      return defaultPaseo;
+    }
+    try {
+      return getPaseoClient(effectiveHostId);
+    } catch {
+      return defaultPaseo;
+    }
+  }, [currentHost?.id, defaultPaseo, effectiveHostId]);
+
   const projectQuery = useQuery({
-    // A stable key avoids another daemon request when only the run title or mode changes.
-    queryKey: ["slp", "paseo-projects"],
-    queryFn: () => paseo.projects.list(),
-    // A cached list hid projects added after the form first rendered, so always revalidate when it mounts.
+    // Include effectiveHostId in the query key so switching hosts fetches that specific host's project list.
+    queryKey: ["slp", "paseo-projects", effectiveHostId],
+    queryFn: () => targetHostPaseoClient.projects.list(),
+    enabled: !isSelectedHostOffline,
     staleTime: 0,
     refetchOnMount: "always",
   });
 
-  // Newly opened Paseo projects were invisible until a manual refresh; the daemon pushes
-  // project.update events, so invalidating here keeps the options current without polling.
-  useEffect(
-    () =>
-      paseo.projects.subscribe(() => {
-        void queryClient.invalidateQueries({ queryKey: ["slp", "paseo-projects"] });
-      }),
-    [paseo, queryClient],
-  );
+  // Subscribe to project list updates on the currently selected host so newly opened folders appear automatically.
+  useEffect(() => {
+    if (isSelectedHostOffline) return undefined;
+    return targetHostPaseoClient.projects.subscribe(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ["slp", "paseo-projects", effectiveHostId],
+      });
+    });
+  }, [effectiveHostId, isSelectedHostOffline, queryClient, targetHostPaseoClient]);
 
-  // Runs require git, so non-git folders that Paseo remembers are not offered here.
-  const repositoryOptions = useMemo(
+  // Runs require git, so non-git folders that Paseo remembers are excluded from the repository picker.
+  const repositoryOptions = useMemo<SelectOption[]>(
     () =>
       (projectQuery.data?.projects ?? [])
         .filter((project) => project.projectKind === "git")
@@ -56,34 +112,68 @@ export function RepositoryFolderPicker({
     [projectQuery.data],
   );
 
+  // Switching to another host clears the previous host's project path so only valid paths on the new host can be chosen.
+  const handleHostChange = (nextHostId: string) => {
+    if (nextHostId !== effectiveHostId) {
+      onSelectRepositoryPath("");
+    }
+    updateSelectedHostId(nextHostId);
+  };
+
   return (
     <View style={styles.stack}>
+      <SelectField
+        styles={styles}
+        theme={theme}
+        label="Host"
+        value={effectiveHostId}
+        options={hostOptions}
+        placeholder="Select a Paseo host"
+        onValueChange={handleHostChange}
+      />
+
       <SelectField
         styles={styles}
         theme={theme}
         label="Repository folder"
         value={selectedRepositoryPath || null}
         options={repositoryOptions}
-        placeholder={projectQuery.isLoading ? "Loading Paseo projects…" : "Select an open Paseo project"}
+        placeholder={
+          isSelectedHostOffline
+            ? "Selected host is offline"
+            : projectQuery.isLoading
+              ? "Loading Paseo projects…"
+              : "Select an open Paseo project"
+        }
         onValueChange={onSelectRepositoryPath}
-        disabled={projectQuery.isLoading}
+        disabled={isSelectedHostOffline || projectQuery.isLoading}
       />
+
       {/* Project additions happen outside this plugin, so refresh is deliberate instead of continuous polling. */}
       <ActionButton
         styles={styles}
         label={projectQuery.isFetching ? "Refreshing projects…" : "Refresh project list"}
-        disabled={projectQuery.isFetching}
+        disabled={isSelectedHostOffline || projectQuery.isFetching}
         onPress={() => void projectQuery.refetch()}
       />
+
+      {isSelectedHostOffline ? (
+        <Text style={styles.warningText}>
+          Host &quot;{selectedHostSummary?.label ?? effectiveHostId}&quot; is currently{" "}
+          {selectedHostSummary?.status}. Connect to this host to list its projects.
+        </Text>
+      ) : null}
+
       {/* Do not turn an RPC failure into the misleading empty-project message below. */}
       {projectQuery.error ? (
         <Text style={styles.dangerText}>
           Could not load Paseo projects: {projectQuery.error.message}
         </Text>
       ) : null}
-      {!projectQuery.isLoading && repositoryOptions.length === 0 ? (
+
+      {!isSelectedHostOffline && !projectQuery.isLoading && repositoryOptions.length === 0 ? (
         <Text style={styles.mutedText}>
-          Open a git repository with Paseo’s Open Project Folder, then refresh this list.
+          Open a git repository on this host with Paseo’s Open Project Folder, then refresh this list.
         </Text>
       ) : null}
     </View>

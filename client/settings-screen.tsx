@@ -1,18 +1,7 @@
+// Paseo Settings entry for SLP Orchestrator exposing the same 4-tab layout (SLP, Skills, Settings, History).
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { ScrollView } from "react-native";
-import { AgentDefaultSettings } from "./components/agent-default-settings";
-import { useUiStyles } from "./styles";
-import { useProviderCatalog } from "./use-provider-catalog";
-import { useSlpSettings } from "./use-slp-settings";
+import { SlpOrchestratorTabbedView } from "./run-control-screen";
 
-export function SlpSettingsScreen({ theme, layout }: PluginSurfaceProps) {
-  const styles = useUiStyles(theme, layout.compact);
-  // Global settings use the host catalog; the run form resolves choices again in the selected project's context.
-  const catalog = useProviderCatalog("");
-  const settings = useSlpSettings(catalog);
-  return (
-    <ScrollView style={styles.page} contentContainerStyle={styles.pageContent} keyboardShouldPersistTaps="handled">
-      <AgentDefaultSettings styles={styles} theme={theme} catalog={catalog} settings={settings} />
-    </ScrollView>
-  );
+export function SlpSettingsScreen(props: PluginSurfaceProps) {
+  return <SlpOrchestratorTabbedView {...props} initialTab="slp" />;
 }

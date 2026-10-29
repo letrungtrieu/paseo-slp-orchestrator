@@ -36,7 +36,8 @@ export function KanbanWorkspacePanel({
   return (
     <ScrollView
       style={styles.page}
-      contentContainerStyle={styles.pageContent}
+      // Allow the side-by-side Kanban sidebar and board columns to stretch across the full workspace panel height.
+      contentContainerStyle={[styles.pageContent, { flexGrow: 1 }]}
       // Keep button taps responsive while editing Spec Markdown inside the workspace panel.
       keyboardShouldPersistTaps="handled"
     >

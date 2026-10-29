@@ -1,20 +1,22 @@
-// Project-scoped Kanban board decomposing each Spec into its Brief card and individual gradable Option cards.
+// Project-scoped Kanban workspace splitting the resizable Spec/Inspector sidebar from the 5-column Kanban board.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import { BOARD_COLUMNS, type BoardColumn, type BoardTicket, type BriefItem } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { useBoardActions, useBoardTickets } from "../../use-board";
 import { describeRpcError, useRunList } from "../../use-run";
-import { ActionButton } from "../action-button";
 import { BriefKanbanCard, OptionKanbanCard, SpecKanbanCard } from "./kanban-cards";
 import {
   type KanbanCardSelection,
   partitionTicketBriefItems,
   resolveOptionCardColumn,
-  resolveSpecColorIdentity,
 } from "./kanban-palette";
-import { TicketDetailPanel } from "./ticket-detail-panel";
+import {
+  DEFAULT_KANBAN_SIDEBAR_WIDTH_PX,
+  KanbanSidebar,
+  KanbanSidebarResizeHandle,
+} from "./kanban-sidebar";
 
 interface KanbanBoardSectionProps {
   styles: UiStyles;
@@ -57,7 +59,7 @@ function isCardSelected(
   return true;
 }
 
-// Renders the Spec -> Brief -> Option Kanban board with color-matched borders, lineage tags, and focused card inspectors.
+// Renders the resizable left sidebar and the separate 5-column Kanban board side-by-side.
 export function KanbanBoardSection({
   styles,
   theme,
@@ -104,6 +106,10 @@ export function KanbanBoardSection({
   const [newSpecCriteria, setNewSpecCriteria] = useState("");
   const [newSpecContent, setNewSpecContent] = useState("");
 
+  // Sidebar width and collapsed state allow the operator to drag-resize or collapse the sidebar independently of the board.
+  const [sidebarWidthPx, setSidebarWidthPx] = useState<number>(DEFAULT_KANBAN_SIDEBAR_WIDTH_PX);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
+
   const allProjectTickets = boardQuery.data?.tickets ?? [];
   // Scope tickets belonging to the active Supervisor's run so finished/aborted runs do not clutter the board.
   const activeSupervisorTickets = activeProjectRun
@@ -124,16 +130,32 @@ export function KanbanBoardSection({
   const boardErrorMessage =
     describeRpcError(boardQuery.error) ?? describeRpcError(saveBoardSpec.error);
 
-  // Toggles selection when the user clicks a Spec card, Brief card, or Option card.
+  // Selecting a card on the Kanban board opens its inspector inside the sidebar and exits the New Spec creation form.
   const handleToggleCardSelection = (nextSelection: KanbanCardSelection) => {
-    setSelectedCard((previousSelection) =>
-      isCardSelected(previousSelection, nextSelection) ? null : nextSelection,
-    );
+    setSelectedCard((previousSelection) => {
+      const willDeselect = isCardSelected(previousSelection, nextSelection);
+      if (!willDeselect) {
+        setIsCreatingSpec(false);
+        setIsSidebarCollapsed(false);
+      }
+      return willDeselect ? null : nextSelection;
+    });
+  };
+
+  // Toggling "+ New Spec" always opens the form inside the sidebar rather than rendering a top card above the board.
+  const handleToggleCreatingSpec = () => {
+    setIsCreatingSpec((previousCreatingState) => {
+      const nextCreatingState = !previousCreatingState;
+      if (nextCreatingState) {
+        setIsSidebarCollapsed(false);
+      }
+      return nextCreatingState;
+    });
   };
 
   const handleCreateNewSpecTicket = () => {
     if (!effectiveRepoPath || !newSpecTitle.trim() || !newSpecContent.trim()) return;
-    // Creating a Spec ticket from the board stores Spec v1 and notifies the active Supervisor if a run is active.
+    // Creating a Spec ticket from the sidebar stores Spec v1 and notifies the active Supervisor if a run is active.
     saveBoardSpec.mutate(
       {
         repoPath: effectiveRepoPath,
@@ -147,6 +169,7 @@ export function KanbanBoardSection({
         onSuccess: (createdResponse) => {
           setSelectedCard({ kind: "spec", ticketId: createdResponse.ticket.id });
           setIsCreatingSpec(false);
+          setIsSidebarCollapsed(false);
           setNewSpecTitle("");
           setNewSpecCriteria("");
           setNewSpecContent("");
@@ -181,172 +204,19 @@ export function KanbanBoardSection({
   }
 
   return (
-    <View style={styles.card}>
-      {/* Section header shows the active project name, active run status, and the + New Spec button. */}
-      <View style={[styles.row, { justifyContent: "space-between" }]}>
-        <View style={{ gap: 2 }}>
-          <Text style={styles.sectionTitle}>
-            {projectDisplayName ? `${projectDisplayName} · ` : ""}Spec & Brief Kanban
-          </Text>
+    <View style={{ flex: 1, flexDirection: "row", alignItems: "stretch", minHeight: 620 }}>
+      {/* Separate Kanban board card on the left containing only the 5 workflow columns so no card sits horizontally on top. */}
+      <View style={[styles.card, { flex: 1, minWidth: 0, alignSelf: "stretch", gap: 10 }]}>
+        {!effectiveRepoPath ? (
           <Text style={styles.mutedText}>
-            {effectiveRepoPath || "No project selected"}
-            {activeProjectRun ? ` · Active Run: ${activeProjectRun.title} (${activeProjectRun.status})` : ""}
+            Open a project workspace or enter a repository path in the right sidebar to view its Spec & Brief Kanban board.
           </Text>
-        </View>
-        <View style={styles.row}>
-          {activeProjectRun && onOpenSupervisor ? (
-            <ActionButton
-              styles={styles}
-              label="Open Supervisor Chat"
-              accessibilityLabel={`Open Supervisor chat for ${activeProjectRun.title}`}
-              onPress={() => onOpenSupervisor(activeProjectRun.supervisorAgentId)}
-            />
-          ) : null}
-          {effectiveRepoPath ? (
-            <ActionButton
-              styles={styles}
-              tone={isCreatingSpec ? "secondary" : "primary"}
-              label={isCreatingSpec ? "Cancel New Spec" : "+ New Spec"}
-              accessibilityLabel="Create a new Spec card on the Kanban board"
-              onPress={() => setIsCreatingSpec((previousState) => !previousState)}
-            />
-          ) : null}
-        </View>
-      </View>
-
-      {/* Scope filter bar defaults to Active Supervisor only so finished/aborted runs stay out of the way. */}
-      {allProjectTickets.length > 0 ? (
-        <View style={styles.row}>
-          <Text style={styles.fieldLabel}>Scope:</Text>
-          <Pressable
-            onPress={() => setFilterMode("active_supervisor")}
-            style={[
-              styles.chip,
-              {
-                borderColor: filterMode === "active_supervisor" ? theme.colors.accent : theme.colors.border,
-                backgroundColor: filterMode === "active_supervisor" ? theme.colors.surface2 : theme.colors.surface1,
-              },
-            ]}
-          >
-            <Text style={styles.chipText}>
-              Active Supervisor ({activeSupervisorTickets.length})
-            </Text>
-          </Pressable>
-          {(filterMode === "all" ? allProjectTickets : activeSupervisorTickets).map((projectTicket) => {
-            const specColor = resolveSpecColorIdentity(projectTicket);
-            const isActiveFilter = filterMode === projectTicket.id;
-            return (
-              <Pressable
-                key={projectTicket.id}
-                onPress={() =>
-                  setFilterMode((previousMode) =>
-                    previousMode === projectTicket.id ? "active_supervisor" : projectTicket.id,
-                  )
-                }
-                style={[
-                  styles.chip,
-                  {
-                    borderWidth: isActiveFilter ? 2 : 1,
-                    borderColor: specColor.borderColor,
-                    backgroundColor: isActiveFilter ? specColor.badgeBackground : theme.colors.surface1,
-                  },
-                ]}
-              >
-                <Text style={{ fontSize: 11, fontWeight: "700", color: specColor.badgeTextColor }}>
-                  {projectTicket.ticketKey} → {specColor.briefTagCode}
-                </Text>
-              </Pressable>
-            );
-          })}
-          {allProjectTickets.length > activeSupervisorTickets.length ? (
-            <Pressable
-              onPress={() =>
-                setFilterMode((previousMode) =>
-                  previousMode === "all" ? "active_supervisor" : "all",
-                )
-              }
-              style={[
-                styles.chip,
-                {
-                  borderColor: filterMode === "all" ? theme.colors.accent : theme.colors.border,
-                  backgroundColor: filterMode === "all" ? theme.colors.surface2 : theme.colors.surface1,
-                },
-              ]}
-            >
-              <Text style={styles.chipText}>All History ({allProjectTickets.length})</Text>
-            </Pressable>
-          ) : null}
-        </View>
-      ) : null}
-
-      {/* Only show the manual repository path input when not already scoped to a workspace's project root. */}
-      {!projectRepoPath ? (
-        <View style={styles.row}>
-          <Text style={styles.fieldLabel}>Project Repo:</Text>
-          <TextInput
-            style={[styles.input, { flex: 1, minWidth: 220 }]}
-            value={customRepoPath || activeProjectRun?.repoPath || ""}
-            onChangeText={setCustomRepoPath}
-            placeholder="/path/to/git/repository"
-            placeholderTextColor={theme.colors.foregroundMuted}
-          />
-        </View>
-      ) : null}
-
-      {/* Inline creation form for authoring a new Spec card directly on the Kanban board. */}
-      {isCreatingSpec ? (
-        <View style={[styles.card, { backgroundColor: theme.colors.surface2 }]}>
-          <Text style={styles.sectionTitle}>Create New Spec Card</Text>
-          <Text style={styles.fieldLabel}>Title</Text>
-          <TextInput
-            style={styles.input}
-            value={newSpecTitle}
-            onChangeText={setNewSpecTitle}
-            placeholder="Feature or Epic title"
-            placeholderTextColor={theme.colors.foregroundMuted}
-          />
-          <Text style={styles.fieldLabel}>Acceptance Criteria (optional)</Text>
-          <TextInput
-            style={styles.input}
-            value={newSpecCriteria}
-            onChangeText={setNewSpecCriteria}
-            placeholder="High-level acceptance criteria"
-            placeholderTextColor={theme.colors.foregroundMuted}
-          />
-          <Text style={styles.fieldLabel}>Spec Requirements (Shared with Supervisor)</Text>
-          <TextInput
-            style={[styles.input, { minHeight: 90, textAlignVertical: "top" }]}
-            value={newSpecContent}
-            onChangeText={setNewSpecContent}
-            multiline
-            placeholder="Write the full feature specification..."
-            placeholderTextColor={theme.colors.foregroundMuted}
-          />
-          <ActionButton
-            styles={styles}
-            tone="primary"
-            label={saveBoardSpec.isPending ? "Saving..." : "Create Spec & Notify Supervisor"}
-            accessibilityLabel="Create Spec card and notify Supervisor"
-            disabled={saveBoardSpec.isPending || !newSpecTitle.trim() || !newSpecContent.trim()}
-            onPress={handleCreateNewSpecTicket}
-          />
-        </View>
-      ) : null}
-
-      {boardErrorMessage ? <Text style={styles.dangerText}>{boardErrorMessage}</Text> : null}
-
-      {/* Horizontal 5-column Kanban board on the left and a dedicated right-hand detail sidebar when a card is selected. */}
-      {!effectiveRepoPath ? (
-        <Text style={styles.mutedText}>
-          Open a project workspace to view its Spec & Brief Kanban board.
-        </Text>
-      ) : (
-        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12 }}>
+        ) : (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator
             style={{ flex: 1, minWidth: 0 }}
-            contentContainerStyle={{ gap: 12 }}
+            contentContainerStyle={{ gap: 12, alignItems: "flex-start" }}
           >
             {BOARD_COLUMNS.map((columnKey) => {
               const columnAccent = resolveColumnAccentColor(theme, columnKey);
@@ -449,26 +319,51 @@ export function KanbanBoardSection({
               );
             })}
           </ScrollView>
+        )}
+      </View>
 
-          {/* Right-hand sidebar drawer renders the focused inspector for the selected Spec, Brief, or Option card. */}
-          {selectedTicket && selectedCard ? (
-            <ScrollView
-              style={{ width: 390, maxHeight: 740, flexShrink: 0 }}
-              showsVerticalScrollIndicator
-              keyboardShouldPersistTaps="handled"
-            >
-              <TicketDetailPanel
-                styles={styles}
-                theme={theme}
-                ticket={selectedTicket}
-                selection={selectedCard}
-                selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
-                onClose={() => setSelectedCard(null)}
-              />
-            </ScrollView>
-          ) : null}
-        </View>
-      )}
+      {/* Draggable splitter bar separating the Kanban board container on the left from the sidebar on the right. */}
+      <KanbanSidebarResizeHandle
+        theme={theme}
+        sidebarWidthPx={sidebarWidthPx}
+        isSidebarCollapsed={isSidebarCollapsed}
+        onChangeSidebarWidthPx={setSidebarWidthPx}
+        onChangeSidebarCollapsed={setIsSidebarCollapsed}
+      />
+
+      {/* Independent resizable sidebar on the right for project controls, New Spec creation, and selected card inspection. */}
+      <KanbanSidebar
+        styles={styles}
+        theme={theme}
+        projectDisplayName={projectDisplayName}
+        projectRepoPath={projectRepoPath}
+        effectiveRepoPath={effectiveRepoPath}
+        customRepoPath={customRepoPath}
+        onChangeCustomRepoPath={setCustomRepoPath}
+        activeProjectRun={activeProjectRun}
+        selectedRunId={selectedRunId}
+        allProjectTickets={allProjectTickets}
+        activeSupervisorTickets={activeSupervisorTickets}
+        filterMode={filterMode}
+        onSelectFilterMode={setFilterMode}
+        isCreatingSpec={isCreatingSpec}
+        onToggleCreatingSpec={handleToggleCreatingSpec}
+        newSpecTitle={newSpecTitle}
+        onChangeNewSpecTitle={setNewSpecTitle}
+        newSpecCriteria={newSpecCriteria}
+        onChangeNewSpecCriteria={setNewSpecCriteria}
+        newSpecContent={newSpecContent}
+        onChangeNewSpecContent={setNewSpecContent}
+        isSavingNewSpec={saveBoardSpec.isPending}
+        onSubmitNewSpec={handleCreateNewSpecTicket}
+        boardErrorMessage={boardErrorMessage}
+        selectedTicket={selectedTicket}
+        selectedCard={selectedCard}
+        onSelectCard={setSelectedCard}
+        onOpenSupervisor={onOpenSupervisor}
+        sidebarWidthPx={sidebarWidthPx}
+        isSidebarCollapsed={isSidebarCollapsed}
+      />
     </View>
   );
 }
