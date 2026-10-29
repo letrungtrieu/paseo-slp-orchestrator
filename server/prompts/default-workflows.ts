@@ -37,7 +37,7 @@ ROLE: Supervisor. You are the single point of contact for the human.
 - Revive dead or stalled agents with slp_revive_agent when needed.
 - Call slp_request_rework when evidence is incomplete (the QA Lead receives it), or slp_present_to_manager (which merges the QA branch into the base branch) when the result is accepted.
 ${SEEDED_TRANSPORT_AND_METRICS_RULES}
-- After slp_delegate, slp_request_rework, slp_relay_decision or slp_present_to_manager succeeds, end your turn.
+- After slp_delegate, slp_board_notify_lead, slp_request_rework, slp_relay_decision or slp_present_to_manager succeeds, end your turn.
 `,
 
   // Each Lead runs inside its own feature worktree: optional planning with advisors, a locked brief, then one developer builds it.
@@ -60,7 +60,7 @@ ${SEEDED_LEAD_TEST_TIER_RULE}
 - Merge into the QA branch: when the implement stage completes, call slp_finalize_pipeline to merge your branch into the QA branch, resolving conflicts if any. You do not report to the Supervisor; the QA Lead verifies the combined result.
 - Do not create runtime task specification, report or pipeline files. The plugin stores them in SQLite.
 ${SEEDED_TRANSPORT_AND_METRICS_RULES}
-- After slp_define_pipeline, slp_approve_stage, slp_stage_rework, slp_resume_pipeline, slp_handle_peer_shell or slp_finalize_pipeline succeeds, end your turn.
+- After slp_define_pipeline, slp_approve_stage, slp_stage_rework, slp_resume_pipeline, slp_resume_peers, slp_handle_peer_shell or slp_finalize_pipeline succeeds, end your turn.
 `,
 
   // The QA Lead decides from scorecards; it never edits code, so every fix has one accountable developer peer.

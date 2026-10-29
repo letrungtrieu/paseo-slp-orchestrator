@@ -4,12 +4,12 @@
 import { BUS_SERVER_NAME } from "../../../shared/roles";
 import { SLP_MANAGER_SKILL_NAME } from "./skill-name";
 
-// The text mirrors the engine contract (peer kinds, one developer, locked brief, scorecards, rework cap),
-// so it must change together with stage-shape.ts, stage-messages.ts and the bus tool catalogue.
+// The text mirrors the engine contract (peer kinds, one developer, Kanban Spec/Brief board, peer pause/resume, scorecards, rework cap),
+// so it must change together with stage-shape.ts, stage-messages.ts, board-tools.ts, peer-pause.ts and the bus tool catalogue.
 export function renderSlpManagerSkillMarkdown(): string {
   return `---
 name: ${SLP_MANAGER_SKILL_NAME}
-description: Explain the SLP (Supervisor-Lead-Peer) orchestration model and design, group, customize, upgrade or validate .slp/SUPERVISOR.md, .slp/LEAD.md, .slp/QA_LEAD.md, .slp/standards/* and .slp/peers/<group>/*.md for the current engine (peer kinds advisor/developer/qa, one developer per pipeline, locked brief, QA scorecards, rework cap). Use when the user asks about SLP architecture, .slp configuration, generating or organizing peer roles, test tiers and heavy resources (.slp/standards/TEST_POLICY.md), or customizing Supervisor and Lead workflows.
+description: Explain the SLP (Supervisor-Lead-Peer) orchestration model and design, group, customize, upgrade or validate .slp/SUPERVISOR.md, .slp/LEAD.md, .slp/QA_LEAD.md, .slp/standards/* and .slp/peers/<group>/*.md for the current engine (peer kinds advisor/developer/qa, one developer per pipeline, project Kanban Spec/Brief board with revision diffs, peer pause/resume, QA scorecards, rework cap). Use when the user asks about SLP architecture, .slp configuration, generating or organizing peer roles, test tiers and heavy resources (.slp/standards/TEST_POLICY.md), or customizing Supervisor and Lead workflows.
 ---
 
 # SLP Manager (\`.slp\` Role & Workflow Authoring Guide)
@@ -26,15 +26,16 @@ Use this skill whenever the user asks you to explain the SLP (Supervisor–Lead�
 
 ## 1. How the 3-Tier SLP Architecture Works
 
-SLP orchestrates software delivery across three tiers and four runtime roles (\`supervisor\`, \`master_lead\`, \`qa_lead\`, \`peer\`), backed by an SQLite state store and a loopback MCP bus (\`${BUS_SERVER_NAME}\`):
+SLP orchestrates software delivery across three tiers and four runtime roles (\`supervisor\`, \`master_lead\`, \`qa_lead\`, \`peer\`), backed by an SQLite state store, a project-scoped **Spec & Brief Kanban Board** (\`SPEC -> BRIEF -> SCORE -> REWORK\`), and a loopback MCP bus (\`${BUS_SERVER_NAME}\`):
 
 1. **Tier 1 — Supervisor (\`.slp/SUPERVISOR.md\`, runtime role \`supervisor\`):**
    - The single human-facing agent. It stays **read-only** on the repository.
-   - **Owns the product spec:** for every feature it drafts screens/surfaces and their elements, states (empty, loading, success, error, disabled), Given/When/Then interactions, business rules and out-of-scope items, gets the human's explicit approval, and passes it as \`productSpec\`.
-   - Calls \`slp_delegate\` with the human-approved \`productSpec\` for every feature: \`{ acceptanceCriteria, productSpec }\` for one feature, or \`{ tasks: [{ name, acceptanceCriteria, productSpec, worktree? }], sharedContext? }\` for \`N\` truly independent features. The engine rejects a delegation whose feature lacks a \`productSpec\` of at least 80 characters.
+   - **Owns the product spec on the Kanban board:** for every feature it drafts screens/surfaces and their elements, states (empty, loading, success, error, disabled), Given/When/Then interactions, business rules and out-of-scope items, and immediately saves every draft or revision onto the project's Kanban board via \`slp_board_save_spec({ title, acceptanceCriteria, spec, summary })\` (creating or updating a ticket such as \`SLP-1\` with a Git-style unified diff) instead of only pasting it in chat.
+   - Presents the drafted Spec and its Kanban ticket key to the human, revises with \`slp_board_save_spec\` when needed, and calls \`slp_delegate\` only after the human explicitly approves it: \`{ acceptanceCriteria, productSpec }\` for one feature, or \`{ tasks: [{ name, acceptanceCriteria, productSpec, worktree? }], sharedContext? }\` for \`N\` truly independent features. The engine rejects a delegation whose feature lacks a \`productSpec\` of at least 80 characters.
+   - **Kanban Spec Updates:** when the human edits a Spec on the Kanban UI (or the Supervisor updates it during an active run), the Supervisor calls \`slp_board_save_spec\` (if not already saved from the UI) and calls \`slp_board_notify_lead({ ticketId, message })\` so the active Lead receives the Spec diff, pauses its peers and updates the Brief.
    - Every delegation creates one Git worktree and one **Lead** per feature, plus one **QA worktree** (the run's QA branch) with one **QA Lead**.
    - **Human decisions:** when a Lead uses up its rework rounds and escalates, the Supervisor receives the latest scorecard, presents it to the human, and passes the human's verdict back with \`slp_relay_decision({ pipelineId, decision })\`.
-   - When the QA Lead reports, the Supervisor audits the QA branch (\`slp_list_pipelines\`, \`slp_get_pipeline\`, \`git diff\`) and calls \`slp_request_rework\` (goes to the QA Lead) or \`slp_present_to_manager\` (merges the QA branch into the base branch).
+   - When the QA Lead reports, the Supervisor audits the QA branch (\`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`git diff\`) and calls \`slp_request_rework\` (goes to the QA Lead) or \`slp_present_to_manager\` (merges the QA branch into the base branch).
 
 2. **Tier 2 — Lead (\`.slp/LEAD.md\`, runtime role \`master_lead\`):**
    - Runs inside its feature worktree, receives the sibling Lead roster and its own \`productSpec\` as a contract, and aligns shared APIs/schemas with sibling Leads via \`slp_ask({ toAgentId, question })\`.
@@ -45,7 +46,7 @@ SLP orchestrates software delivery across three tiers and four runtime roles (\`
      \`\`\`
 
    - **Planning (optional, always first):** \`kind: advisor\` peers investigate techniques and design options and discuss them **with the Lead only**. They are read-only and are retired when planning closes. Small, clear changes skip planning.
-   - **Brief:** \`{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }\`. The Lead supplies it in \`slp_approve_stage({ summary, brief })\` when closing planning, or as \`pipeline.brief\` in \`slp_define_pipeline\` when there is no planning stage. After that it is **locked**: the developer builds it, QA grades it, nobody edits it.
+   - **Brief & Controlled Revisions on the Kanban Board:** \`{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }\`. The Lead supplies the initial Brief in \`slp_approve_stage({ summary, brief })\` when closing planning, or as \`pipeline.brief\` in \`slp_define_pipeline\` when there is no planning stage. For stage peers, the Brief is a **locked contract** (developers and QA graders never edit it). When the Supervisor notifies the Lead of a Spec diff (\`slp_board_notify_lead\`) or when implementation/merge conflicts require switching technical approaches, the Lead calls \`slp_pause_peers({ pipelineId, reason })\` to immediately stop active child stage peers and lock their writes, calls \`slp_board_update_brief({ ticketId, pipelineId, reason, approach, items })\` to record a new Brief revision with a unified diff (preserving \`pass\` scores on unchanged bullets while resetting modified/added bullets to \`todo\`), and calls \`slp_resume_peers({ pipelineId, guidance })\` to resume its peers on the updated Brief.
    - **Implement:** exactly one \`kind: developer\` peer builds the locked brief. Feature pipelines never contain a QA/verify stage.
    - The Lead decides every stage with \`slp_approve_stage\` or \`slp_stage_rework\`. Each stage has a rework cap (run setting, default 3). At the cap \`slp_stage_rework\` is refused; the Lead approves or calls \`slp_escalate\`, and the human decides through the Supervisor.
    - When the implement stage is approved, the Lead merges into the QA branch with \`slp_finalize_pipeline\`. Feature Leads never report to the Supervisor.
@@ -53,7 +54,7 @@ SLP orchestrates software delivery across three tiers and four runtime roles (\`
    **QA Lead (\`.slp/QA_LEAD.md\`, runtime role \`qa_lead\`):**
    - Spawned with the feature Leads; prepares the QA plan from \`TEST_POLICY.md\`, the product specs and the feature briefs while features are built. Read-only: it never edits code.
    - \`slp_define_pipeline\` is rejected until every feature branch is merged. QA pipelines run in the QA worktree, one at a time, and contain only **verify** stages: one or more \`kind: qa\` graders plus at most one \`kind: developer\` fixer.
-   - **Scorecard loop:** graders submit \`slp_stage_report\` with \`scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]\` and optional \`observations\` (anything outside the criteria, not graded). The QA Lead decides from the scorecard alone: approve, or send a fix to the developer with \`slp_stage_rework\`. The developer stays idle until asked; after its fix the engine asks the graders to re-grade before waking the QA Lead. The same rework cap and human escalation apply.
+   - **Scorecard loop:** graders submit \`slp_stage_report\` with \`scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]\` (which automatically updates item scores on the project Kanban board; \`slp_board_score_item\` and \`slp_board_get_ticket\` are also available) and optional \`observations\` (anything outside the criteria, not graded). The QA Lead decides from the scorecard alone: approve, or send a fix to the developer with \`slp_stage_rework\`. The developer stays idle until asked; after its fix the engine asks the graders to re-grade before waking the QA Lead. The same rework cap and human escalation apply.
    - Closes with \`slp_finalize_pipeline\` (no merge), then \`slp_report\` with the final scorecard.
 
 3. **Tier 3 — Stage Peers (\`.slp/peers/**/*.md\`, runtime role \`peer\`):**
@@ -62,13 +63,13 @@ SLP orchestrates software delivery across three tiers and four runtime roles (\`
      | \`kind\` | Joins | Writes? | Delivers |
      |---|---|---|---|
      | \`advisor\` | planning stage of a feature pipeline | no (file writes and mutating shell are denied) | a short recommendation: chosen option, why, main risk, what to leave out |
-     | \`developer\` | implement stage (feature) or as the single fixer in a verify stage (QA) | yes, inside the pipeline worktree | the change, its tests, files changed, commands run with results |
+     | \`developer\` | implement stage (feature) or as the single fixer in a verify stage (QA) | yes, inside the pipeline worktree (unless paused via \`slp_pause_peers\`) | the change, its tests, files changed, commands run with results |
      | \`qa\` | verify stages of the QA pipeline | no | a scorecard entry per criterion plus observations |
 
-   - Peers talk **only to their Lead** (\`slp_ask\` / \`slp_notify\` / \`slp_answer\`); the bus rejects peer-to-peer messages.
-   - Peers run in the Lead's worktree. Whether they fork the Lead's session is a run setting (off by default), so a peer workflow must never assume it inherited the Lead's context: everything it needs arrives in its stage mail (goal, task, acceptance criteria, locked brief or criteria to grade). The engine also adds a short kind-specific instruction to that mail; peer files must not contradict it.
+   - Peers talk **only to their Lead** (\`slp_ask\` / \`slp_notify\` / \`slp_answer\`); the bus rejects peer-to-peer messages. Developers can also inspect their Kanban ticket with \`slp_board_get_ticket\` and update individual bullet progress via \`slp_board_update_item\`.
+   - Peers run in the Lead's worktree. Whether they fork the Lead's session is a run setting (off by default, and cross-provider peers automatically fall back to a fresh session with full stage mail), so a peer workflow must never assume it inherited the Lead's context: everything it needs arrives in its stage mail (goal, task, acceptance criteria, locked brief or criteria to grade). The engine also adds a short kind-specific instruction to that mail; peer files must not contradict it.
 
-**Run settings, not \`.slp\` content:** "Fork peers from the Lead session" and "Max rework rounds per stage" live in the SLP Orchestrator settings and are snapshotted per run. Do not write them into \`.slp\` files.
+**Run settings, not \`.slp\` content:** "Fork peers from the Lead session", "Max rework rounds per stage" and default per-tier models/providers live in the SLP Orchestrator settings and are snapshotted per run. Do not write them into \`.slp\` files.
 
 ---
 
@@ -172,7 +173,7 @@ ROLE: Pipeline peer (Backend & API Engineer), the only developer of this pipelin
 1. \`role\` *(required)*: the ID the Lead passes in \`slp_define_pipeline\` -> \`peers: [{ role, task }]\`.
 2. \`description\` *(required)*: when the Lead should schedule this peer and what it owns. The Lead picks peers from this line, so state the kind of problem it is for.
 3. \`name\` *(optional)*: display title, defaults to \`role\`.
-4. \`model\` *(optional)*: empty inherits the run's Peer model. A short ID keeps the run's provider; \`provider/model\` switches it. When the run forks peers, a model from another provider than the Lead's falls back to the run's Peer model.
+4. \`model\` *(optional)*: empty inherits the run's Peer model. A short ID keeps the run's provider; \`provider/model\` switches it. When the run forks peers, a model from another provider than the Lead's automatically falls back to a fresh session on that provider with full stage mail.
 5. \`thinking\` *(optional)*: reasoning option ID (\`low\`, \`medium\`, \`high\`), empty inherits.
 6. \`kind\` *(required for generated peers)*: \`advisor\`, \`developer\` or \`qa\` (see section 1).
 7. \`tier\` *(required for generated peers)*: \`feature\` or \`integration\`, matching the kind (section 2, step 4).
@@ -187,30 +188,31 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 ### Mandatory Checklist When Editing \`.slp/SUPERVISOR.md\`
 1. **Front matter:** \`role: supervisor\` and a non-empty \`description\`.
 2. **Read-only:** the Supervisor never edits files or commits.
-3. **Product spec before delegation:** the five-section spec (screens and elements, states, Given/When/Then interactions, business rules, out of scope), explicit human approval, passed unchanged as \`productSpec\`. Adapt section names to the project (HUD/input/feedback for games, endpoints/payloads for APIs) but keep the scenarios.
-4. **Delegation:** one task \`slp_delegate({ acceptanceCriteria, productSpec })\` or truly independent parallel features \`slp_delegate({ tasks: [{ name, acceptanceCriteria, productSpec }], sharedContext? })\`.
-5. **Human decisions:** present a rework-capped scorecard to the human (what passes, what fails and why, the Lead's recommendation) and relay the answer with \`slp_relay_decision\`.
-6. **Verification and completion:** inspect with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_get_run\`, \`git diff\`; revive with \`slp_revive_agent\`; finish with \`slp_request_rework\` or \`slp_present_to_manager\`.
-7. **Turn rule:** *"After \`slp_delegate\`, \`slp_request_rework\`, \`slp_relay_decision\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
+3. **Product spec on the Kanban board before delegation:** draft the five-section spec (screens and elements, states, Given/When/Then interactions, business rules, out of scope), immediately persist every draft or revision onto the project Kanban board with \`slp_board_save_spec({ title, acceptanceCriteria, spec, summary })\` instead of only sending it in chat, get explicit human approval, and pass it unchanged as \`productSpec\`. Adapt section names to the project (HUD/input/feedback for games, endpoints/payloads for APIs) but keep the scenarios.
+4. **Kanban Spec updates:** when the human or the Supervisor updates a Spec on the Kanban board, call \`slp_board_save_spec\` (if not already saved from the UI) and call \`slp_board_notify_lead\` so the active Lead can pause its peers and update its Brief from the Spec diff.
+5. **Delegation:** one task \`slp_delegate({ acceptanceCriteria, productSpec })\` or truly independent parallel features \`slp_delegate({ tasks: [{ name, acceptanceCriteria, productSpec }], sharedContext? })\`.
+6. **Human decisions:** present a rework-capped scorecard to the human (what passes, what fails and why, the Lead's recommendation) and relay the answer with \`slp_relay_decision\`.
+7. **Verification and completion:** inspect with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`slp_get_run\`, \`git diff\`; revive with \`slp_revive_agent\`; finish with \`slp_request_rework\` or \`slp_present_to_manager\`.
+8. **Turn rule:** *"After \`slp_delegate\`, \`slp_board_notify_lead\`, \`slp_request_rework\`, \`slp_relay_decision\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
 
 ### Mandatory Checklist When Editing \`.slp/LEAD.md\`
 1. **Front matter:** \`role: master-lead\` (or \`lead\`) and a non-empty \`description\`. A \`model\` from another provider switches the Lead's provider.
 2. **Product spec is a contract** and sibling Leads align shared contracts via \`slp_ask\`.
 3. **Pipeline shape:** \`{ pipeline: { name, description, stages: [{ name, kind?, goal, peers: [{ role, task }] }], brief? } }\` with role IDs from the catalog, no \`systemPrompt\` field, and the enforced shape \`[planning with advisors]? -> implement with one developer\`. Never recommend a review, QA or verify stage inside a feature pipeline.
 4. **When to plan:** say which project situations deserve planning and which advisors fit them (for example: new subsystem -> \`system-architect\`; auth or payment change -> \`security-advisor\`), and that small, clear changes skip planning and pass \`brief\` directly.
-5. **How to write the brief:** few criteria, each observable and tied to the acceptance criteria or a product spec scenario, each with a concrete \`verification\` (test file, command or manual step a QA grader can run); tempting extras go to \`outOfScope\`.
+5. **How to write and revise the brief:** few criteria, each observable and tied to the acceptance criteria or a product spec scenario, each with a concrete \`verification\` (test file, command or manual step a QA grader can run); tempting extras go to \`outOfScope\`. When implementation/merge conflicts require switching technical approaches or when the Supervisor notifies the Lead of a Spec diff, call \`slp_pause_peers\` to stop active stage peers, call \`slp_board_update_brief\` to revise the Brief bullets with a clear reason, and call \`slp_resume_peers\` to resume the peers on the updated Brief.
 6. **Deciding:** judge the developer's report against the brief; approve or \`slp_stage_rework\` with concrete corrections; never request work outside the brief; at the rework cap approve or \`slp_escalate\` with the open problems and a recommendation.
 7. **Lifecycle tools:** \`slp_handle_peer_shell\` for watchdog alerts, \`slp_finalize_pipeline\` to merge into the QA branch (feature Leads have no \`slp_report\`).
 8. **Test tier:** feature pipelines schedule only \`tier: feature\` peers and run only the \`fast\` tier of \`TEST_POLICY.md\`.
 9. **No runtime files, no push:** runtime specs and reports live in SQLite; never \`git push\` \`slp/*\` branches.
-10. **Turn rule:** *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_handle_peer_shell\` or \`slp_finalize_pipeline\` succeeds, END YOUR TURN."*
+10. **Turn rule:** *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_resume_peers\`, \`slp_handle_peer_shell\` or \`slp_finalize_pipeline\` succeeds, END YOUR TURN."*
 
 ### Mandatory Checklist When Editing \`.slp/QA_LEAD.md\`
 1. **Front matter:** \`role: qa-lead\` and a non-empty \`description\`. A \`model\` here applies to the QA Lead only.
 2. **Two phases:** preparation (read \`TEST_POLICY.md\`, map every product spec scenario and every feature brief criterion to a check, ask feature Leads via \`slp_ask\`, do not define a pipeline) and post-handover (define the QA pipeline, omitting \`worktree\`).
 3. **Never edit code:** the runtime denies its writes; fixes go to the verify stage's developer.
 4. **Verify stages from the investigation:** for example fast suites -> engine/E2E suites -> real-environment journeys, each stage with \`kind: qa\` graders and at most one \`kind: developer\` fixer, \`tier: integration\` graders for heavy work, and never two peers on the same heavy resource in one stage.
-5. **Scorecard loop:** decide from the graded criteria; send fixes with \`slp_stage_rework\`; observations are a judgement call, not automatic fixes; at the rework cap approve or \`slp_escalate\`.
+5. **Scorecard loop & Kanban sync:** decide from the graded criteria (graders submit \`scorecard\` in \`slp_stage_report\` or via \`slp_board_score_item\`); send fixes with \`slp_stage_rework\`; observations are a judgement call, not automatic fixes; at the rework cap approve or \`slp_escalate\`.
 6. **Close then report:** \`slp_finalize_pipeline\` (closes, no merge) then \`slp_report\` with the final scorecard; Supervisor rework arrives as a new QA pipeline with a new name.
 7. **Turn rule:** *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_handle_peer_shell\`, \`slp_finalize_pipeline\` or \`slp_report\` succeeds, END YOUR TURN."*
 
@@ -218,7 +220,7 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 1. **Front matter:** unique, valid, non-reserved \`role\`, a clear \`description\`, an explicit \`kind\` and a \`tier\` that matches it.
 2. **Work from the stage mail:** the workflow relies on the goal, task, acceptance criteria and brief in the stage mail, never on an inherited Lead session.
 3. **Stay inside the kind:** advisors never write or propose implementing it themselves; QA graders never fix; the developer never widens the brief.
-4. **Tool obligations:** \`slp_stage_report\` (graders with \`scorecard\` and \`observations\`), \`slp_escalate\` when blocked, \`slp_ask\` / \`slp_notify\` with the Lead only, \`slp_answer\` for the Lead's questions, never approve the stage.
+4. **Tool obligations:** \`slp_stage_report\` (graders with \`scorecard\` and \`observations\`), \`slp_escalate\` when blocked, \`slp_ask\` / \`slp_notify\` with the Lead only, \`slp_answer\` for the Lead's questions, optional \`slp_board_update_item\` for developer progress tracking, never approve the stage.
 5. **Proportionate evidence:** facts (files, commands, results, screenshot paths for visual criteria only), no essays, no peer-to-peer coordination.
 6. **Test commands** from \`TEST_POLICY.md\` allowed for its tier.
 7. **Turn rule:** *"After \`slp_stage_report\` or \`slp_escalate\` succeeds, END YOUR TURN."*
@@ -239,8 +241,8 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 
 Old files still load, but their instructions contradict the engine and cause rejected tool calls or scope creep. For a \`.slp\` generated before the current engine:
 
-1. **Supervisor:** every \`slp_delegate\` needs the human-approved \`productSpec\`; add the human-decision rule with \`slp_relay_decision\` and add it to the turn rule. Remove any instruction to wait for a feature Lead's report.
-2. **Lead:** replace recommended stage shapes such as \`design -> implement -> verify-and-review\` or multi-developer stages with \`[planning with advisors]? -> implement with one developer\`; add the brief guidance (checklist items 4–6); remove \`slp_report\`, End-User UAT pipelines, merges into the base branch and "Prior Stage Peers" consultation.
+1. **Supervisor:** save drafted or revised Product Specs to the project Kanban board via \`slp_board_save_spec\` before human approval and \`slp_delegate\`; notify the Lead of Spec updates via \`slp_board_notify_lead\`; every \`slp_delegate\` needs the human-approved \`productSpec\`; add the human-decision rule with \`slp_relay_decision\` and add it to the turn rule. Remove any instruction to wait for a feature Lead's report.
+2. **Lead:** replace recommended stage shapes such as \`design -> implement -> verify-and-review\` or multi-developer stages with \`[planning with advisors]? -> implement with one developer\`; add the brief guidance and the peer-pause / Brief-revision workflow (\`slp_pause_peers\` -> \`slp_board_update_brief\` -> \`slp_resume_peers\`, checklist item 5); remove \`slp_report\`, End-User UAT pipelines, merges into the base branch and "Prior Stage Peers" consultation.
 3. **QA Lead:** the plugin re-seeds \`.slp/QA_LEAD.md\` when missing. Rewrite its stages as verify stages with graders and one fixer, and add the scorecard loop.
 4. **Peers:** add \`kind\` and a matching \`tier\` to every peer; turn code-reviewer style peers into planning advisors; give QA peers the scorecard report from \`references/PEER_TEMPLATES.md\`; delete "Method Contract", "Rejected Alternatives", "enumerate all edge cases", "STRICT TECHNICAL METRICS" and peer-to-peer coordination sections.
 5. **Legacy \`.slp/peers/END_USER_UAT.md\`:** read it first and move project-specific journeys into the QA Lead's plan or into a \`kind: qa\` integration grader. Delete the file only after the human confirms, and remove every reference to the \`end-user\` role with it.

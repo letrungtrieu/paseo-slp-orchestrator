@@ -212,6 +212,14 @@ describe("slp-manager project skill provisioning", () => {
     expect(skillMarkdown).toContain("{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }");
     expect(skillMarkdown).toContain("scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]");
     expect(skillMarkdown).toContain("slp_relay_decision");
+    // Ensure the skill documents the project-scoped Spec & Brief Kanban board and Lead peer pause/resume workflows.
+    expect(skillMarkdown).toContain("slp_board_save_spec");
+    expect(skillMarkdown).toContain("slp_board_notify_lead");
+    expect(skillMarkdown).toContain("slp_pause_peers");
+    expect(skillMarkdown).toContain("slp_board_update_brief");
+    expect(skillMarkdown).toContain("slp_resume_peers");
+    expect(skillMarkdown).toContain("slp_board_update_item");
+    expect(skillMarkdown).toContain("slp_board_score_item");
     // Fork and the rework cap are run settings; generated .slp files must not depend on an inherited Lead session.
     expect(skillMarkdown).toContain("never assume it inherited the Lead's context");
     expect(skillMarkdown).not.toContain("forks directly from that Lead's session");
