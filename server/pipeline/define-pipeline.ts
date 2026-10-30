@@ -10,6 +10,7 @@ import {
   type StageKind,
 } from "../../shared/pipeline";
 import { ROLE_LABELS } from "../../shared/roles";
+import { runOrchestration } from "../../shared/orchestration";
 import type { Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
 import { peerRole } from "../project-prompts/defaults";
@@ -138,11 +139,13 @@ function recheckWorkspaceAndIdentity(
     (pipeline) => pipelineKey(pipeline.name, pipeline.version) === requestedKey,
   );
   if (duplicate) throw new ToolError(`Pipeline '${definition.name}' version '${definition.version}' already exists.`);
-  const worktreeCollision = allKnownPipelines.find(
-    (pipeline) => !["integrated", "failed"].includes(pipeline.status)
-      && (pipeline.worktree === workspace.cwd || pipeline.branch === workspace.branch),
-  );
-  if (worktreeCollision) throw new ToolError(`Worktree or branch is already assigned to pipeline '${worktreeCollision.name}'.`);
+  if (runOrchestration(run).spawnWorktrees) {
+    const worktreeCollision = allKnownPipelines.find(
+      (pipeline) => !["integrated", "failed"].includes(pipeline.status)
+        && (pipeline.worktree === workspace.cwd || pipeline.branch === workspace.branch),
+    );
+    if (worktreeCollision) throw new ToolError(`Worktree or branch is already assigned to pipeline '${worktreeCollision.name}'.`);
+  }
 }
 
 // Check whether a Lead agent already owns an active (non-integrated, non-failed) pipeline.
@@ -230,7 +233,10 @@ export async function definePipeline(
       const callerRecord = latestRunBeforeWorktree.agents[callerLeadId];
       // Default to the calling Lead's pre-provisioned worktree when available and not yet claimed by an active pipeline.
       let requestedWorktreePath = definition.worktree?.trim() ?? "";
-      if (!requestedWorktreePath && !isQaDefinition) {
+      // When worktree spawning is disabled, force every pipeline onto the main repository checkout on baseBranch.
+      if (!runOrchestration(latestRunBeforeWorktree).spawnWorktrees) {
+        requestedWorktreePath = latestRunBeforeWorktree.repoPath;
+      } else if (!requestedWorktreePath && !isQaDefinition) {
         const callerWorktree = callerRecord?.worktreePath ?? "";
         const callerWorktreeAlreadyClaimed =
           !callerWorktree ||
@@ -343,11 +349,24 @@ export async function definePipeline(
             fallbackSpec: leadRecord?.featureSpec ?? mutableRun.productSpec,
           });
         } else if (pipeline.kind === "feature") {
+          // Bind the new pipeline to the Lead's existing run ticket (preserving its Spec title and featureSlug) when present.
+          const existingLeadTicket = ctx.store.board
+            .listByRun(runId)
+            .find(
+              (candidateTicket) =>
+                candidateTicket.leadAgentId === leadAgentId || !candidateTicket.activePipelineId,
+            );
           ctx.store.board.saveSpec({
             repoPath: mutableRun.repoPath,
-            title: pipeline.name,
+            ticketIdOrKey: existingLeadTicket?.id,
+            title: existingLeadTicket?.title || pipeline.name,
             acceptanceCriteria: leadRecord?.featureCriteria ?? mutableRun.criteria ?? "",
-            specContent: leadRecord?.featureSpec ?? mutableRun.productSpec ?? mutableRun.criteria ?? pipeline.description,
+            specContent:
+              existingLeadTicket?.specRevisions.at(-1)?.content ??
+              leadRecord?.featureSpec ??
+              mutableRun.productSpec ??
+              mutableRun.criteria ??
+              pipeline.description,
             author: "supervisor",
             activeRunId: runId,
             activePipelineId: pipeline.id,

@@ -5,7 +5,7 @@ import {
   type PluginWorkspacePanelProps,
   useWorkspace,
 } from "@getpaseo/plugin/client";
-import { ScrollView } from "react-native";
+import { View } from "react-native";
 import { KanbanBoardSection } from "./components/kanban/kanban-board-section";
 import { useUiStyles } from "./styles";
 
@@ -34,12 +34,13 @@ export function KanbanWorkspacePanel({
   };
 
   return (
-    <ScrollView
-      style={styles.page}
-      // Allow the side-by-side Kanban sidebar and board columns to stretch across the full workspace panel height.
-      contentContainerStyle={[styles.pageContent, { flexGrow: 1 }]}
-      // Keep button taps responsive while editing Spec Markdown inside the workspace panel.
-      keyboardShouldPersistTaps="handled"
+    <View
+      // Lock the workspace panel to 100% of the viewport height so the right sidebar scrolls internally instead of stretching.
+      style={[
+        styles.page,
+        styles.pageContent,
+        { flex: 1, height: "100%", maxHeight: "100%", minHeight: 0, overflow: "hidden" },
+      ]}
     >
       <KanbanBoardSection
         styles={styles}
@@ -48,7 +49,7 @@ export function KanbanWorkspacePanel({
         projectDisplayName={projectDisplayName}
         onOpenSupervisor={handleOpenSupervisorChat}
       />
-    </ScrollView>
+    </View>
   );
 }
 

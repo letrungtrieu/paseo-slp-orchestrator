@@ -72,8 +72,8 @@ export async function finalizeQaPipeline(
   if (run.status !== "running") throw new ToolError(`Cannot finalize a pipeline while run is '${run.status}'.`);
   if (!completedPipeline(pipeline)) throw new ToolError("Every QA stage must be completed and approved first.");
   if (pipeline.gate) throw new ToolError("Approve the pipeline's human gate before closing it.");
-  // Fixes made by QA peers ship with the QA branch, so anything left uncommitted would silently miss the Supervisor's merge.
-  await requireCleanWorktree(run.devCwd, "QA worktree", true);
+  // Fixes made by QA peers ship with the QA branch; when running directly on repoPath (spawnWorktrees = false), allow untracked .slp files.
+  await requireCleanWorktree(run.devCwd, "QA worktree", run.devCwd !== run.repoPath);
   const verifiedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
   const qaPeerIds = Object.values(ctx.store.require(caller.runId).agents)
     .filter((agentRecord) => agentRecord.pipelineId === pipelineId && agentRecord.role === "peer" && !agentRecord.archivedAt)

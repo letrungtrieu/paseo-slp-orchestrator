@@ -1,6 +1,6 @@
 // Shared lineage tag badge and single-Option inspector panel for a selected Kanban Option card.
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Text, View } from "react-native";
+import { ScrollView, Text, View } from "react-native";
 import type { BoardTicket, BriefItem } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { ActionButton } from "../action-button";
@@ -64,6 +64,9 @@ export function OptionCardInspector({
       style={[
         styles.card,
         {
+          flex: 1,
+          minHeight: 0,
+          overflow: "hidden",
           borderWidth: 2,
           borderLeftWidth: 6,
           // Match the parent Spec and Brief border color so the selected Option inspector visually belongs to its Spec family.
@@ -73,8 +76,8 @@ export function OptionCardInspector({
         },
       ]}
     >
-      {/* Header shows the full tag chain: SPEC -> BRIEF -> OPTION and its current status. */}
-      <View style={[styles.row, { justifyContent: "space-between" }]}>
+      {/* Header shows the full tag chain: SPEC -> BRIEF -> OPTION and stays fixed at the top. */}
+      <View style={[styles.row, { justifyContent: "space-between", flexShrink: 0 }]}>
         <View style={styles.row}>
           <InspectorTagBadge
             label={`SPEC · ${ticket.ticketKey}`}
@@ -106,57 +109,64 @@ export function OptionCardInspector({
         />
       </View>
 
-      <View style={{ gap: 4 }}>
-        <Text style={styles.fieldLabel}>Option Requirement</Text>
-        <Text style={styles.bodyText}>{optionBullet.requirement}</Text>
-      </View>
-
-      {optionBullet.verification ? (
+      {/* Scroll only the Option details body while keeping the top header and Close button fixed. */}
+      <ScrollView
+        style={{ flex: 1, minHeight: 0 }}
+        contentContainerStyle={{ gap: 10 }}
+        showsVerticalScrollIndicator
+      >
         <View style={{ gap: 4 }}>
-          <Text style={styles.fieldLabel}>Verification Method</Text>
-          <Text style={styles.monoText}>{optionBullet.verification}</Text>
+          <Text style={styles.fieldLabel}>Option Requirement</Text>
+          <Text style={styles.bodyText}>{optionBullet.requirement}</Text>
         </View>
-      ) : null}
 
-      {optionBullet.implementationNote ? (
-        <View style={{ gap: 4 }}>
-          <Text style={styles.fieldLabel}>Developer Implementation Note</Text>
-          <Text style={styles.bodyText}>{optionBullet.implementationNote}</Text>
-        </View>
-      ) : null}
+        {optionBullet.verification ? (
+          <View style={{ gap: 4 }}>
+            <Text style={styles.fieldLabel}>Verification Method</Text>
+            <Text style={styles.monoText}>{optionBullet.verification}</Text>
+          </View>
+        ) : null}
 
-      {/* QA Scorecard verdict and evidence for this specific Option card. */}
-      {optionBullet.score ? (
-        <View
-          style={[
-            styles.card,
-            {
-              backgroundColor: theme.colors.surface2,
-              borderLeftWidth: 4,
-              borderLeftColor: statusColor,
-              gap: 4,
-            },
-          ]}
-        >
-          <Text style={{ fontWeight: "700", color: statusColor }}>
-            QA Score: {optionBullet.score.status.toUpperCase()}
-            {optionBullet.score.gradedBy ? ` (by ${optionBullet.score.gradedBy})` : ""}
-          </Text>
-          <Text style={styles.bodyText}>{optionBullet.score.reason}</Text>
-          {optionBullet.score.evidence ? (
-            <Text style={styles.monoText}>Evidence: {optionBullet.score.evidence}</Text>
-          ) : null}
-        </View>
-      ) : (
-        <Text style={styles.mutedText}>Not yet graded by QA.</Text>
-      )}
+        {optionBullet.implementationNote ? (
+          <View style={{ gap: 4 }}>
+            <Text style={styles.fieldLabel}>Developer Implementation Note</Text>
+            <Text style={styles.bodyText}>{optionBullet.implementationNote}</Text>
+          </View>
+        ) : null}
 
-      {optionBullet.reworkNote ? (
-        <View style={{ gap: 4 }}>
-          <Text style={styles.fieldLabel}>Rework Feedback</Text>
-          <Text style={styles.dangerText}>{optionBullet.reworkNote}</Text>
-        </View>
-      ) : null}
+        {/* QA Scorecard verdict and evidence for this specific Option card. */}
+        {optionBullet.score ? (
+          <View
+            style={[
+              styles.card,
+              {
+                backgroundColor: theme.colors.surface2,
+                borderLeftWidth: 4,
+                borderLeftColor: statusColor,
+                gap: 4,
+              },
+            ]}
+          >
+            <Text style={{ fontWeight: "700", color: statusColor }}>
+              QA Score: {optionBullet.score.status.toUpperCase()}
+              {optionBullet.score.gradedBy ? ` (by ${optionBullet.score.gradedBy})` : ""}
+            </Text>
+            <Text style={styles.bodyText}>{optionBullet.score.reason}</Text>
+            {optionBullet.score.evidence ? (
+              <Text style={styles.monoText}>Evidence: {optionBullet.score.evidence}</Text>
+            ) : null}
+          </View>
+        ) : (
+          <Text style={styles.mutedText}>Not yet graded by QA.</Text>
+        )}
+
+        {optionBullet.reworkNote ? (
+          <View style={{ gap: 4 }}>
+            <Text style={styles.fieldLabel}>Rework Feedback</Text>
+            <Text style={styles.dangerText}>{optionBullet.reworkNote}</Text>
+          </View>
+        ) : null}
+      </ScrollView>
     </View>
   );
 }

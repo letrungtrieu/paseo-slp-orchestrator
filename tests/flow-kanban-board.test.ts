@@ -288,11 +288,19 @@ describe("Kanban Spec & Brief board workflow", () => {
       "utf8",
     );
 
+    // Simulate the stage-approval obligation stamped on the Lead when mockup peers finish their stage reports.
+    flow.store.mutate(runId, (mutableRun) => {
+      mutableRun.agents[leadAgentId].awaitingTool = "slp_approve_stage";
+      mutableRun.agents[leadAgentId].awaitingSince = new Date().toISOString();
+    });
+
     const submitV1Call = await flow.callAs(leadAgentId, "slp_submit_mockup", {
       ticketId: "SLP-1",
       summary: "Mockup v1 with blue checkout button",
     });
     expect(submitV1Call.isError).toBe(false);
+    // Submitting a mockup clears awaitingTool so the sweeper does not nudge the Lead to call slp_approve_stage while awaiting human review.
+    expect(flow.run(runId).agents[leadAgentId].awaitingTool).toBeNull();
 
     // Verify v1 was cloned into .slp/mockups/quan-ly-don-hang/versions/v1/index.html and ticket moved to MOCKUP.
     const archivedV1Html = await readFile(
@@ -369,5 +377,104 @@ describe("Kanban Spec & Brief board workflow", () => {
     });
     expect(approveOutcome.ticket.approvedMockupRev).toBe(2);
     expect(approveOutcome.ticket.mockupRevisions[1].status).toBe("approved");
+  });
+
+  it("bundles relative images in HTML/CSS/JS across mockup, worktree, and repo directories and links mockup pipelines without duplicate tickets", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const { invokeRpc } = createBoardRpcHarness(flow.ctx);
+    const runId = await flow.startRun();
+    const supervisorAgentId = flow.run(runId).supervisorAgentId;
+
+    await flow.callAs(supervisorAgentId, "slp_board_save_spec", {
+      title: "Màn hình săn cá",
+      acceptanceCriteria: "Interactive HUD mockup with fish sprites and background.",
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Spec v1 for fish HUD",
+    });
+    await delegateToLead(flow, runId);
+    const leadAgentId = flow.run(runId).masterLeadAgentId;
+    const leadWorktree = flow.run(runId).agents[leadAgentId].worktreePath ?? flow.repoPath;
+
+    // Define a pipeline starting with a mockup stage (no initial brief) and verify it links to SLP-1 instead of creating SLP-2.
+    const defineCall = await flow.callAs(leadAgentId, "slp_define_pipeline", {
+      pipeline: {
+        name: "fish-hud-pipeline",
+        description: "Build fish HUD mockup then implement",
+        stages: [
+          {
+            name: "mockup-stage",
+            kind: "mockup",
+            goal: "Assemble interactive HTML/CSS/JS mockup",
+            peers: [{ role: "developer", task: "Write mockup HTML and assets" }],
+          },
+          {
+            name: "implement",
+            kind: "implement",
+            goal: "Implement approved HUD",
+            peers: [{ role: "developer", task: "Implement HUD" }],
+          },
+        ],
+      },
+    });
+    expect(defineCall.isError).toBe(false);
+    const ticketsAfterDefine = flow.ctx.store.board.listByRepo(flow.repoPath);
+    expect(ticketsAfterDefine).toHaveLength(1);
+    expect(ticketsAfterDefine[0].ticketKey).toBe("SLP-1");
+    expect(ticketsAfterDefine[0].title).toBe("Màn hình săn cá");
+
+    // Create a workspace-level SVG asset in the Lead worktree and a mockup-local SVG asset in `.slp/mockups/fish-hud-pipeline/assets/`.
+    const workspaceSpritesDir = join(leadWorktree, "assets", "sprites");
+    await mkdir(workspaceSpritesDir, { recursive: true });
+    await writeFile(
+      join(workspaceSpritesDir, "boss-fish.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>',
+      "utf8",
+    );
+
+    const pipelineNamedMockupDir = join(leadWorktree, ".slp", "mockups", "fish-hud-pipeline");
+    await mkdir(join(pipelineNamedMockupDir, "assets"), { recursive: true });
+    await mkdir(join(pipelineNamedMockupDir, "css"), { recursive: true });
+    await writeFile(
+      join(pipelineNamedMockupDir, "assets", "banner.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><rect width="20" height="20"/></svg>',
+      "utf8",
+    );
+    await writeFile(
+      join(pipelineNamedMockupDir, "css", "hud.css"),
+      ".hud-bg { background-image: url('../assets/banner.svg'); }",
+      "utf8",
+    );
+    await writeFile(
+      join(pipelineNamedMockupDir, "index.html"),
+      [
+        "<!doctype html><html><head>",
+        '<link rel="stylesheet" href="./css/hud.css">',
+        "</head><body>",
+        '<img id="local-banner" src="./assets/banner.svg" srcset="./assets/banner.svg 1x, ./assets/banner.svg 2x" />',
+        '<img id="workspace-sprite" src="../../../assets/sprites/boss-fish.svg" />',
+        '<script>window.__heroBanner = "./assets/banner.svg";</script>',
+        "</body></html>",
+      ].join(""),
+      "utf8",
+    );
+
+    // Submit mockup without specifying `feature`; snapshotFeatureMockupVersion discovers `fish-hud-pipeline` and syncs into `man-hinh-san-ca`.
+    const submitCall = await flow.callAs(leadAgentId, "slp_submit_mockup", {
+      ticketId: "SLP-1",
+      summary: "HUD mockup v1 with relative SVG sprites and CSS url()",
+    });
+    expect(submitCall.isError).toBe(false);
+
+    // Calling readBoardMockupPreviewRpc (even when passed the Lead worktree path) bundles all relative images into data:image/svg+xml;base64 URIs.
+    const previewResponse = await invokeRpc<{ bundledHtml: string }>(readBoardMockupPreviewRpc, {
+      repoPath: leadWorktree,
+      ticketId: "SLP-1",
+      version: 1,
+    });
+    expect(previewResponse.bundledHtml).toContain('src="data:image/svg+xml;base64,');
+    expect(previewResponse.bundledHtml).toContain('srcset="data:image/svg+xml;base64,');
+    expect(previewResponse.bundledHtml).toContain('url("data:image/svg+xml;base64,');
+    expect(previewResponse.bundledHtml).toContain('window.__heroBanner = "data:image/svg+xml;base64,');
+    expect(previewResponse.bundledHtml).toContain("window.__slpMockupAssets");
   });
 });

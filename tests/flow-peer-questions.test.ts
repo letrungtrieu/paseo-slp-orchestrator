@@ -247,12 +247,31 @@ describe("question rules", () => {
     expect(flow.store.questions.listForRun(runId, 10)).toHaveLength(3);
   });
 
-  it("keeps the Supervisor out of the question tools", async () => {
+  it("allows Lead <-> Supervisor questions via slp_ask and slp_answer while blocking Supervisor -> Peer direct questions", async () => {
     const flow = await createFlow({ mode: "FULL_AUTO" });
-    const { runId, leadId } = await reviewerAndLead(flow);
+    const { runId, reviewerId, leadId } = await reviewerAndLead(flow);
     const supervisorId = flow.run(runId).supervisorAgentId;
-    const outcome = await flow.callAs(supervisorId, "slp_ask", { toAgentId: leadId, question: "Status?" });
-    expect(outcome.isError).toBe(true);
-    expect(outcome.text).toContain("not available");
+
+    // A Lead can ask the Supervisor a question and the Supervisor can answer it with slp_answer to unblock the Lead.
+    const leadToSupervisorAsk = await flow.callAs(leadId, "slp_ask", {
+      toAgentId: supervisorId,
+      question: "Has the human reviewed the mockup yet?",
+    });
+    expect(leadToSupervisorAsk.isError).toBe(false);
+    const askedQuestion = onlyQuestion(flow, runId);
+    const supervisorAnswer = await flow.callAs(supervisorId, "slp_answer", {
+      questionId: askedQuestion.questionId,
+      answer: "NOT YET REVIEWED — wait for slp_review_mockup.",
+    });
+    expect(supervisorAnswer.isError).toBe(false);
+    expect(flow.store.questions.require(askedQuestion.questionId).status).toBe("answered");
+
+    // The Supervisor still cannot bypass the Lead to ask a stage Peer directly.
+    const supervisorToPeerOutcome = await flow.callAs(supervisorId, "slp_ask", {
+      toAgentId: reviewerId,
+      question: "Status?",
+    });
+    expect(supervisorToPeerOutcome.isError).toBe(true);
+    expect(supervisorToPeerOutcome.text).toContain("only contact active Feature Leads or the QA Lead");
   });
 });

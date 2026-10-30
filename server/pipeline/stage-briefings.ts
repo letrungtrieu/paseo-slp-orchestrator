@@ -1,4 +1,5 @@
 // Every fresh cohort receives the same goal, roster and durable handover before any peer starts work.
+import { deriveFeatureMockupSlug } from "../../shared/board";
 import type { PipelineState, StageState } from "../../shared/pipeline";
 import type { Run } from "../../shared/state";
 import { runOrchestration } from "../../shared/orchestration";
@@ -6,6 +7,13 @@ import { peerKindOf } from "../../shared/project-prompts";
 import { peerRole } from "../project-prompts/defaults";
 import type { StagePromptContext } from "../prompts/system-prompts";
 import { briefSection, formatStageReports, peerKindGuidance } from "./stage-briefing-sections";
+
+// Resolve the canonical `.slp/mockups/<feature>` folder slug for a pipeline so Lead and Peers write to the exact same folder.
+function resolvePipelineMockupSlug(run: Run, pipeline: PipelineState, stage: StageState): string {
+  const owningLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? "";
+  const leadFeatureTitle = owningLeadId ? run.agents[owningLeadId]?.featureName : null;
+  return deriveFeatureMockupSlug(leadFeatureTitle || pipeline.name);
+}
 
 export function stagePromptContext(pipeline: PipelineState, stage: StageState, task: string): StagePromptContext {
   // The goal and assignment are system context even before the final roster is activated through the mailbox.
@@ -25,13 +33,19 @@ export function stagePromptContext(pipeline: PipelineState, stage: StageState, t
   };
 }
 
-function stageContextSection(pipeline: PipelineState, stage: StageState): string {
+function stageContextSection(run: Run, pipeline: PipelineState, stage: StageState): string {
   const owningLeadId = stage.forkedLeadAgentId ?? pipeline.leadAgentId ?? "pending";
+  const mockupFolderSlug = stage.kind === "mockup" ? resolvePipelineMockupSlug(run, pipeline, stage) : null;
   return [
     "### Stage Context",
     `- **Pipeline**: ${pipeline.name} (\`${pipeline.id}\`) — ${pipeline.description}`,
     `- **Stage**: ${stage.name} (\`${stage.id}\`, ${stage.kind ?? "stage"})`,
     `- **Worktree**: \`${pipeline.worktree}\``,
+    ...(mockupFolderSlug
+      ? [
+          `- **Mockup Directory**: \`.slp/mockups/${mockupFolderSlug}\` (\`${pipeline.worktree}/.slp/mockups/${mockupFolderSlug}/index.html\`)`,
+        ]
+      : []),
     `- **Stage Goal**: ${stage.goal}`,
     `- **Lead (your only contact)**: \`${owningLeadId}\``,
   ].join("\n");
@@ -57,7 +71,7 @@ export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageSta
     return `- **${peerAssignment.role}** (\`${agentId}\`): ${peerAssignment.task}`;
   });
   return [
-    stageContextSection(pipeline, stage),
+    stageContextSection(run, pipeline, stage),
     `### Stage Peer Roster\n${rosterLines.join("\n")}`,
     ...stageBackgroundSections(run, pipeline),
   ].join("\n\n");
@@ -66,11 +80,12 @@ export function stageBriefing(run: Run, pipeline: PipelineState, stage: StageSta
 export function peerStageBriefing(run: Run, pipeline: PipelineState, stage: StageState, peerIndex: number): string {
   const assignment = stage.peers[peerIndex];
   const peerKind = peerKindOf(peerRole(run.promptConfig, assignment.role));
+  const mockupFolderSlug = stage.kind === "mockup" ? resolvePipelineMockupSlug(run, pipeline, stage) : undefined;
   return [
     `You are project peer **${assignment.role}** in stage **${stage.name}**.`,
     `### Your Task\n${assignment.task}`,
-    peerKindGuidance(peerKind, stage),
-    stageContextSection(pipeline, stage),
+    peerKindGuidance(peerKind, stage, mockupFolderSlug),
+    stageContextSection(run, pipeline, stage),
     ...stageBackgroundSections(run, pipeline),
   ].join("\n\n");
 }
@@ -81,12 +96,13 @@ function reworkBudgetLine(run: Run, stage: StageState): string {
 }
 
 // Planning and Mockup stages end in the locked brief, so the coordinator is reminded that approval carries that contract.
-function coordinatorDecisionGuidance(stage: StageState): string {
+function coordinatorDecisionGuidance(stage: StageState, mockupFeatureSlug?: string): string {
   if (stage.kind === "planning") {
     return "Discuss the approach with the advisors, choose the simplest option that meets the acceptance criteria, then call `slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })`. The brief is locked after approval.";
   }
   if (stage.kind === "mockup") {
-    return "Coordinate your engineer peers to analyze sub-parts of the Spec and assemble a working HTML/CSS/JS mockup at `.slp/mockups/<feature>/index.html`. Then call `slp_submit_mockup({ summary })` so the engine snapshots `.slp/mockups/<feature>/versions/v<N>/index.html` and notifies the Supervisor for human review. Once the human approves the mockup, call `slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })` to lock the Brief and open `implement`.";
+    const targetMockupFolder = `.slp/mockups/${mockupFeatureSlug || "<feature>"}`;
+    return `Coordinate your engineer peers to analyze sub-parts of the Spec and assemble a working HTML/CSS/JS mockup at \`${targetMockupFolder}/index.html\`. Then call \`slp_submit_mockup({ summary })\` so the engine snapshots \`${targetMockupFolder}/versions/v<N>/index.html\` and notifies the Supervisor for human review. Once the human approves the mockup, call \`slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })\` to lock the Brief and open \`implement\`.`;
   }
   if (stage.kind === "verify") {
     return "Decide from the QA scorecards: approve with `slp_approve_stage`, or send a fix to the developer with `slp_stage_rework` (the graders re-score automatically after the fix). Observations outside the criteria are your judgement call.";
@@ -96,8 +112,9 @@ function coordinatorDecisionGuidance(stage: StageState): string {
 
 export function coordinatorStageBriefing(run: Run, pipeline: PipelineState, stage: StageState): string {
   // The Lead judges the goal according to its configured .slp/LEAD.md workflow.
+  const mockupFolderSlug = stage.kind === "mockup" ? resolvePipelineMockupSlug(run, pipeline, stage) : undefined;
   return [
-    `You are the **Lead** controlling this stage until closure. ${coordinatorDecisionGuidance(stage)} Use \`slp_escalate\` if blocked beyond your authority.`,
+    `You are the **Lead** controlling this stage until closure. ${coordinatorDecisionGuidance(stage, mockupFolderSlug)} Use \`slp_escalate\` if blocked beyond your authority.`,
     reworkBudgetLine(run, stage),
     stageBriefing(run, pipeline, stage),
   ].join("\n\n");

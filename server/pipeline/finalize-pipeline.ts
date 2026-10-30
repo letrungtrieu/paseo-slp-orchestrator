@@ -166,34 +166,43 @@ export async function finalizePipeline(
     if (integrationBranch !== run.integrationBranch) {
       throw new ToolError(`Lead worktree is on '${integrationBranch}', expected '${run.integrationBranch}'.`);
     }
-    // Pipeline worktrees must be completely clean (including untracked files), while the Lead checkout only requires clean tracked files.
-    await requireCleanWorktree(pipeline.worktree, "Pipeline worktree", true);
+    const isDirectBaseBranchPipeline =
+      pipeline.worktree === run.devCwd || pipeline.branch === run.integrationBranch;
+    if (!isDirectBaseBranchPipeline) {
+      // Pipeline worktrees must be completely clean (including untracked files), while the Lead checkout only requires clean tracked files.
+      await requireCleanWorktree(pipeline.worktree, "Pipeline worktree", true);
+    }
     await requireCleanWorktree(run.devCwd, "Lead worktree", false);
     // Read-only git checks await subprocesses; cancellation must be observed before starting the merge.
     if (ctx.store.require(runId).status !== "running") throw new ToolError("Run stopped before pipeline integration.");
 
     let mergedCommit: string;
-    try {
-      await runGit(run.devCwd, [
-        "merge",
-        "--no-ff",
-        "-m",
-        `SLP: merge pipeline ${pipeline.name}`,
-        pipeline.branch,
-      ]);
-    } catch (mergeError) {
-      // Capture conflicted file paths before aborting the merge so the Lead knows which files and peers/sibling Leads to consult.
-      const conflictedFilesOutput = await runGit(run.devCwd, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "");
-      await runGit(run.devCwd, ["merge", "--abort"]).catch(() => undefined);
-      throw new ToolError(formatMergeConflictGuidance(run, pipeline, conflictedFilesOutput, mergeError));
+    if (isDirectBaseBranchPipeline) {
+      // In baseBranch mode (spawnWorktrees = false), changes were committed directly on integrationBranch.
+      mergedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
+    } else {
+      try {
+        await runGit(run.devCwd, [
+          "merge",
+          "--no-ff",
+          "-m",
+          `SLP: merge pipeline ${pipeline.name}`,
+          pipeline.branch,
+        ]);
+      } catch (mergeError) {
+        // Capture conflicted file paths before aborting the merge so the Lead knows which files and peers/sibling Leads to consult.
+        const conflictedFilesOutput = await runGit(run.devCwd, ["diff", "--name-only", "--diff-filter=U"]).catch(() => "");
+        await runGit(run.devCwd, ["merge", "--abort"]).catch(() => undefined);
+        throw new ToolError(formatMergeConflictGuidance(run, pipeline, conflictedFilesOutput, mergeError));
+      }
+      try {
+        await runGit(run.devCwd, ["merge-base", "--is-ancestor", pipeline.branch, "HEAD"]);
+      } catch (verificationError) {
+        throw new ToolError(`Merged branch verification failed for '${pipeline.name}': ${verificationError instanceof Error ? verificationError.message : String(verificationError)}`);
+      }
+      await requireCleanWorktree(run.devCwd, "Lead worktree after merge", false);
+      mergedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
     }
-    try {
-      await runGit(run.devCwd, ["merge-base", "--is-ancestor", pipeline.branch, "HEAD"]);
-    } catch (verificationError) {
-      throw new ToolError(`Merged branch verification failed for '${pipeline.name}': ${verificationError instanceof Error ? verificationError.message : String(verificationError)}`);
-    }
-    await requireCleanWorktree(run.devCwd, "Lead worktree after merge", false);
-    mergedCommit = (await runGit(run.devCwd, ["rev-parse", "HEAD"])).trim();
     if (!mergedCommit) throw new ToolError("The integration merge did not produce a commit hash.");
 
     const preArchiveRun = ctx.store.require(runId);

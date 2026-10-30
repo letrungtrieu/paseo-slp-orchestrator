@@ -1,6 +1,7 @@
 // Delegation-time setup of the QA phase: one QA worktree that becomes the run's integration branch, and the
 // QA Lead that lives in it. Feature Leads are provisioned afterwards so their branches fork from the QA branch.
 import { ROLE_LABELS } from "../../../shared/roles";
+import { runOrchestration } from "../../../shared/orchestration";
 import type { PipelineWorkspace } from "../../../shared/state";
 import type { SiblingLeadSummary } from "../../prompts/messages";
 import { qaLeadPreparationBriefing } from "../../prompts/qa-messages";
@@ -26,6 +27,14 @@ export async function provisionQaWorkspace(ctx: PipelineContext, runId: string):
     mutableRun.qaLeadAgentId = "";
   });
   const runBeforeCreation = ctx.store.require(runId);
+  // When worktree spawning is disabled, QA runs directly on baseBranch inside the main repository checkout.
+  if (!runOrchestration(runBeforeCreation).spawnWorktrees) {
+    return {
+      workspaceId: runBeforeCreation.supervisorWorkspaceId,
+      cwd: runBeforeCreation.repoPath,
+      branch: runBeforeCreation.baseBranch,
+    };
+  }
   // Each delegation cycle gets its own branch name because the previous cycle's QA branch may still be deleting.
   const qaCycleNumber = Object.values(runBeforeCreation.agents).filter((agentRecord) => agentRecord.role === "qa_lead").length + 1;
   const createdWorkspace = JSON.parse(

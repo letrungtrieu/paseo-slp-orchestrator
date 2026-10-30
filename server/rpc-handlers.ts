@@ -41,6 +41,42 @@ import { join } from "node:path";
 import { roleRunDefaults } from "./runtime/run-defaults";
 import { ensureSlpManagerSkill } from "./skills/slp-manager-skill";
 
+// Match a workspace directory (either main repoPath or an SLP Lead/Peer git worktree) to its owning Run and canonical repoPath.
+function resolveRunAndCanonicalRepoPath(
+  ctx: PipelineContext,
+  rawRepoOrWorktreePath?: string | null,
+  explicitRunId?: string | null,
+): { matchedRun: Run | undefined; effectiveRepoPath: string } {
+  const trimmedPath = rawRepoOrWorktreePath?.trim() || "";
+  if (explicitRunId) {
+    const explicitRun = ctx.store.find(explicitRunId);
+    if (explicitRun) {
+      return { matchedRun: explicitRun, effectiveRepoPath: explicitRun.repoPath || trimmedPath };
+    }
+  }
+  const orderedRuns = [...ctx.store.list()].sort((firstRun, secondRun) =>
+    secondRun.updatedAt.localeCompare(firstRun.updatedAt),
+  );
+  if (!trimmedPath) {
+    const latestRun = orderedRuns.find((candidateRun) => candidateRun.status !== "aborted") ?? orderedRuns[0];
+    return { matchedRun: latestRun, effectiveRepoPath: latestRun?.repoPath ?? "" };
+  }
+  const runMatchesWorkspacePath = (candidateRun: Run): boolean =>
+    candidateRun.repoPath === trimmedPath ||
+    candidateRun.devCwd === trimmedPath ||
+    Object.values(candidateRun.pipelines ?? {}).some((pipeline) => pipeline.worktree === trimmedPath) ||
+    Object.values(candidateRun.pipelineWorkspaces ?? {}).some((workspace) => workspace.cwd === trimmedPath) ||
+    Object.values(candidateRun.agents ?? {}).some((agentRecord) => agentRecord.worktreePath === trimmedPath);
+
+  const matchedRun =
+    orderedRuns.find((candidateRun) => candidateRun.status !== "aborted" && runMatchesWorkspacePath(candidateRun)) ??
+    orderedRuns.find(runMatchesWorkspacePath);
+  return {
+    matchedRun,
+    effectiveRepoPath: matchedRun?.repoPath || trimmedPath,
+  };
+}
+
 function summarizeRun(run: Run): RunSummary {
   // Counts are derived on demand so the list follows the dynamic pipeline state after each stage handoff.
   const tasks = Object.values(run.tasks);
@@ -128,6 +164,11 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
         leadPermissionModeId: lead.permissionModeId,
         peerPermissionModeId: peer.permissionModeId,
       },
+      // Allow the Start SLP form checkbox to override whether this run creates git worktrees or stays on baseBranch.
+      orchestration:
+        input.spawnWorktrees !== undefined
+          ? { ...defaults.orchestration, spawnWorktrees: input.spawnWorktrees }
+          : defaults.orchestration,
     });
   });
 
@@ -205,12 +246,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Returns project-scoped Kanban tickets enriched with realtime agent activity from the active run.
   server.handle(listBoardTicketsRpc, ({ repoPath, runId }, { paseo }) => {
     ctx.holder.capture(paseo);
-    const matchedRun = runId
-      ? ctx.store.find(runId)
-      : [...ctx.store.list()]
-          .filter((candidateRun) => !repoPath || candidateRun.repoPath === repoPath)
-          .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
-    const effectiveRepoPath = repoPath?.trim() || matchedRun?.repoPath || "";
+    const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, repoPath, runId);
     if (!effectiveRepoPath) return { repoPath: "", tickets: [] };
     const storedTickets = ctx.store.board.listByRepo(effectiveRepoPath);
     return {
@@ -225,14 +261,14 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Persists human Spec edits from the Kanban UI and notifies the Supervisor so it can coordinate with the Lead.
   server.handle(saveBoardSpecFromUiRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const activeRun =
-      (input.runId ? ctx.store.find(input.runId) : undefined) ??
-      [...ctx.store.list()]
-        .filter((candidateRun) => candidateRun.repoPath === input.repoPath && candidateRun.status !== "aborted")
-        .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
+    const { matchedRun: activeRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(
+      ctx,
+      input.repoPath,
+      input.runId,
+    );
 
     const savedTicket = ctx.store.board.saveSpec({
-      repoPath: input.repoPath,
+      repoPath: effectiveRepoPath || input.repoPath,
       ticketIdOrKey: input.ticketId,
       title: input.title,
       acceptanceCriteria: input.acceptanceCriteria,
@@ -290,12 +326,13 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Spawns a standalone normal Paseo agent connected to the project's Kanban board for interactive Spec discussion.
   server.handle(spawnBoardSpecAgentRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
+    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath, input.runId);
     const savedSettings = globalSettings ? await globalSettings.read() : null;
     if (savedSettings?.status === "invalid") throw new Error(savedSettings.error);
     const defaults = savedSettings?.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
     const supervisorDefaults = roleRunDefaults(defaults.roles.supervisor);
     return spawnBoardSpecAgent(ctx, {
-      repoPath: input.repoPath,
+      repoPath: effectiveRepoPath || input.repoPath,
       ticketId: input.ticketId,
       provider: supervisorDefaults.provider ?? DEFAULT_PROVIDER,
       thinkingOptionId: supervisorDefaults.thinkingOptionId,
@@ -306,7 +343,11 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Bundles a specific HTML/CSS/JS mockup version (with element-comment inspector bridge) for the Kanban Mockup Preview Studio.
   server.handle(readBoardMockupPreviewRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const targetTicket = ctx.store.board.requireTicket(input.ticketId, input.repoPath);
+    const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
+    const targetTicket = ctx.store.board.requireTicket(
+      input.ticketId,
+      effectiveRepoPath || input.repoPath,
+    );
     const targetVersion = input.version ?? targetTicket.currentMockupRev;
     const matchedRevision = targetTicket.mockupRevisions.find(
       (candidateRev) => candidateRev.version === targetVersion,
@@ -316,9 +357,26 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
         `Ticket '${targetTicket.ticketKey}' does not have mockup version v${targetVersion}.`,
       );
     }
+    const ticketRun =
+      (targetTicket.activeRunId ? ctx.store.find(targetTicket.activeRunId) : undefined) ??
+      matchedRun;
+    // Resolve the Lead's worktree so relative images and CSS/JS assets resolve across both the worktree and repoPath.
+    const activePipeline =
+      targetTicket.activePipelineId && ticketRun
+        ? ticketRun.pipelines[targetTicket.activePipelineId]
+        : undefined;
+    const leadWorktreePath =
+      activePipeline?.worktree ??
+      (targetTicket.leadAgentId ? ticketRun?.agents[targetTicket.leadAgentId]?.worktreePath : null) ??
+      ticketRun?.devCwd ??
+      null;
     const { absoluteHtmlPath, bundledHtml } = await bundleMockupHtmlPreview(
-      input.repoPath,
+      targetTicket.repoPath || effectiveRepoPath || input.repoPath,
       matchedRevision.entryHtmlPath,
+      {
+        leadWorktreePath,
+        workingDirPath: matchedRevision.workingDirPath,
+      },
     );
     return {
       ticketId: targetTicket.id,
@@ -334,14 +392,14 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Handles human approval or rework requests (including HTML element comments) submitted from the Kanban Mockup Studio.
   server.handle(reviewBoardMockupFromUiRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const activeRun =
-      (input.runId ? ctx.store.find(input.runId) : undefined) ??
-      [...ctx.store.list()]
-        .filter((candidateRun) => candidateRun.repoPath === input.repoPath && candidateRun.status !== "aborted")
-        .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
+    const { matchedRun: activeRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(
+      ctx,
+      input.repoPath,
+      input.runId,
+    );
 
     const reviewOutcome = await executeMockupReview(ctx, {
-      repoPath: input.repoPath,
+      repoPath: effectiveRepoPath || input.repoPath,
       run: activeRun,
       reviewerLabel: "human",
       ticketIdOrKey: input.ticketId,

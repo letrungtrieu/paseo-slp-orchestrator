@@ -143,6 +143,10 @@ export function resolvePeerRoute(run: Run, caller: AgentRecord, recipientId: str
       scopeLabel: "Supervisor-Lead",
     };
   }
+  // Enforce the 3-tier hierarchy: the Supervisor coordinates with Leads only and never bypasses a Lead to message stage peers.
+  if (caller.role === "supervisor") {
+    throw new ToolError("The Supervisor can only contact active Feature Leads or the QA Lead.");
+  }
   // Sibling Leads align shared APIs and flows across features, so this window ignores stage pointers entirely.
   if (
     ["planning", "running"].includes(run.status)

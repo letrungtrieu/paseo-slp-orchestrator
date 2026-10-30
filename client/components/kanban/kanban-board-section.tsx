@@ -267,9 +267,33 @@ export function KanbanBoardSection({
   }
 
   return (
-    <View style={{ flex: 1, flexDirection: "row", alignItems: "stretch", minHeight: 620 }}>
+    <View
+      style={{
+        flex: 1,
+        height: "100%",
+        maxHeight: "100%",
+        minHeight: 0,
+        flexDirection: "row",
+        alignItems: "stretch",
+        overflow: "hidden",
+      }}
+    >
       {/* Separate Kanban board card on the left containing the 6 workflow columns so no card sits horizontally on top. */}
-      <View style={[styles.card, { flex: 1, minWidth: 0, alignSelf: "stretch", gap: 10 }]}>
+      <View
+        style={[
+          styles.card,
+          {
+            flex: 1,
+            minWidth: 0,
+            height: "100%",
+            maxHeight: "100%",
+            minHeight: 0,
+            alignSelf: "stretch",
+            overflow: "hidden",
+            gap: 10,
+          },
+        ]}
+      >
         {!effectiveRepoPath ? (
           <Text style={styles.mutedText}>
             Open a project workspace or enter a repository path in the right sidebar to view its Spec & Brief Kanban board.
@@ -278,7 +302,7 @@ export function KanbanBoardSection({
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator
-            style={{ flex: 1, minWidth: 0 }}
+            style={{ flex: 1, minWidth: 0, minHeight: 0 }}
             contentContainerStyle={{ gap: 12, alignItems: "flex-start" }}
           >
             {BOARD_COLUMNS.map((columnKey) => {
@@ -299,6 +323,8 @@ export function KanbanBoardSection({
                     styles.card,
                     {
                       width: 280,
+                      maxHeight: "100%",
+                      minHeight: 0,
                       backgroundColor: theme.colors.surface0,
                       borderTopWidth: 3,
                       borderTopColor: columnAccent,
@@ -315,7 +341,11 @@ export function KanbanBoardSection({
                   {columnCardCount === 0 ? (
                     <Text style={styles.mutedText}>No cards</Text>
                   ) : (
-                    <View style={styles.stack}>
+                    <ScrollView
+                      style={{ flexShrink: 1, minHeight: 0 }}
+                      contentContainerStyle={styles.stack}
+                      showsVerticalScrollIndicator
+                    >
                       {/* Column 1 (SPEC) holds only the high-level Spec cards handed from Supervisor to Lead. */}
                       {columnKey === "spec"
                         ? visibleTickets.map((specTicket) => (
@@ -401,7 +431,7 @@ export function KanbanBoardSection({
                             />
                           ))
                         : null}
-                    </View>
+                    </ScrollView>
                   )}
                 </View>
               );

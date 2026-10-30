@@ -52,9 +52,9 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   // One-way: queued for the recipient, nothing waits on it. Use slp_ask when the answer is needed to proceed.
   slp_notify: {
-    // Leads can notify sibling Leads (cross-feature API/flow alignment) or stage Peers; Peers can notify their Lead or sibling stage Peers.
-    roles: ["master_lead", "qa_lead", "peer"],
-    description: "Send a one-way notification (no reply expected, does not block). Leads reach sibling Leads and their stage peers; peers reach only their Lead. Use slp_ask if you need an answer.",
+    // Supervisor <-> Lead, Lead <-> sibling Lead, and Lead <-> stage Peer notifications share the same routing gate.
+    roles: SLP_ROLES,
+    description: "Send a one-way notification (no reply expected, does not block). The Supervisor and Leads can reach each other; Leads also reach sibling Leads and their stage peers; peers reach only their Lead. Use slp_ask if you need an answer.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       message: z.string().trim().min(1),
@@ -62,20 +62,22 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   // Blocking question: returns the answer itself, or a pending notice to resume with slp_await_answer.
   slp_ask: {
-    roles: ["master_lead", "qa_lead", "peer"],
-    description: "Ask a question you need answered before you can proceed. Leads ask sibling Leads or their stage peers; peers ask only their Lead. Blocks up to ~40 seconds and returns the answer; if it returns 'no answer yet', call slp_await_answer to keep waiting.",
+    // Allow Supervisor <-> Lead questions alongside Lead <-> Lead and Lead <-> Peer questions.
+    roles: SLP_ROLES,
+    description: "Ask a question you need answered before you can proceed. The Supervisor and Leads can ask each other; Leads also ask sibling Leads or their stage peers; peers ask only their Lead. Blocks up to ~40 seconds and returns the answer; if it returns 'no answer yet', call slp_await_answer to keep waiting.",
     input: z.object({
       toAgentId: z.string().trim().min(1),
       question: z.string().trim().min(1),
     }),
   },
   slp_await_answer: {
-    roles: ["master_lead", "qa_lead", "peer"],
+    roles: SLP_ROLES,
     description: "Keep waiting (up to ~40 seconds per call) for the answer to a question you asked with slp_ask. Also returns questions addressed to you that arrived meanwhile.",
     input: z.object({ questionId: z.string().trim().min(1) }),
   },
+  // The Supervisor must have slp_answer so it can reply when a Lead asks a question via slp_ask and unblock the asker.
   slp_answer: {
-    roles: ["master_lead", "qa_lead", "peer"],
+    roles: SLP_ROLES,
     description: "Answer a question another agent asked you with slp_ask; the asker is blocked until you do.",
     input: z.object({
       questionId: z.string().trim().min(1),

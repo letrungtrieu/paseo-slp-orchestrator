@@ -1,7 +1,7 @@
 // Sidebar inspector for a selected Mockup card in Column 2 (MOCKUP), listing versions with concise 1-2 word controls.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
-import { Pressable, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { BoardTicket, MockupRevision } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { useBoardActions } from "../../use-board";
@@ -91,6 +91,8 @@ export function MockupCardInspector({
         styles.card,
         {
           flex: 1,
+          minHeight: 0,
+          overflow: "hidden",
           borderWidth: 2,
           borderLeftWidth: 6,
           borderColor: specColor.borderColor,
@@ -99,8 +101,13 @@ export function MockupCardInspector({
         },
       ]}
     >
-      {/* Compact header with ticket badge, version badge, and Close button */}
-      <View style={[styles.row, { justifyContent: "space-between", alignItems: "center" }]}>
+      {/* Compact header with ticket badge, version badge, and Close button fixed at the top */}
+      <View
+        style={[
+          styles.row,
+          { justifyContent: "space-between", alignItems: "center", flexShrink: 0 },
+        ]}
+      >
         <View style={[styles.row, { gap: 6 }]}>
           <InspectorTagBadge
             label={`MOCKUP · ${ticket.ticketKey}`}
@@ -123,8 +130,12 @@ export function MockupCardInspector({
         />
       </View>
 
-      {/* Version list in the sidebar: each item is `title (vN) [ → ]` plus a short Approve button */}
-      <View style={{ gap: 6 }}>
+      {/* Scrollable version list in the middle so header and bottom rework input stay fixed */}
+      <ScrollView
+        style={{ flex: 1, minHeight: 0 }}
+        contentContainerStyle={{ gap: 6 }}
+        showsVerticalScrollIndicator
+      >
         {orderedRevisions.map((mockupRev) => {
           const statusBadge = resolveVersionStatusBadge(theme, mockupRev);
           const elementCommentCount = mockupRev.elementComments?.length ?? 0;
@@ -219,11 +230,11 @@ export function MockupCardInspector({
             </View>
           );
         })}
-      </View>
+      </ScrollView>
 
-      {/* Compact rework input with short 2-word submit button */}
+      {/* Fixed bottom rework input with short 2-word submit button */}
       {orderedRevisions.length > 0 ? (
-        <View style={[styles.row, { alignItems: "center", gap: 6 }]}>
+        <View style={[styles.row, { alignItems: "center", gap: 6, flexShrink: 0 }]}>
           <TextInput
             style={[styles.input, { flex: 1, minHeight: 36 }]}
             value={reworkFeedbackDraft}

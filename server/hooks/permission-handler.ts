@@ -160,8 +160,10 @@ export async function handlePermissionRequest(
       finalizingPipeline,
       additionalWritableRoots:
         agentRecord.role === "master_lead"
-          ? [run.devCwd, ...(pipelineWorktree ? [pipelineWorktree] : [])]
-          : [],
+          ? [run.repoPath, run.devCwd, ...(pipelineWorktree ? [pipelineWorktree] : [])]
+          : activeStageKind === "mockup"
+            ? [run.repoPath, run.devCwd, ...(pipelineWorktree ? [pipelineWorktree] : [])]
+            : [],
     })
     : { behavior: "deny", message: "This agent belongs to an archived or inactive pipeline stage." };
   try {

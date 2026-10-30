@@ -1,6 +1,7 @@
 // Supervisor delegation: provisions the QA worktree and QA Lead, then one dedicated feature Lead per delegated
 // feature, and briefs each with the full roster so parallel work aligns before it merges into the QA branch.
 import type { DelegatedFeature, DelegationSubmission } from "../../shared/pipeline";
+import { runOrchestration } from "../../shared/orchestration";
 import { ROLE_LABELS } from "../../shared/roles";
 import type { Run } from "../../shared/state";
 import { delegationMessage, type SiblingLeadSummary } from "../prompts/messages";
@@ -56,6 +57,11 @@ async function provisionLeadWorktree(
   featureName: string,
   explicitWorktreePath?: string,
 ) {
+  const initialRun = ctx.store.require(runId);
+  // When worktree spawning is disabled for this run, keep Leads and Peers directly on baseBranch in repoPath.
+  if (!runOrchestration(initialRun).spawnWorktrees && !explicitWorktreePath?.trim()) {
+    return openPipelineWorktree(ctx, initialRun, initialRun.repoPath);
+  }
   let targetWorktreePath = explicitWorktreePath?.trim() ?? "";
   // The Supervisor may name an existing checkout; otherwise a fresh slp/* branch forks from the QA branch.
   if (!targetWorktreePath) {
@@ -200,6 +206,9 @@ export async function delegate(
         typeof rawInput !== "string" && (!rawInput.tasks || rawInput.tasks.length === 0) && unboundRunTicket
           ? unboundRunTicket.title
           : task.name;
+      if (leadRecord) {
+        leadRecord.featureName = effectiveTicketTitle;
+      }
       // Persist each delegated feature as a project-scoped Kanban ticket in the SPEC column.
       ctx.store.board.saveSpec({
         repoPath: mutableRun.repoPath,

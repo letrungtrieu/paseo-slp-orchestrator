@@ -2,6 +2,7 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { PaseoApi } from "../runtime/paseo-holder";
+import { runOrchestration } from "../../shared/orchestration";
 import type { PipelineContext } from "./context";
 import type { PipelineWorkspace, Run } from "../../shared/state";
 import { configureLocalOnlyPipelineBranch, currentBranchName, removeWorktreeAndDeleteBranch, runGit } from "../git/git";
@@ -57,8 +58,9 @@ async function validateCheckout(
   // Git worktrees share a common directory; this rejects a path from another repository even if its branch matches.
   if (checkoutCommon !== repositoryCommon) throw new ToolError("Pipeline worktree must belong to this run's repository.");
 
+  const allowBaseBranchCheckout = !runOrchestration(run).spawnWorktrees;
   const integrationRoot = await realpath(run.devCwd).catch(() => null);
-  if (cwd === repositoryRoot || cwd === integrationRoot) {
+  if (!allowBaseBranchCheckout && (cwd === repositoryRoot || cwd === integrationRoot)) {
     throw new ToolError("Give peers a separate worktree; use slp_create_worktree for the pipeline checkout.");
   }
 
@@ -66,8 +68,8 @@ async function validateCheckout(
   if (expectedBranch && branch !== expectedBranch) {
     throw new ToolError(`Worktree is on '${branch}', expected '${expectedBranch}'.`);
   }
-  // Sharing the integration or base branch would let peers modify a merge target directly.
-  if (branch === run.integrationBranch || branch === run.baseBranch) {
+  // Sharing the integration or base branch would let peers modify a merge target directly unless the run opted into baseBranch mode.
+  if (!allowBaseBranchCheckout && (branch === run.integrationBranch || branch === run.baseBranch)) {
     throw new ToolError("Pipeline worktree must use a branch separate from the integration and base branches.");
   }
   const baseCommit = (await runGit(cwd, ["rev-parse", "HEAD"])).trim();
@@ -258,6 +260,16 @@ export async function createPipelineWorktree(
   const allowDuringDelegation = Boolean(options?.allowDuringDelegation);
   const run = ctx.store.require(runId);
   assertWorktreeCreationAllowed(run, allowDuringDelegation);
+  // When worktree spawning is disabled, return the main repository checkout on baseBranch instead of creating a git worktree.
+  if (!runOrchestration(run).spawnWorktrees) {
+    const baseWorkspace: PipelineWorkspace = {
+      workspaceId: run.supervisorWorkspaceId,
+      cwd: run.repoPath,
+      branch: run.baseBranch,
+      owned: false,
+    };
+    return JSON.stringify(baseWorkspace);
+  }
   const branch = branchForName(runId, name);
   if (branch === run.integrationBranch || branch === run.baseBranch) {
     throw new ToolError(`Worktree name '${name}' resolves to a protected branch; choose a different name.`);
@@ -299,13 +311,25 @@ export async function openPipelineWorktree(ctx: PipelineContext, run: Run, workt
   catch { throw new ToolError(`Worktree '${absolutePath}' does not exist. Create it with slp_create_worktree first.`); }
 
   const checkout = await validateCheckout(run, cwd, null);
-  const sameRunConflict = Object.values(run.pipelines).find(
-    (pipeline) => !["integrated", "failed"].includes(pipeline.status)
-      && (pipeline.worktree === checkout.cwd || pipeline.branch === checkout.branch),
-  );
-  if (sameRunConflict) throw new ToolError(`Worktree or branch is already assigned to pipeline '${sameRunConflict.name}'.`);
-  const crossRunConflict = activePipelineUsingCheckout(ctx, run, checkout);
-  if (crossRunConflict) throw new ToolError(`Worktree or branch is already assigned to active pipeline '${crossRunConflict}'.`);
+  if (runOrchestration(run).spawnWorktrees) {
+    const sameRunConflict = Object.values(run.pipelines).find(
+      (pipeline) => !["integrated", "failed"].includes(pipeline.status)
+        && (pipeline.worktree === checkout.cwd || pipeline.branch === checkout.branch),
+    );
+    if (sameRunConflict) throw new ToolError(`Worktree or branch is already assigned to pipeline '${sameRunConflict.name}'.`);
+    const crossRunConflict = activePipelineUsingCheckout(ctx, run, checkout);
+    if (crossRunConflict) throw new ToolError(`Worktree or branch is already assigned to active pipeline '${crossRunConflict}'.`);
+  }
+
+  const repositoryRoot = await realpath(run.repoPath).catch(() => run.repoPath);
+  if (checkout.cwd === repositoryRoot && run.supervisorWorkspaceId) {
+    return {
+      cwd: checkout.cwd,
+      branch: checkout.branch,
+      baseCommit: checkout.baseCommit,
+      workspaceId: run.supervisorWorkspaceId,
+    };
+  }
 
   const paseo = await ctx.holder.get();
   const workspace = await paseo.workspaces.open(checkout.cwd);

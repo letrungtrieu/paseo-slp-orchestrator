@@ -80,6 +80,17 @@ export async function submitBoardMockup(
   const resolvedFeatureSlug = input.feature?.trim()
     ? deriveFeatureMockupSlug(input.feature, targetTicket.ticketKey)
     : targetTicket.featureSlug || deriveFeatureMockupSlug(targetTicket.title, targetTicket.ticketKey);
+  const activePipeline = resolvedPipelineId ? run.pipelines[resolvedPipelineId] : undefined;
+  // Provide candidate fallback slugs (pipeline name, Lead featureName, ticket key) in case the agent used a pipeline-named folder.
+  const fallbackFeatureSlugs = [
+    ...(activePipeline?.name
+      ? [deriveFeatureMockupSlug(activePipeline.name, targetTicket.ticketKey), activePipeline.name]
+      : []),
+    ...(callerRecord?.featureName
+      ? [deriveFeatureMockupSlug(callerRecord.featureName, targetTicket.ticketKey), callerRecord.featureName]
+      : []),
+    targetTicket.ticketKey.toLowerCase(),
+  ];
   const leadWorktreePath = resolveLeadWorktreePath(run, caller.agentId, resolvedPipelineId);
 
   // Validate `.slp/mockups/<feature>/index.html` and clone it into `.slp/mockups/<feature>/versions/v<N>/`.
@@ -89,6 +100,7 @@ export async function submitBoardMockup(
       repoPath: run.repoPath,
       leadWorktreePath,
       featureSlug: resolvedFeatureSlug,
+      fallbackFeatureSlugs,
       versionNumber: nextMockupVersion,
     });
   } catch (snapshotError) {
@@ -118,6 +130,24 @@ export async function submitBoardMockup(
     kind: "board.mockup_submitted",
     summary: `${updatedTicket.ticketKey} Mockup v${updatedTicket.currentMockupRev} (${snapshotResult.entryHtmlPath})`,
     outcome: "delivered",
+  });
+
+  // Clear any pending stage-approval obligation on the Lead while waiting for the human/Supervisor to review the submitted mockup,
+  // preventing the sweeper from nudging the Lead to call slp_approve_stage before the mockup is approved.
+  ctx.store.mutate(run.id, (mutableRun) => {
+    const mutableLeadRecord = mutableRun.agents[caller.agentId];
+    if (mutableLeadRecord) {
+      mutableLeadRecord.awaitingTool = null;
+      mutableLeadRecord.awaitingSince = null;
+      mutableLeadRecord.nudges = 0;
+    }
+    mutableRun.mailbox = mutableRun.mailbox.filter(
+      (queuedMessage) =>
+        !(
+          queuedMessage.toAgentId === caller.agentId &&
+          queuedMessage.awaitTool === "slp_approve_stage"
+        ),
+    );
   });
 
   // Notify the Supervisor so it can report the interactive mockup version back to the human for review.
@@ -281,9 +311,20 @@ export async function executeMockupReview(
               .filter(Boolean)
               .join("\n\n");
 
+      // Restore the Lead's stage-approval obligation once the mockup is approved during an active stage.
+      const targetPipeline = updatedTicket.activePipelineId
+        ? activeRun.pipelines[updatedTicket.activePipelineId]
+        : undefined;
+      const currentPipelineStage =
+        targetPipeline?.stages[targetPipeline.currentStageIndex];
+      const shouldAwaitStageApproval =
+        params.decision === "approve" &&
+        targetPipeline?.status === "running" &&
+        currentPipelineStage?.status === "running";
+
       ctx.mailbox.enqueue(activeRun.id, targetLeadId, leadReviewPrompt, {
         taskId: updatedTicket.activePipelineId,
-        awaitTool: null,
+        awaitTool: shouldAwaitStageApproval ? "slp_approve_stage" : null,
         from: params.reviewerLabel,
         supersedeKey: `mockup-review:${updatedTicket.id}:${targetLeadId}`,
         summary: `${updatedTicket.ticketKey} Mockup v${targetVersion} ${params.decision}`,

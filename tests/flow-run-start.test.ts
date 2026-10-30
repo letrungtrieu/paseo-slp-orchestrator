@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { useFlowFixture } from "./helpers/flow-fixture";
-import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, definePipeline, delegateToLead, startedRunWithPipeline } from "./helpers/flow-steps";
+import { DEFAULT_PIPELINE, TWO_PEER_PIPELINE, definePipeline, delegateToLead, eventually, startedRunWithPipeline } from "./helpers/flow-steps";
 
 const createFlow = useFlowFixture();
 
@@ -84,5 +84,39 @@ describe("dynamic pipeline startup", () => {
     expect(duplicate.isError).toBe(true);
     expect(duplicate.text).toContain("already exists");
     expect(flow.gateway.createdAgents.filter(({ spec }) => spec.pipelineId === firstId)).toHaveLength(peerCountBefore);
+  });
+
+  it("keeps Supervisor, Lead, QA Lead, and Stage Peers on baseBranch without spawning worktrees when spawnWorktrees is false", async () => {
+    const flow = await createFlow({
+      mode: "FULL_AUTO",
+      orchestration: { forkPeers: false, spawnWorktrees: false, maxReworkRounds: 3 },
+    });
+    const runId = await flow.startRun();
+    await delegateToLead(flow, runId);
+
+    const delegatedRun = flow.run(runId);
+    expect(flow.paseo.createdWorkspaces).toHaveLength(0);
+    expect(delegatedRun.integrationBranch).toBe(delegatedRun.baseBranch);
+    expect(delegatedRun.devCwd).toBe(flow.repoPath);
+    expect(delegatedRun.devWorkspaceId).toBe(delegatedRun.supervisorWorkspaceId);
+    expect(delegatedRun.agents[delegatedRun.masterLeadAgentId].worktreePath).toBe(flow.repoPath);
+    expect(delegatedRun.agents[delegatedRun.qaLeadAgentId].worktreePath).toBe(flow.repoPath);
+
+    // Defining a pipeline without worktrees runs Stage 1 peers directly on baseBranch in repoPath.
+    const definedResult = await flow.callAsRole(runId, "master_lead", null, "slp_define_pipeline", {
+      pipeline: DEFAULT_PIPELINE,
+    });
+    expect(definedResult.isError).toBe(false);
+    const { pipelineId } = JSON.parse(definedResult.text) as { pipelineId: string };
+    await eventually(() => {
+      const activePipeline = flow.pipeline(runId, pipelineId);
+      expect(activePipeline?.stages[0].status).toBe("running");
+    });
+
+    const activePipeline = flow.pipeline(runId, pipelineId)!;
+    expect(activePipeline.worktree).toBe(flow.repoPath);
+    expect(activePipeline.branch).toBe(delegatedRun.baseBranch);
+    expect(activePipeline.workspaceId).toBe(delegatedRun.supervisorWorkspaceId);
+    expect(flow.paseo.createdWorkspaces).toHaveLength(0);
   });
 });

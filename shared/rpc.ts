@@ -80,6 +80,8 @@ export const startRunRpc = defineRpc({
     supervisorPermissionModeId: z.string().optional(),
     leadPermissionModeId: z.string().optional(),
     peerPermissionModeId: z.string().optional(),
+    // Optional per-run override controlling whether SLP spawns git worktrees or runs directly on baseBranch.
+    spawnWorktrees: z.boolean().optional(),
   }),
   output: z.object({
     runId: z.string(),

@@ -1,7 +1,7 @@
 // Focused "SLP" tab form for starting a new SLP run with only project selection and session name.
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useState } from "react";
-import { Text, View } from "react-native";
+import { useEffect, useState } from "react";
+import { Pressable, Text, View } from "react-native";
 import type { ProviderRole } from "../../shared/settings";
 import {
   resolvePermissionModeId,
@@ -47,7 +47,15 @@ export function StartRunForm({
   const [runName, setRunName] = useState("");
   const providerCatalog = useProviderCatalog(effectiveRepoPath, selectedHostId);
   const settings = useSlpSettings(providerCatalog);
-  const { roles: roleSelections } = settings.configuration;
+  const { roles: roleSelections, orchestration } = settings.configuration;
+  const [spawnWorktrees, setSpawnWorktrees] = useState<boolean>(
+    orchestration.spawnWorktrees ?? true,
+  );
+  // Keep the local checkbox synced with persisted host settings when loaded.
+  useEffect(() => {
+    setSpawnWorktrees(orchestration.spawnWorktrees ?? true);
+  }, [orchestration.spawnWorktrees]);
+
   // Ensure role workflow prompts are initialized for the chosen repository before starting the run.
   const projectPrompts = useProjectPrompts(effectiveRepoPath);
 
@@ -99,10 +107,20 @@ export function StartRunForm({
         supervisorPermissionModeId: rolePermissionModeIds.supervisor ?? undefined,
         leadPermissionModeId: rolePermissionModeIds.lead ?? undefined,
         peerPermissionModeId: rolePermissionModeIds.peer ?? undefined,
+        spawnWorktrees,
       },
       // The Supervisor is the human's control point; pass its id so the client can open that chat after creation.
       { onSuccess: (startedRun) => onRunStarted(startedRun.runId, startedRun.supervisorAgentId) },
     );
+  };
+
+  const handleToggleSpawnWorktrees = () => {
+    const nextValue = !spawnWorktrees;
+    setSpawnWorktrees(nextValue);
+    settings.changeOrchestration({
+      ...orchestration,
+      spawnWorktrees: nextValue,
+    });
   };
 
   // Daemon-side failures (not a git repo, detached HEAD) arrive as thrown RPC errors and are shown inline under the button.
@@ -138,6 +156,34 @@ export function StartRunForm({
         value={runName}
         onChangeText={setRunName}
       />
+      {/* Checkbox allowing the user to disable worktree spawning so all SLP agents work directly on baseBranch. */}
+      <Pressable
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: spawnWorktrees }}
+        accessibilityLabel="Spawn worktree for tasks"
+        onPress={handleToggleSpawnWorktrees}
+        style={[styles.row, { alignItems: "center", gap: 8, paddingVertical: 4 }]}
+      >
+        <View
+          style={{
+            width: 18,
+            height: 18,
+            borderRadius: 4,
+            borderWidth: 1.5,
+            borderColor: spawnWorktrees ? theme.colors.accent : theme.colors.border,
+            backgroundColor: spawnWorktrees ? theme.colors.accent : theme.colors.surface1,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {spawnWorktrees ? (
+            <Text style={{ color: theme.colors.accentForeground, fontSize: 12, fontWeight: "800" }}>
+              ✓
+            </Text>
+          ) : null}
+        </View>
+        <Text style={styles.bodyText}>Spawn worktree</Text>
+      </Pressable>
       <ActionButton
         styles={styles}
         tone="primary"

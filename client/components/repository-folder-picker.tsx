@@ -5,7 +5,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import type { UiStyles } from "../styles";
-import { ActionButton } from "./action-button";
 import { SelectField, type SelectOption } from "./select-field";
 
 interface RepositoryFolderPickerProps {
@@ -122,40 +121,36 @@ export function RepositoryFolderPicker({
 
   return (
     <View style={styles.stack}>
-      <SelectField
-        styles={styles}
-        theme={theme}
-        label="Host"
-        value={effectiveHostId}
-        options={hostOptions}
-        placeholder="Select a Paseo host"
-        onValueChange={handleHostChange}
-      />
+      {/* Side-by-side row: Repository folder on the left (auto-refreshes when opened), Host on the right. */}
+      <View style={[styles.row, { alignItems: "flex-start", gap: 12 }]}>
+        <SelectField
+          styles={styles}
+          theme={theme}
+          label="Repository folder"
+          value={selectedRepositoryPath || null}
+          options={repositoryOptions}
+          placeholder={
+            isSelectedHostOffline
+              ? "Selected host is offline"
+              : projectQuery.isLoading
+                ? "Loading Paseo projects…"
+                : "Select an open Paseo project"
+          }
+          onValueChange={onSelectRepositoryPath}
+          disabled={isSelectedHostOffline || projectQuery.isLoading}
+          onOpenMenu={() => void projectQuery.refetch()}
+        />
 
-      <SelectField
-        styles={styles}
-        theme={theme}
-        label="Repository folder"
-        value={selectedRepositoryPath || null}
-        options={repositoryOptions}
-        placeholder={
-          isSelectedHostOffline
-            ? "Selected host is offline"
-            : projectQuery.isLoading
-              ? "Loading Paseo projects…"
-              : "Select an open Paseo project"
-        }
-        onValueChange={onSelectRepositoryPath}
-        disabled={isSelectedHostOffline || projectQuery.isLoading}
-      />
-
-      {/* Project additions happen outside this plugin, so refresh is deliberate instead of continuous polling. */}
-      <ActionButton
-        styles={styles}
-        label={projectQuery.isFetching ? "Refreshing projects…" : "Refresh project list"}
-        disabled={isSelectedHostOffline || projectQuery.isFetching}
-        onPress={() => void projectQuery.refetch()}
-      />
+        <SelectField
+          styles={styles}
+          theme={theme}
+          label="Host"
+          value={effectiveHostId}
+          options={hostOptions}
+          placeholder="Select a Paseo host"
+          onValueChange={handleHostChange}
+        />
+      </View>
 
       {isSelectedHostOffline ? (
         <Text style={styles.warningText}>

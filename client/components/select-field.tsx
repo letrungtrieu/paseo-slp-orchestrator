@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Modal } from "@getpaseo/plugin/client/react-native";
@@ -20,6 +20,8 @@ interface SelectFieldProps {
   searchPlaceholder?: string;
   dense?: boolean;
   showDetails?: boolean;
+  trailingAction?: ReactNode;
+  onOpenMenu?: () => void;
 }
 
 // A Paseo modal provides the same native menu behavior on desktop, web and compact layouts.
@@ -36,44 +38,55 @@ export function SelectField({
   searchPlaceholder = "Search options…",
   dense = false,
   showDetails = true,
+  trailingAction,
+  onOpenMenu,
 }: SelectFieldProps) {
   const [isMenuOpen, setMenuOpen] = useState(false);
   const [searchText, setSearchText] = useState("");
   // IDs stay stable when a provider changes the user-facing model label.
   const selectedOption = options.find((option) => option.value === value);
-  // An empty catalog cannot produce a useful menu, so it is also treated as disabled.
-  const isDisabled = disabled || options.length === 0;
+  // Allow opening the menu to trigger onOpenMenu refresh even when options are currently empty.
+  const isDisabled = disabled || (options.length === 0 && !onOpenMenu);
   // Provider IDs and full `provider/model` codes are searchable alongside display labels.
   const visibleOptions = searchable ? filterSelectOptions(options, searchText) : options;
   // Clear stale terms on close so reopening always starts with the full Paseo catalog.
   const changeMenuOpen = (nextMenuOpen: boolean) => {
+    if (nextMenuOpen) onOpenMenu?.();
     setMenuOpen(nextMenuOpen);
     if (!nextMenuOpen) setSearchText("");
   };
 
   return (
-    <View>
+    <View style={{ flex: 1, minWidth: 220 }}>
       <Text style={styles.fieldLabel}>{label}</Text>
-      {/* Expanded state helps assistive technology announce the controlled menu. */}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={label}
-        accessibilityState={{ disabled: isDisabled, expanded: isMenuOpen }}
-        disabled={isDisabled}
-        onPress={() => changeMenuOpen(true)}
-        // Dense agent controls retain touch targets while reducing the space spent on secondary settings.
-        style={[styles.selectButton, dense ? styles.denseSelectButton : null, isDisabled ? { opacity: 0.55 } : null]}
-      >
-        {/* Keep the chevron separate so the selected value can shrink on narrow plugin layouts. */}
-        <Text
-          numberOfLines={1}
-          style={[selectedOption ? styles.selectButtonText : styles.selectButtonPlaceholder,
-            dense ? styles.denseSelectText : null, { flexShrink: 1 }]}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+        {/* Expanded state helps assistive technology announce the controlled menu. */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={label}
+          accessibilityState={{ disabled: isDisabled, expanded: isMenuOpen }}
+          disabled={isDisabled}
+          onPress={() => changeMenuOpen(true)}
+          // Dense agent controls retain touch targets while reducing the space spent on secondary settings.
+          style={[
+            styles.selectButton,
+            { flex: 1 },
+            dense ? styles.denseSelectButton : null,
+            isDisabled ? { opacity: 0.55 } : null,
+          ]}
         >
-          {selectedOption?.label ?? placeholder}
-        </Text>
-        <Text style={styles.selectButtonText}>⌄</Text>
-      </Pressable>
+          {/* Keep the chevron separate so the selected value can shrink on narrow plugin layouts. */}
+          <Text
+            numberOfLines={1}
+            style={[selectedOption ? styles.selectButtonText : styles.selectButtonPlaceholder,
+              dense ? styles.denseSelectText : null, { flexShrink: 1 }]}
+          >
+            {selectedOption?.label ?? placeholder}
+          </Text>
+          <Text style={styles.selectButtonText}>⌄</Text>
+        </Pressable>
+        {trailingAction}
+      </View>
       {showDetails && selectedOption?.detail ? (
         /* Repository pickers need path context; agent settings can opt out of these extra lines. */
         <Text style={styles.mutedText}>{selectedOption.detail}</Text>

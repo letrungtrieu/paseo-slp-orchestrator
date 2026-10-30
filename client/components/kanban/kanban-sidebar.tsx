@@ -1,7 +1,7 @@
 // Resizable and collapsible Kanban sidebar separating project controls, Spec creation, and card inspection from the Kanban columns.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRef, useState } from "react";
-import { PanResponder, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { PanResponder, Pressable, Text, TextInput, View } from "react-native";
 import type { BoardTicket } from "../../../shared/board";
 import type { RunSummary } from "../../../shared/rpc";
 import type { UiStyles } from "../../styles";
@@ -214,15 +214,19 @@ export function KanbanSidebar({
         styles.card,
         {
           width: sidebarWidthPx,
+          height: "100%",
+          maxHeight: "100%",
+          minHeight: 0,
           flexShrink: 0,
           alignSelf: "stretch",
+          overflow: "hidden",
           gap: 10,
         },
       ]}
     >
       {/* Scope filter bar lets the operator isolate the active Supervisor's Spec or a single Spec family. */}
       {allProjectTickets.length > 0 ? (
-        <View style={{ gap: 6 }}>
+        <View style={{ gap: 6, flexShrink: 0 }}>
           <Text style={styles.fieldLabel}>Scope Filter</Text>
           <View style={styles.row}>
             <Pressable
@@ -302,7 +306,7 @@ export function KanbanSidebar({
 
       {/* Fallback repository path input when the panel is rendered outside a workspace context. */}
       {!projectRepoPath ? (
-        <View style={{ gap: 4 }}>
+        <View style={{ gap: 4, flexShrink: 0 }}>
           <Text style={styles.fieldLabel}>Project Repo</Text>
           <TextInput
             style={styles.input}
@@ -316,16 +320,27 @@ export function KanbanSidebar({
 
       {boardErrorMessage ? <Text style={styles.dangerText}>{boardErrorMessage}</Text> : null}
 
-      {/* Scrollable sidebar body stretches to full height so the Create New Spec Card form fills the sidebar vertically. */}
-      <ScrollView
-        style={{ flex: 1 }}
-        contentContainerStyle={{ flexGrow: 1, gap: 10 }}
-        showsVerticalScrollIndicator
-        keyboardShouldPersistTaps="handled"
-      >
+      {/* Bounded flex body so header buttons and bottom inputs stay fixed while only inner Spec/card content scrolls. */}
+      <View style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         {isCreatingSpec ? (
-          <View style={[styles.card, { flex: 1, backgroundColor: theme.colors.surface2, gap: 8 }]}>
-            <View style={[styles.row, { justifyContent: "space-between", alignItems: "center" }]}>
+          <View
+            style={[
+              styles.card,
+              {
+                flex: 1,
+                minHeight: 0,
+                overflow: "hidden",
+                backgroundColor: theme.colors.surface2,
+                gap: 8,
+              },
+            ]}
+          >
+            <View
+              style={[
+                styles.row,
+                { justifyContent: "space-between", alignItems: "center", flexShrink: 0 },
+              ]}
+            >
               <Text style={styles.sectionTitle}>Create New Spec Card</Text>
               <View style={styles.row}>
                 <ActionButton
@@ -344,23 +359,24 @@ export function KanbanSidebar({
                 />
               </View>
             </View>
-            {/* Allow toggling between raw Markdown text editing and formatted Markdown preview in Create New Spec Card. */}
+            {/* Only the Spec Markdown editor/preview area scrolls; top action buttons and bottom submit button stay fixed. */}
             <SpecMarkdownEditor
               styles={styles}
               theme={theme}
               markdownContent={newSpecContent}
               onChangeMarkdownContent={onChangeNewSpecContent}
               initialMode="edit"
-              minHeight={260}
             />
-            <ActionButton
-              styles={styles}
-              tone="primary"
-              label={isSavingNewSpec ? "Saving..." : "Create Spec & Notify Supervisor"}
-              accessibilityLabel="Create Spec card and notify Supervisor"
-              disabled={isSavingNewSpec || !newSpecContent.trim()}
-              onPress={onSubmitNewSpec}
-            />
+            <View style={{ flexShrink: 0 }}>
+              <ActionButton
+                styles={styles}
+                tone="primary"
+                label={isSavingNewSpec ? "Saving..." : "Create Spec & Notify Supervisor"}
+                accessibilityLabel="Create Spec card and notify Supervisor"
+                disabled={isSavingNewSpec || !newSpecContent.trim()}
+                onPress={onSubmitNewSpec}
+              />
+            </View>
           </View>
         ) : selectedTicket && selectedCard ? (
           <TicketDetailPanel
@@ -405,7 +421,7 @@ export function KanbanSidebar({
             ) : null}
           </View>
         )}
-      </ScrollView>
+      </View>
     </View>
   );
 }

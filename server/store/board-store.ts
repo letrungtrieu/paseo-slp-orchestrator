@@ -147,17 +147,23 @@ export class BoardStore {
     const database = this.resolveDatabase();
     return transaction(database, () => {
       const nowIso = new Date().toISOString();
-      // Reuse an existing ticket in the same repository when matched by explicit key, feature title, or an unbound draft in the same run.
+      // Reuse an existing ticket in the same repository when matched by explicit key, pipeline, title, assigned Lead, or unbound run draft.
+      const runTickets = input.activeRunId ? this.listByRun(input.activeRunId) : [];
       const existingTicket =
         (input.ticketIdOrKey ? this.find(input.ticketIdOrKey, input.repoPath) : null) ??
+        (input.activePipelineId ? this.findByPipeline(input.activePipelineId) : null) ??
         (input.title
           ? this.listByRepo(input.repoPath).find(
               (candidateTicket) => candidateTicket.title.toLowerCase() === input.title!.trim().toLowerCase(),
             ) ?? null
           : null) ??
-        (input.activeRunId
-          ? this.listByRun(input.activeRunId).find((candidateTicket) => !candidateTicket.leadAgentId) ?? null
-          : null);
+        (input.leadAgentId
+          ? runTickets.find((candidateTicket) => candidateTicket.leadAgentId === input.leadAgentId) ?? null
+          : null) ??
+        runTickets.find(
+          (candidateTicket) => !candidateTicket.leadAgentId || !candidateTicket.activePipelineId,
+        ) ??
+        null;
 
       const previousSpecRevision = existingTicket?.specRevisions.at(-1) ?? null;
       const nextSpecRevisionNumber = (existingTicket?.currentSpecRev ?? 0) + 1;
