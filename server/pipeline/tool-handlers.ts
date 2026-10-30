@@ -27,6 +27,7 @@ import {
   updateBoardBrief,
   updateBoardBriefItem,
 } from "./board-tools";
+import { reviewBoardMockup, submitBoardMockup } from "./mockup-tools";
 import {
   findStandaloneSpecAgentByToken,
   STANDALONE_SPEC_AGENT_TOOLS,
@@ -75,6 +76,8 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_board_update_brief: (ctx, caller, input) => updateBoardBrief(ctx, caller, input),
   slp_board_update_item: (ctx, caller, input) => updateBoardBriefItem(ctx, caller, input),
   slp_board_score_item: (ctx, caller, input) => scoreBoardBriefItems(ctx, caller, input),
+  slp_submit_mockup: (ctx, caller, input) => submitBoardMockup(ctx, caller, input),
+  slp_review_mockup: (ctx, caller, input) => reviewBoardMockup(ctx, caller, input),
 };
 
 export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {

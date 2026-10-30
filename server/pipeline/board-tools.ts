@@ -54,7 +54,7 @@ export function enrichTicketWithLiveAgents(run: Run | undefined, ticket: BoardTi
 }
 
 // Resolves the Kanban ticket targeted by an agent tool call, inferring it from the caller's pipeline or repository when ticketId is omitted.
-function resolveTargetTicketForCaller(
+export function resolveTargetTicketForCaller(
   ctx: PipelineContext,
   run: Run | undefined,
   caller: BusCaller,
@@ -114,14 +114,23 @@ export function listBoardTickets(ctx: PipelineContext, caller: BusCaller): strin
         id: ticket.id,
         ticketKey: ticket.ticketKey,
         title: ticket.title,
+        featureSlug: ticket.featureSlug,
         column: ticket.column,
         currentSpecRev: ticket.currentSpecRev,
+        currentMockupRev: ticket.currentMockupRev,
+        approvedMockupRev: ticket.approvedMockupRev,
         currentBriefRev: ticket.currentBriefRev,
         lastSyncedSpecRev: ticket.lastSyncedSpecRev,
         // True when the human or Supervisor edited the Spec after the current Brief revision was authored.
         hasUnappliedSpecDiff: ticket.currentSpecRev > ticket.lastSyncedSpecRev,
         activePipelineId: ticket.activePipelineId,
         leadAgentId: ticket.leadAgentId,
+        mockupVersions: ticket.mockupRevisions.map((mockupRev) => ({
+          version: mockupRev.version,
+          title: mockupRev.title,
+          status: mockupRev.status,
+          entryHtmlPath: mockupRev.entryHtmlPath,
+        })),
         itemSummary: {
           totalInScope: inScopeItems.length,
           passed: inScopeItems.filter((bullet) => bullet.status === "pass").length,
@@ -167,15 +176,19 @@ export function getBoardTicket(
     id: resolvedTicket.id,
     ticketKey: resolvedTicket.ticketKey,
     title: resolvedTicket.title,
+    featureSlug: resolvedTicket.featureSlug,
     column: resolvedTicket.column,
     acceptanceCriteria: resolvedTicket.acceptanceCriteria,
     currentSpecRev: resolvedTicket.currentSpecRev,
+    currentMockupRev: resolvedTicket.currentMockupRev,
+    approvedMockupRev: resolvedTicket.approvedMockupRev,
     currentBriefRev: resolvedTicket.currentBriefRev,
     lastSyncedSpecRev: resolvedTicket.lastSyncedSpecRev,
     hasUnappliedSpecDiff: resolvedTicket.currentSpecRev > resolvedTicket.lastSyncedSpecRev,
     currentSpec: latestSpecRevision?.content ?? "",
     latestSpecDiff: latestSpecRevision?.diff ?? "",
     unappliedSpecDiff,
+    mockupRevisions: resolvedTicket.mockupRevisions,
     approach: resolvedTicket.approach,
     items: resolvedTicket.items,
     latestBriefReason: latestBriefRevision?.reason ?? "",

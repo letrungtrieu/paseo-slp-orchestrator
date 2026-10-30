@@ -80,10 +80,13 @@ function reworkBudgetLine(run: Run, stage: StageState): string {
   return `Rework rounds used: ${stage.reworkRounds}/${maxReworkRounds}. At the cap you either approve or call slp_escalate, and the human decides through the Supervisor.`;
 }
 
-// Planning ends in the brief, so its coordinator is reminded that approval carries that contract.
+// Planning and Mockup stages end in the locked brief, so the coordinator is reminded that approval carries that contract.
 function coordinatorDecisionGuidance(stage: StageState): string {
   if (stage.kind === "planning") {
     return "Discuss the approach with the advisors, choose the simplest option that meets the acceptance criteria, then call `slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })`. The brief is locked after approval.";
+  }
+  if (stage.kind === "mockup") {
+    return "Coordinate your engineer peers to analyze sub-parts of the Spec and assemble a working HTML/CSS/JS mockup at `.slp/mockups/<feature>/index.html`. Then call `slp_submit_mockup({ summary })` so the engine snapshots `.slp/mockups/<feature>/versions/v<N>/index.html` and notifies the Supervisor for human review. Once the human approves the mockup, call `slp_approve_stage({ summary, brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope } })` to lock the Brief and open `implement`.";
   }
   if (stage.kind === "verify") {
     return "Decide from the QA scorecards: approve with `slp_approve_stage`, or send a fix to the developer with `slp_stage_rework` (the graders re-score automatically after the fix). Observations outside the criteria are your judgement call.";

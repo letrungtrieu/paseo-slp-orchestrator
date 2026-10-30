@@ -12,8 +12,10 @@ import {
   listBoardTicketsRpc,
   listPeerQuestionsRpc,
   listRunsRpc,
+  readBoardMockupPreviewRpc,
   restoreRunRpc,
   resumeTaskRpc,
+  reviewBoardMockupFromUiRpc,
   saveBoardSpecFromUiRpc,
   setRunModeRpc,
   spawnBoardSpecAgentRpc,
@@ -26,6 +28,8 @@ import {
 import type { Run } from "../shared/state";
 import { enrichTicketWithLiveAgents } from "./pipeline/board-tools";
 import type { PipelineContext } from "./pipeline/context";
+import { bundleMockupHtmlPreview } from "./pipeline/mockup-files";
+import { executeMockupReview } from "./pipeline/mockup-tools";
 import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
 import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } from "./pipeline/run-lifecycle";
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
@@ -297,5 +301,67 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
       thinkingOptionId: supervisorDefaults.thinkingOptionId,
       permissionModeId: supervisorDefaults.permissionModeId,
     });
+  });
+
+  // Bundles a specific HTML/CSS/JS mockup version (with element-comment inspector bridge) for the Kanban Mockup Preview Studio.
+  server.handle(readBoardMockupPreviewRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const targetTicket = ctx.store.board.requireTicket(input.ticketId, input.repoPath);
+    const targetVersion = input.version ?? targetTicket.currentMockupRev;
+    const matchedRevision = targetTicket.mockupRevisions.find(
+      (candidateRev) => candidateRev.version === targetVersion,
+    );
+    if (!matchedRevision) {
+      throw new Error(
+        `Ticket '${targetTicket.ticketKey}' does not have mockup version v${targetVersion}.`,
+      );
+    }
+    const { absoluteHtmlPath, bundledHtml } = await bundleMockupHtmlPreview(
+      input.repoPath,
+      matchedRevision.entryHtmlPath,
+    );
+    return {
+      ticketId: targetTicket.id,
+      version: matchedRevision.version,
+      title: matchedRevision.title,
+      featureSlug: matchedRevision.featureSlug,
+      entryHtmlPath: matchedRevision.entryHtmlPath,
+      absoluteHtmlPath,
+      bundledHtml,
+    };
+  });
+
+  // Handles human approval or rework requests (including HTML element comments) submitted from the Kanban Mockup Studio.
+  server.handle(reviewBoardMockupFromUiRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const activeRun =
+      (input.runId ? ctx.store.find(input.runId) : undefined) ??
+      [...ctx.store.list()]
+        .filter((candidateRun) => candidateRun.repoPath === input.repoPath && candidateRun.status !== "aborted")
+        .sort((firstRun, secondRun) => secondRun.updatedAt.localeCompare(firstRun.updatedAt))[0];
+
+    const reviewOutcome = await executeMockupReview(ctx, {
+      repoPath: input.repoPath,
+      run: activeRun,
+      reviewerLabel: "human",
+      ticketIdOrKey: input.ticketId,
+      decision: input.decision,
+      version: input.version,
+      feedback: input.feedback,
+      elementComments: input.elementComments,
+      baseVersion: input.baseVersion,
+    });
+
+    if (activeRun && reviewOutcome.notifiedAgentId && ctx.holder.isReady()) {
+      await ctx.gateway
+        .liveStatuses(activeRun.id)
+        .then((liveStatuses) => ctx.mailbox.flush(activeRun.id, liveStatuses))
+        .catch(() => undefined);
+    }
+
+    return {
+      ticket: enrichTicketWithLiveAgents(activeRun, reviewOutcome.ticket),
+      notifiedAgentId: reviewOutcome.notifiedAgentId,
+    };
   });
 }

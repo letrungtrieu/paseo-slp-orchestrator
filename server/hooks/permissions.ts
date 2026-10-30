@@ -2,6 +2,7 @@
 // The agent's current pipeline/stage identity is the authorization boundary for writes.
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type { StageKind } from "../../shared/pipeline";
 import type { PeerKind } from "../../shared/project-prompts";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import { PROTECTED_TASK_FILES, matchesAnyScope } from "../git/scope";
@@ -17,6 +18,8 @@ export interface PermissionContext {
   archived: boolean;
   // Null for non-peers and for callers predating peer kinds; only "advisor" and "qa" restrict a live peer.
   peerKind?: PeerKind | null;
+  // Current stage kind so engineer peers in a "mockup" stage can write HTML/CSS/JS files inside `.slp/mockups/**`.
+  stageKind?: StageKind | null;
   // True when a Forked Lead is merging its completed pipeline branch and resolving conflicts.
   finalizingPipeline?: boolean;
   // Additional worktree paths (such as the pipeline worktree) writable by a finalizing Forked Lead.
@@ -91,6 +94,10 @@ function roleMayWritePath(context: PermissionContext, relativePath: string): boo
       return false;
     case "peer": {
       if (!context.pipelineId || !context.stageId) return false;
+      // In a mockup stage, engineer peers (advisors and developers) may write only inside `.slp/mockups/**`.
+      if (context.stageKind === "mockup") {
+        return relativePath === ".slp/mockups" || relativePath.startsWith(".slp/mockups/");
+      }
       if (isReadOnlyPeer(context)) return false;
       // An empty scope is the explicit whole-worktree default for a live pipeline peer.
       return context.writableScope.length === 0 || matchesAnyScope(relativePath, context.writableScope);
@@ -128,7 +135,7 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
     return { behavior: "deny", message: "Pushing is not part of the pipeline." };
   }
   const peerMayMutate = context.role === "peer"
-    && !isReadOnlyPeer(context)
+    && (!isReadOnlyPeer(context) || context.stageKind === "mockup")
     && context.stageActive
     && Boolean(context.pipelineId && context.stageId);
   const mayMutate = !context.archived && context.stageActive

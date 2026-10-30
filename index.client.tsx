@@ -55,10 +55,10 @@ export default function contribute(client: PluginClientContext) {
       context: "workspace",
       Component: MonitorPanel,
     }),
-    // Per-project Spec & Brief Kanban workspace panel opened from the top-right workspace header icon button.
+    // Per-project Workflow Kanban workspace panel opened from the top-right workspace header icon button.
     client.addWorkspacePanel({
       id: KANBAN_PANEL_ID,
-      title: "Spec & Brief Kanban",
+      title: "Workflow",
       icon: "PanelsTopLeft",
       context: "workspace",
       Component: KanbanWorkspacePanel,

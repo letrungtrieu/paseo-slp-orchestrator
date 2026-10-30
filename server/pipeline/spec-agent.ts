@@ -17,6 +17,7 @@ export const STANDALONE_SPEC_AGENT_TOOLS: readonly BusToolName[] = [
   "slp_board_list_tickets",
   "slp_board_get_ticket",
   "slp_board_save_spec",
+  "slp_review_mockup",
 ];
 
 export interface StandaloneSpecAgentSession {

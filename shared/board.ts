@@ -1,11 +1,78 @@
-// Project-scoped Kanban board contracts for tracking Spec -> Brief -> Score -> Rework across runs.
+// Project-scoped Kanban board contracts for tracking Spec -> Mockup -> Brief -> Score -> Rework across runs.
 import { z } from "zod";
 import type { PipelineBrief } from "./pipeline";
 
-// The five Kanban columns mirror the lifecycle of a feature from requirement to verified delivery.
-export const BOARD_COLUMNS = ["spec", "brief", "score", "rework", "done"] as const;
+// The six Kanban columns mirror the lifecycle of a feature from Spec and HTML Mockup review to verified delivery.
+export const BOARD_COLUMNS = ["spec", "mockup", "brief", "score", "rework", "done"] as const;
 export const BoardColumnSchema = z.enum(BOARD_COLUMNS);
 export type BoardColumn = z.infer<typeof BoardColumnSchema>;
+
+// Tracks review state for each immutable HTML/CSS/JS mockup version stored under .slp/mockups/<feature>/versions/v<N>.
+export const MOCKUP_REVISION_STATUSES = [
+  "pending_review",
+  "approved",
+  "rework_requested",
+  "superseded",
+] as const;
+export const MockupRevisionStatusSchema = z.enum(MOCKUP_REVISION_STATUSES);
+export type MockupRevisionStatus = z.infer<typeof MockupRevisionStatusSchema>;
+
+// Review comment anchored to a specific HTML element/tag inside a feature mockup (`index.html`).
+export const MockupElementCommentSchema = z.object({
+  id: z.string().trim().min(1),
+  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
+  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, input, or section"),
+  elementText: z.string().trim().default("").describe("Short visible text or attribute snippet of the HTML element"),
+  comment: z.string().trim().min(1).describe("Human review instructions for modifying this HTML element"),
+  createdAt: z.string(),
+});
+export type MockupElementComment = z.infer<typeof MockupElementCommentSchema>;
+
+export const MockupElementCommentInputSchema = z.object({
+  id: z.string().trim().min(1).optional(),
+  selector: z.string().trim().min(1),
+  tagName: z.string().trim().default("div"),
+  elementText: z.string().trim().default(""),
+  comment: z.string().trim().min(1),
+});
+export type MockupElementCommentInput = z.infer<typeof MockupElementCommentInputSchema>;
+
+// Immutable snapshot metadata for one HTML/CSS/JS mockup version (v1, v2, v3...) of a feature ticket.
+export const MockupRevisionSchema = z.object({
+  version: z.number().int().min(1),
+  specRev: z.number().int().min(1).default(1),
+  title: z.string().trim().min(1),
+  summary: z.string().trim().default(""),
+  featureSlug: z.string().trim().min(1),
+  workingDirPath: z.string().trim().min(1),
+  versionDirPath: z.string().trim().min(1),
+  entryHtmlPath: z.string().trim().min(1),
+  status: MockupRevisionStatusSchema.default("pending_review"),
+  feedback: z.string().nullable().default(null),
+  elementComments: z.array(MockupElementCommentSchema).default([]),
+  authorAgentId: z.string(),
+  createdAt: z.string(),
+  reviewedAt: z.string().nullable().default(null),
+});
+export type MockupRevision = z.infer<typeof MockupRevisionSchema>;
+
+// Normalize a feature or ticket title into a filesystem-safe slug for `.slp/mockups/<feature>`.
+export function deriveFeatureMockupSlug(rawFeatureName: string, fallbackKey = "feature"): string {
+  const asciiNormalized = rawFeatureName
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[đĐ]/g, "d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (asciiNormalized.length > 0) {
+    return asciiNormalized.slice(0, 64).replace(/-+$/g, "");
+  }
+  return fallbackKey
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "feature";
+}
 
 // Tracks each bullet item's execution and grading state so rework only targets failing bullets.
 export const BRIEF_ITEM_STATUSES = [
@@ -103,13 +170,17 @@ export const BoardTicketSchema = z.object({
   ticketKey: z.string().min(1),
   repoPath: z.string().min(1),
   title: z.string().trim().min(1),
+  featureSlug: z.string().default(""),
   acceptanceCriteria: z.string().default(""),
   column: BoardColumnSchema.default("spec"),
   currentSpecRev: z.number().int().min(0).default(0),
+  currentMockupRev: z.number().int().min(0).default(0),
+  approvedMockupRev: z.number().int().min(0).nullable().default(null),
   currentBriefRev: z.number().int().min(0).default(0),
   // When currentSpecRev > lastSyncedSpecRev, the UI and Lead know the Spec changed since the Brief was written.
   lastSyncedSpecRev: z.number().int().min(0).default(0),
   specRevisions: z.array(SpecRevisionSchema).default([]),
+  mockupRevisions: z.array(MockupRevisionSchema).default([]),
   briefRevisions: z.array(BriefRevisionSchema).default([]),
   approach: z.string().default(""),
   items: z.array(BriefItemSchema).default([]),

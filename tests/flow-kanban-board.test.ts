@@ -2,11 +2,18 @@
 // 1. Human Spec edits on the Kanban UI compute Git-style unified diffs and notify the Supervisor, who notifies the Lead.
 // 2. Lead can pause child stage peers (slp_pause_peers), blocking their file writes while updating the Brief (slp_board_update_brief), and resume them (slp_resume_peers).
 // 3. Mutable Brief revisions preserve pass scores on unchanged bullets while resetting modified bullets and computing unified Brief diffs.
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { describe, expect, it } from "vitest";
 import { handlePermissionRequest } from "../server/hooks/permission-handler";
 import { registerRpcHandlers } from "../server/rpc-handlers";
-import { listBoardTicketsRpc, saveBoardSpecFromUiRpc } from "../shared/rpc";
+import {
+  listBoardTicketsRpc,
+  readBoardMockupPreviewRpc,
+  reviewBoardMockupFromUiRpc,
+  saveBoardSpecFromUiRpc,
+} from "../shared/rpc";
 import type { BoardTicket } from "../shared/board";
 import { useFlowFixture } from "./helpers/flow-fixture";
 import {
@@ -252,5 +259,115 @@ describe("Kanban Spec & Brief board workflow", () => {
     expect(projectTickets[0].ticketKey).toBe("SLP-1");
     expect(projectTickets[0].title).toBe("Fix Swim Colliders & Remove Debug Buttons");
     expect(projectTickets[0].leadAgentId).toBe(flow.run(runId).masterLeadAgentId);
+  });
+
+  it("clones multi-version HTML/CSS/JS mockups under .slp/mockups/<feature>/versions/v<N>/ and supports element-tag review comments", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const { invokeRpc } = createBoardRpcHarness(flow.ctx);
+    const runId = await flow.startRun();
+    const supervisorAgentId = flow.run(runId).supervisorAgentId;
+
+    await flow.callAs(supervisorAgentId, "slp_board_save_spec", {
+      title: "Quản lý đơn hàng",
+      acceptanceCriteria: "Order management screen with checkout button and interactive cart.",
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Spec v1 for order management",
+    });
+    await delegateToLead(flow, runId);
+    const leadAgentId = flow.run(runId).masterLeadAgentId;
+    const leadWorktree = flow.run(runId).agents[leadAgentId].worktreePath ?? flow.repoPath;
+
+    // Lead and mockup peers write Mockup v1 into .slp/mockups/quan-ly-don-hang/index.html + styles.css + app.js.
+    const workingMockupDir = join(leadWorktree, ".slp", "mockups", "quan-ly-don-hang");
+    await mkdir(workingMockupDir, { recursive: true });
+    await writeFile(join(workingMockupDir, "styles.css"), ".btn-pay { background: #2563eb; }", "utf8");
+    await writeFile(join(workingMockupDir, "app.js"), "window.__cartVersion = 1;", "utf8");
+    await writeFile(
+      join(workingMockupDir, "index.html"),
+      '<!doctype html><html><head><link rel="stylesheet" href="./styles.css"></head><body><button id="btn-pay" class="btn-pay">Thanh toán v1</button><script src="./app.js"></script></body></html>',
+      "utf8",
+    );
+
+    const submitV1Call = await flow.callAs(leadAgentId, "slp_submit_mockup", {
+      ticketId: "SLP-1",
+      summary: "Mockup v1 with blue checkout button",
+    });
+    expect(submitV1Call.isError).toBe(false);
+
+    // Verify v1 was cloned into .slp/mockups/quan-ly-don-hang/versions/v1/index.html and ticket moved to MOCKUP.
+    const archivedV1Html = await readFile(
+      join(flow.repoPath, ".slp", "mockups", "quan-ly-don-hang", "versions", "v1", "index.html"),
+      "utf8",
+    );
+    expect(archivedV1Html).toContain("Thanh toán v1");
+
+    // Human requests rework from the Kanban Mockup Preview Studio with a comment attached to `button#btn-pay`.
+    const reworkOutcome = await invokeRpc<{ ticket: BoardTicket; notifiedAgentId: string | null }>(
+      reviewBoardMockupFromUiRpc,
+      {
+        repoPath: flow.repoPath,
+        runId,
+        ticketId: "SLP-1",
+        decision: "rework",
+        version: 1,
+        feedback: "Cập nhật giao diện nút thanh toán",
+        elementComments: [
+          {
+            selector: "button#btn-pay",
+            tagName: "button",
+            elementText: "Thanh toán v1",
+            comment: "Đổi nút sang màu xanh lá (#16a34a) và đổi chữ thành Thanh toán ngay v2",
+          },
+        ],
+      },
+    );
+    expect(reworkOutcome.notifiedAgentId).toBe(leadAgentId);
+    expect(reworkOutcome.ticket.mockupRevisions[0].status).toBe("rework_requested");
+    expect(reworkOutcome.ticket.mockupRevisions[0].elementComments).toHaveLength(1);
+
+    // Lead updates the working directory .slp/mockups/quan-ly-don-hang/index.html and submits v2.
+    await writeFile(join(workingMockupDir, "styles.css"), ".btn-pay { background: #16a34a; }", "utf8");
+    await writeFile(join(workingMockupDir, "app.js"), "window.__cartVersion = 2;", "utf8");
+    await writeFile(
+      join(workingMockupDir, "index.html"),
+      '<!doctype html><html><head><link rel="stylesheet" href="./styles.css"></head><body><button id="btn-pay" class="btn-pay">Thanh toán ngay v2</button><script src="./app.js"></script></body></html>',
+      "utf8",
+    );
+
+    const submitV2Call = await flow.callAs(leadAgentId, "slp_submit_mockup", {
+      ticketId: "SLP-1",
+      summary: "Mockup v2 with green button per element comment on button#btn-pay",
+    });
+    expect(submitV2Call.isError).toBe(false);
+
+    // Verify both v1 and v2 are preserved independently and readBoardMockupPreviewRpc bundles CSS + JS + inspector bridge for each.
+    const previewV1 = await invokeRpc<{ bundledHtml: string }>(readBoardMockupPreviewRpc, {
+      repoPath: flow.repoPath,
+      ticketId: "SLP-1",
+      version: 1,
+    });
+    const previewV2 = await invokeRpc<{ bundledHtml: string }>(readBoardMockupPreviewRpc, {
+      repoPath: flow.repoPath,
+      ticketId: "SLP-1",
+      version: 2,
+    });
+    expect(previewV1.bundledHtml).toContain("Thanh toán v1");
+    expect(previewV1.bundledHtml).toContain("background: #2563eb");
+    expect(previewV1.bundledHtml).toContain("window.__cartVersion = 1;");
+    expect(previewV2.bundledHtml).toContain("Thanh toán ngay v2");
+    expect(previewV2.bundledHtml).toContain("background: #16a34a");
+    expect(previewV2.bundledHtml).toContain("window.__cartVersion = 2;");
+    expect(previewV2.bundledHtml).toContain("data-slp-mockup-inspector=\"true\"");
+
+    // Approve v2 and verify approvedMockupRev is 2.
+    const approveOutcome = await invokeRpc<{ ticket: BoardTicket }>(reviewBoardMockupFromUiRpc, {
+      repoPath: flow.repoPath,
+      runId,
+      ticketId: "SLP-1",
+      decision: "approve",
+      version: 2,
+    });
+    expect(approveOutcome.ticket.approvedMockupRev).toBe(2);
+    expect(approveOutcome.ticket.mockupRevisions[1].status).toBe("approved");
   });
 });

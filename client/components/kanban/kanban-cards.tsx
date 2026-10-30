@@ -82,7 +82,7 @@ export function SpecKanbanCard({
         },
       ]}
     >
-      {/* Lineage tag row identifying this card as a root Spec document with its revision number. */}
+      {/* Lineage tag row identifying this card as a root Spec document with concise 1-2 word status tags. */}
       <View style={[styles.row, { justifyContent: "space-between" }]}>
         <LineageTagPill
           label={`SPEC · ${ticket.ticketKey}`}
@@ -90,27 +90,23 @@ export function SpecKanbanCard({
           backgroundColor={specColor.badgeBackground}
           textColor={specColor.badgeTextColor}
         />
-        <Text style={styles.mutedText}>v{ticket.currentSpecRev}</Text>
+        <View style={[styles.row, { gap: 6 }]}>
+          {ticket.currentMockupRev > 0 ? (
+            <Text style={styles.mutedText}>Mockup v{ticket.currentMockupRev}</Text>
+          ) : null}
+          {ticket.currentBriefRev > 0 ? (
+            <Text style={styles.mutedText}>
+              Brief {passedOptionCount}/{gradableOptions.length}
+            </Text>
+          ) : null}
+          {isBriefOutdated ? <Text style={styles.warningText}>Outdated</Text> : null}
+          <Text style={styles.mutedText}>v{ticket.currentSpecRev}</Text>
+        </View>
       </View>
 
       <Text style={[styles.bodyText, { fontWeight: "700" }]} numberOfLines={3}>
         {ticket.title}
       </Text>
-
-      {/* Summarize whether the Lead has decomposed this Spec into a Brief and how many Options passed. */}
-      {ticket.currentBriefRev > 0 ? (
-        <Text style={styles.mutedText}>
-          Brief {specColor.briefTagCode} (v{ticket.currentBriefRev}) · {passedOptionCount}/{gradableOptions.length} options pass
-        </Text>
-      ) : (
-        <Text style={styles.mutedText}>Waiting for Lead to decompose into Brief</Text>
-      )}
-
-      {isBriefOutdated ? (
-        <Text style={styles.warningText}>
-          Spec v{ticket.currentSpecRev} waiting for Lead Brief sync
-        </Text>
-      ) : null}
     </Pressable>
   );
 }

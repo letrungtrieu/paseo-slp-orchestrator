@@ -27,6 +27,9 @@ export function briefSection(run: Run, pipeline: PipelineState): string | null {
 
 // Each kind gets one short instruction set; peers never coordinate with each other, only with their Lead.
 export function peerKindGuidance(peerKind: PeerKind, stage: StageState): string {
+  if (stage.kind === "mockup") {
+    return "You are an engineer peer in the **mockup** stage. Analyze your assigned portion of the Product Spec and help assemble a self-contained, interactive HTML/CSS/JS mockup under `.slp/mockups/<feature>/` with a required `index.html` entry point (and optional relative `.css` / `.js` files). Do not modify production source files outside `.slp/mockups/`. Report your mockup analysis or written HTML/CSS/JS sections to the Lead via `slp_stage_report`.";
+  }
   if (peerKind === "advisor") {
     return "You are an **advisor** in the planning stage. You do not write code. Investigate the techniques or design options that fit this problem, discuss them with the Lead (slp_ask/slp_answer with the Lead only), and report a concise recommendation with slp_stage_report: chosen option, why, main risks, and what to leave out. Prefer the simplest option that meets the acceptance criteria.";
   }

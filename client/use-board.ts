@@ -3,6 +3,8 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   listBoardTicketsRpc,
+  readBoardMockupPreviewRpc,
+  reviewBoardMockupFromUiRpc,
   saveBoardSpecFromUiRpc,
   spawnBoardSpecAgentRpc,
 } from "../shared/rpc";
@@ -29,7 +31,9 @@ export function useBoardActions() {
   const queryClient = useQueryClient();
   const saveBoardSpecFromUi = useRpc(saveBoardSpecFromUiRpc);
   const spawnBoardSpecAgent = useRpc(spawnBoardSpecAgentRpc);
-  // Invalidate all ["slp"] queries so the Kanban card, diff viewer and Supervisor mailbox reflect the new Spec revision immediately.
+  const readBoardMockupPreview = useRpc(readBoardMockupPreviewRpc);
+  const reviewBoardMockupFromUi = useRpc(reviewBoardMockupFromUiRpc);
+  // Invalidate all ["slp"] queries so the Kanban card, diff viewer and Supervisor mailbox reflect the new Spec/Mockup revision immediately.
   const refreshBoardAndRuns = () => queryClient.invalidateQueries({ queryKey: ["slp"] });
 
   return {
@@ -39,6 +43,13 @@ export function useBoardActions() {
     }),
     spawnSpecAgent: useMutation({
       mutationFn: spawnBoardSpecAgent,
+      onSuccess: refreshBoardAndRuns,
+    }),
+    readMockupPreview: useMutation({
+      mutationFn: readBoardMockupPreview,
+    }),
+    reviewBoardMockup: useMutation({
+      mutationFn: reviewBoardMockupFromUi,
       onSuccess: refreshBoardAndRuns,
     }),
   };

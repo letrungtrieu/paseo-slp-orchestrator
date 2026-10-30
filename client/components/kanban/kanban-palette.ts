@@ -8,9 +8,10 @@ export interface SpecColorIdentity {
   briefTagCode: string;
 }
 
-// Selection state discriminating whether the user clicked a Spec card, a Brief overview card, or a single Option card.
+// Selection state discriminating whether the user clicked a Spec card, a Mockup card, a Brief overview card, or a single Option card.
 export type KanbanCardSelection =
   | { kind: "spec"; ticketId: string }
+  | { kind: "mockup"; ticketId: string; version?: number }
   | { kind: "brief"; ticketId: string }
   | { kind: "option"; ticketId: string; optionId: string };
 
@@ -84,7 +85,7 @@ export function partitionTicketBriefItems(ticket: BoardTicket): {
 export function resolveOptionCardColumn(
   parentTicket: BoardTicket,
   optionBullet: BriefItem,
-): Exclude<BoardColumn, "spec"> {
+): Exclude<BoardColumn, "spec" | "mockup"> {
   // Failing or rework-flagged options always appear in 4. REWORK so the operator sees what needs fixing.
   if (
     optionBullet.status === "fail" ||

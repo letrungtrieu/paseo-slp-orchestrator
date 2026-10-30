@@ -13,6 +13,7 @@ import {
   partitionTicketBriefItems,
   resolveSpecColorIdentity,
 } from "./kanban-palette";
+import { MockupCardInspector } from "./mockup-card-inspector";
 import { InspectorTagBadge, OptionCardInspector } from "./option-card-inspector";
 import { SpecMarkdownEditor } from "./spec-markdown-editor";
 
@@ -24,6 +25,7 @@ interface TicketDetailPanelProps {
   selectedRunId: string | null;
   isSpawningSpecAgent?: boolean;
   onSpawnSpecAgent?: (targetTicketKey?: string) => void;
+  onOpenPreviewVersion?: (ticket: BoardTicket, versionNumber: number) => void;
   onClose: () => void;
 }
 
@@ -343,7 +345,7 @@ function BriefCardInspector({
   );
 }
 
-// Dispatches to the focused inspector matching whichever card (Spec, Brief, or Option) the user clicked.
+// Dispatches to the focused inspector matching whichever card (Spec, Mockup, Brief, or Option) the user clicked.
 export function TicketDetailPanel({
   styles,
   theme,
@@ -352,6 +354,7 @@ export function TicketDetailPanel({
   selectedRunId,
   isSpawningSpecAgent,
   onSpawnSpecAgent,
+  onOpenPreviewVersion,
   onClose,
 }: TicketDetailPanelProps) {
   if (selection.kind === "spec") {
@@ -363,6 +366,19 @@ export function TicketDetailPanel({
         selectedRunId={selectedRunId}
         isSpawningSpecAgent={isSpawningSpecAgent}
         onSpawnSpecAgent={onSpawnSpecAgent}
+        onClose={onClose}
+      />
+    );
+  }
+
+  if (selection.kind === "mockup") {
+    return (
+      <MockupCardInspector
+        styles={styles}
+        theme={theme}
+        ticket={ticket}
+        selectedRunId={selectedRunId}
+        onOpenPreviewVersion={onOpenPreviewVersion ?? (() => undefined)}
         onClose={onClose}
       />
     );

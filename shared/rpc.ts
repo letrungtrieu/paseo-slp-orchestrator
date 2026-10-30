@@ -3,7 +3,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { RunModeSchema } from "./roles";
-import { BoardTicketSchema } from "./board";
+import { BoardTicketSchema, MockupElementCommentInputSchema } from "./board";
 import { CommLogEntrySchema, RunSchema, RunStatusSchema } from "./state";
 import { ProjectRoleSchema } from "./project-prompts";
 import { PeerQuestionMetricsSchema, PeerQuestionStatusSchema, PeerQuestionViewSchema } from "./peer-questions";
@@ -211,5 +211,43 @@ export const spawnBoardSpecAgentRpc = defineRpc({
   output: z.object({
     agentId: z.string(),
     workspaceId: z.string(),
+  }),
+});
+
+// Reads and bundles an HTML/CSS/JS mockup version (inlining relative .css and .js files) for instant live preview on the Kanban board.
+export const readBoardMockupPreviewRpc = defineRpc({
+  name: "slp.board.read_mockup_preview",
+  input: z.object({
+    repoPath: z.string().trim().min(1),
+    ticketId: z.string().trim().min(1),
+    version: z.number().int().min(1).optional(),
+  }),
+  output: z.object({
+    ticketId: z.string(),
+    version: z.number().int().min(1),
+    title: z.string(),
+    featureSlug: z.string(),
+    entryHtmlPath: z.string(),
+    absoluteHtmlPath: z.string(),
+    bundledHtml: z.string(),
+  }),
+});
+
+// Allows the human to approve a specific mockup version or request a new mockup version (with optional HTML element comments) from the Kanban UI.
+export const reviewBoardMockupFromUiRpc = defineRpc({
+  name: "slp.board.review_mockup",
+  input: z.object({
+    repoPath: z.string().trim().min(1),
+    runId: z.string().optional(),
+    ticketId: z.string().trim().min(1),
+    decision: z.enum(["approve", "rework"]),
+    version: z.number().int().min(1).optional(),
+    feedback: z.string().optional(),
+    elementComments: z.array(MockupElementCommentInputSchema).optional(),
+    baseVersion: z.number().int().min(1).optional(),
+  }),
+  output: z.object({
+    ticket: BoardTicketSchema,
+    notifiedAgentId: z.string().nullable(),
   }),
 });

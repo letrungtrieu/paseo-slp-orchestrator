@@ -12,6 +12,8 @@ import {
   partitionTicketBriefItems,
   resolveOptionCardColumn,
 } from "./kanban-palette";
+import { MockupKanbanCard } from "./mockup-kanban-card";
+import { MockupPreviewModal } from "./mockup-preview-modal";
 import {
   DEFAULT_KANBAN_SIDEBAR_WIDTH_PX,
   KanbanSidebar,
@@ -27,22 +29,23 @@ interface KanbanBoardSectionProps {
   onOpenSupervisor?: (supervisorAgentId: string) => void;
 }
 
-// Column titles showing the flow from Supervisor Spec -> Lead Brief -> QA Score -> Rework -> Done.
+// Column titles showing the flow from Supervisor Spec -> Lead HTML Mockup -> Lead Brief -> QA Score -> Rework -> Done.
 const COLUMN_TITLES: Record<BoardColumn, string> = {
   spec: "1. SPEC",
-  brief: "2. BRIEF",
-  score: "3. SCORE",
-  rework: "4. REWORK",
-  done: "5. DONE",
+  mockup: "2. MOCKUP",
+  brief: "3. BRIEF",
+  score: "4. SCORE",
+  rework: "5. REWORK",
+  done: "6. DONE",
 };
 
 // Assigns a distinct accent color to each Kanban column header.
 function resolveColumnAccentColor(theme: PluginTheme, column: BoardColumn): string {
-  // Done is green, Rework is red, Score is amber, Brief is accent blue, and Spec is foreground muted.
+  // Done is green, Rework is red, Score is amber, Brief/Mockup are accent blue, and Spec is foreground muted.
   if (column === "done") return theme.colors.statusSuccess;
   if (column === "rework") return theme.colors.statusDanger;
   if (column === "score") return theme.colors.statusWarning;
-  if (column === "brief") return theme.colors.accent;
+  if (column === "mockup" || column === "brief") return theme.colors.accent;
   return theme.colors.foregroundMuted;
 }
 
@@ -110,8 +113,12 @@ export function KanbanBoardSection({
   });
   const { saveBoardSpec, spawnSpecAgent } = useBoardActions();
 
-  // Default to "active_supervisor" so only the Spec, Brief, and Options of the currently active Supervisor are shown.
+  // Default to "active_supervisor" so only the Spec, Mockup, Brief, and Options of the currently active Supervisor are shown.
   const [selectedCard, setSelectedCard] = useState<KanbanCardSelection | null>(null);
+  const [activePreviewTarget, setActivePreviewTarget] = useState<{
+    ticketId: string;
+    version: number;
+  } | null>(null);
   const [filterMode, setFilterMode] = useState<"active_supervisor" | "all" | string>("active_supervisor");
   const [isCreatingSpec, setIsCreatingSpec] = useState(false);
   const [newSpecContent, setNewSpecContent] = useState("");
@@ -210,12 +217,15 @@ export function KanbanBoardSection({
     );
   };
 
-  // Precompute all decomposed Brief cards and individual Option cards across the visible Specs.
+  // Precompute all Mockup cards, decomposed Brief cards, and individual Option cards across the visible Specs.
+  const mockupTicketsInColumn = visibleTickets.filter(
+    (ticket) => ticket.column === "mockup" || ticket.mockupRevisions.length > 0,
+  );
   const briefTicketsInColumn = visibleTickets.filter(
     (ticket) => ticket.currentBriefRev > 0 || Boolean(ticket.approach.trim()),
   );
   const optionEntriesByColumn: Record<
-    Exclude<BoardColumn, "spec">,
+    Exclude<BoardColumn, "spec" | "mockup">,
     Array<{ ticket: BoardTicket; optionBullet: BriefItem }>
   > = {
     brief: [],
@@ -235,9 +245,30 @@ export function KanbanBoardSection({
     }
   }
 
+  const previewedTicket = activePreviewTarget
+    ? allProjectTickets.find((ticket) => ticket.id === activePreviewTarget.ticketId) ?? null
+    : null;
+
+  const handleOpenPreviewVersion = (targetTicket: BoardTicket, versionNumber: number) => {
+    setActivePreviewTarget({ ticketId: targetTicket.id, version: versionNumber });
+  };
+
+  if (previewedTicket && activePreviewTarget) {
+    return (
+      <MockupPreviewModal
+        styles={styles}
+        theme={theme}
+        ticket={previewedTicket}
+        initialVersion={activePreviewTarget.version}
+        selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
+        onClose={() => setActivePreviewTarget(null)}
+      />
+    );
+  }
+
   return (
     <View style={{ flex: 1, flexDirection: "row", alignItems: "stretch", minHeight: 620 }}>
-      {/* Separate Kanban board card on the left containing only the 5 workflow columns so no card sits horizontally on top. */}
+      {/* Separate Kanban board card on the left containing the 6 workflow columns so no card sits horizontally on top. */}
       <View style={[styles.card, { flex: 1, minWidth: 0, alignSelf: "stretch", gap: 10 }]}>
         {!effectiveRepoPath ? (
           <Text style={styles.mutedText}>
@@ -255,9 +286,11 @@ export function KanbanBoardSection({
               const columnCardCount =
                 columnKey === "spec"
                   ? visibleTickets.length
-                  : columnKey === "brief"
-                    ? briefTicketsInColumn.length + optionEntriesByColumn.brief.length
-                    : optionEntriesByColumn[columnKey].length;
+                  : columnKey === "mockup"
+                    ? mockupTicketsInColumn.length
+                    : columnKey === "brief"
+                      ? briefTicketsInColumn.length + optionEntriesByColumn.brief.length
+                      : optionEntriesByColumn[columnKey].length;
 
               return (
                 <View
@@ -302,7 +335,30 @@ export function KanbanBoardSection({
                           ))
                         : null}
 
-                      {/* Column 2 (BRIEF) holds the Lead's Brief overview cards plus any unscored Option cards. */}
+                      {/* Column 2 (MOCKUP) holds multi-version HTML/CSS/JS mockups formatted as `title (vN) [ → ]`. */}
+                      {columnKey === "mockup"
+                        ? mockupTicketsInColumn.map((mockupTicket) => (
+                            <MockupKanbanCard
+                              key={`mockup-card-${mockupTicket.id}`}
+                              styles={styles}
+                              theme={theme}
+                              ticket={mockupTicket}
+                              isSelected={isCardSelected(selectedCard, {
+                                kind: "mockup",
+                                ticketId: mockupTicket.id,
+                              })}
+                              onSelect={() =>
+                                handleToggleCardSelection({
+                                  kind: "mockup",
+                                  ticketId: mockupTicket.id,
+                                })
+                              }
+                              onOpenPreviewVersion={handleOpenPreviewVersion}
+                            />
+                          ))
+                        : null}
+
+                      {/* Column 3 (BRIEF) holds the Lead's Brief overview cards plus any unscored Option cards. */}
                       {columnKey === "brief"
                         ? briefTicketsInColumn.map((briefTicket) => (
                             <BriefKanbanCard
@@ -322,7 +378,7 @@ export function KanbanBoardSection({
                         : null}
 
                       {/* Render each gradable Option (C1, C2, ...) as its own separate card in BRIEF / SCORE / REWORK / DONE. */}
-                      {columnKey !== "spec"
+                      {columnKey !== "spec" && columnKey !== "mockup"
                         ? optionEntriesByColumn[columnKey].map(({ ticket, optionBullet }) => (
                             <OptionKanbanCard
                               key={`opt-card-${ticket.id}-${optionBullet.id}`}
@@ -390,6 +446,7 @@ export function KanbanBoardSection({
         selectedTicket={selectedTicket}
         selectedCard={selectedCard}
         onSelectCard={setSelectedCard}
+        onOpenPreviewVersion={handleOpenPreviewVersion}
         onOpenSupervisor={onOpenSupervisor}
         sidebarWidthPx={sidebarWidthPx}
         isSidebarCollapsed={isSidebarCollapsed}

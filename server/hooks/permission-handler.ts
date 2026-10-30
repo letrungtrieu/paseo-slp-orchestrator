@@ -140,6 +140,9 @@ export async function handlePermissionRequest(
   const pipelineRunning = pipelineIsRunningForAgent(run, agentRecord);
   const finalizingPipeline = isFinalizingLead(run, agentRecord);
   const pipelineWorktree = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId]?.worktree : undefined;
+  const activeStageKind = agentRecord.pipelineId
+    ? run.pipelines[agentRecord.pipelineId]?.stages[run.pipelines[agentRecord.pipelineId].currentStageIndex]?.kind ?? null
+    : null;
   answeredRequestIds.add(request.id);
   const decision: PermissionDecision = pipelineRunning
     ? decidePermission(request, {
@@ -151,8 +154,9 @@ export async function handlePermissionRequest(
       stageId: agentRecord.stageId,
       stageActive,
       archived: false,
-      // Advisors and QA graders never write; only the stage's developer peer gets the worktree grant.
+      // Advisors and QA graders never write production code; mockup stage peers may write under .slp/mockups/**.
       peerKind: agentRecord.role === "peer" ? safePeerKind(run, agentRecord.projectRole) : null,
+      stageKind: activeStageKind,
       finalizingPipeline,
       additionalWritableRoots:
         agentRecord.role === "master_lead"

@@ -5,6 +5,7 @@ import { SLP_ROLES, type SlpRole } from "../../shared/roles";
 import {
   BriefItemInputSchema,
   BriefItemStatusSchema,
+  MockupElementCommentInputSchema,
 } from "../../shared/board";
 import {
   DelegationSubmissionSchema,
@@ -20,7 +21,7 @@ export const BUS_TOOL_DEFINITIONS = {
   // Each Lead defines the stage pipeline for its dedicated feature worktree; the QA Lead defines QA pipelines on the QA branch.
   slp_define_pipeline: {
     roles: ["master_lead", "qa_lead"],
-    description: "Define the stage pipeline(s) for this Lead's feature worktree ([planning with advisor peers?] -> one implement stage with exactly one developer peer; pass brief when there is no planning stage), or the QA Lead's verification pipeline on the QA branch (verify stages: QA peers grade, at most one developer fixes).",
+    description: "Define the stage pipeline(s) for this Lead's feature worktree ([planning with advisor peers?] -> [mockup with advisor/developer peers?] -> one implement stage with exactly one developer peer; pass brief when there is no planning or mockup stage), or the QA Lead's verification pipeline on the QA branch (verify stages: QA peers grade, at most one developer fixes).",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -247,6 +248,29 @@ export const BUS_TOOL_DEFINITIONS = {
     input: z.object({
       ticketId: z.string().trim().min(1).optional(),
       scorecard: z.array(ScorecardEntrySchema).min(1),
+    }),
+  },
+  slp_submit_mockup: {
+    roles: ["master_lead"],
+    description: "Submit an interactive HTML/CSS/JS feature mockup from '.slp/mockups/<feature>/index.html', automatically cloning it into '.slp/mockups/<feature>/versions/v<N>/index.html', moving the Kanban ticket to MOCKUP, and notifying the Supervisor for human review.",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      pipelineId: pipelineIdField.optional(),
+      feature: z.string().trim().min(1).optional().describe("Feature slug or folder name under .slp/mockups/<feature>; defaults to ticket's featureSlug"),
+      title: z.string().trim().min(1).optional().describe("Display title for this mockup card"),
+      summary: z.string().trim().min(1).describe("Summary of screens, states, and interactive JS flows in this mockup version"),
+    }),
+  },
+  slp_review_mockup: {
+    roles: ["supervisor"],
+    description: "Record human approval or rework feedback (including optional HTML element-level comments) for a feature mockup version (v1, v2, ...) and notify the Feature Lead to either lock the Brief and implement or produce the next mockup version v(N+1).",
+    input: z.object({
+      ticketId: z.string().trim().min(1).optional(),
+      decision: z.enum(["approve", "rework"]),
+      version: z.number().int().min(1).optional().describe("Target mockup version number (defaults to latest version)"),
+      feedback: z.string().trim().optional().describe("Human review feedback or requested adjustments"),
+      elementComments: z.array(MockupElementCommentInputSchema).optional().describe("Comments attached to specific HTML tags/selectors inside the mockup"),
+      baseVersion: z.number().int().min(1).optional().describe("Optional previous version to clone into the working directory before rework"),
     }),
   },
 } as const satisfies Record<string, { roles: readonly SlpRole[]; description: string; input: z.ZodType }>;

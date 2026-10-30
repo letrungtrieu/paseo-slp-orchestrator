@@ -42,6 +42,7 @@ export interface KanbanSidebarProps {
   selectedTicket: BoardTicket | null;
   selectedCard: KanbanCardSelection | null;
   onSelectCard: (nextSelection: KanbanCardSelection | null) => void;
+  onOpenPreviewVersion?: (ticket: BoardTicket, versionNumber: number) => void;
   onOpenSupervisor?: (supervisorAgentId: string) => void;
   sidebarWidthPx: number;
   isSidebarCollapsed: boolean;
@@ -197,6 +198,7 @@ export function KanbanSidebar({
   selectedTicket,
   selectedCard,
   onSelectCard,
+  onOpenPreviewVersion,
   onOpenSupervisor,
   sidebarWidthPx,
   isSidebarCollapsed,
@@ -369,47 +371,38 @@ export function KanbanSidebar({
             selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
             isSpawningSpecAgent={isSpawningSpecAgent}
             onSpawnSpecAgent={onSpawnSpecAgent}
+            onOpenPreviewVersion={onOpenPreviewVersion}
             onClose={() => onSelectCard(null)}
           />
         ) : (
-          <View style={{ gap: 12 }}>
-            <View style={[styles.card, { backgroundColor: theme.colors.surface2, gap: 6 }]}>
-              <Text style={[styles.bodyText, { fontWeight: "600" }]}>
-                Inspector & Spec Sidebar
-              </Text>
-              <Text style={styles.mutedText}>
-                Select any Spec, Brief, or Option card on the Kanban board to inspect or edit it here, click "+ New Spec" to write manually, or click "+ Spec with Agent" to discuss and draft a Spec with an Agent.
-              </Text>
-            </View>
-            {/* Render the primary "+ New Spec" and "+ Spec with Agent" actions directly below the Inspector card, centered horizontally. */}
-            <View style={[styles.row, { justifyContent: "center" }]}>
-              {effectiveRepoPath ? (
-                <>
-                  <ActionButton
-                    styles={styles}
-                    tone="primary"
-                    label="+ New Spec"
-                    accessibilityLabel="Create a new Spec card manually in the sidebar"
-                    onPress={onToggleCreatingSpec}
-                  />
-                  <ActionButton
-                    styles={styles}
-                    label={isSpawningSpecAgent ? "Opening Agent..." : "+ Spec with Agent"}
-                    accessibilityLabel="Open a dedicated Spec Agent to discuss and create a Spec card"
-                    disabled={isSpawningSpecAgent}
-                    onPress={() => onSpawnSpecAgent()}
-                  />
-                </>
-              ) : null}
-              {activeProjectRun && onOpenSupervisor ? (
+          // Render the primary "+ New Spec" and "+ Spec with Agent" actions directly at the top of the idle sidebar, centered horizontally.
+          <View style={[styles.row, { justifyContent: "center" }]}>
+            {effectiveRepoPath ? (
+              <>
                 <ActionButton
                   styles={styles}
-                  label="Open Supervisor Chat"
-                  accessibilityLabel={`Open Supervisor chat for ${activeProjectRun.title}`}
-                  onPress={() => onOpenSupervisor(activeProjectRun.supervisorAgentId)}
+                  tone="primary"
+                  label="+ New Spec"
+                  accessibilityLabel="Create a new Spec card manually in the sidebar"
+                  onPress={onToggleCreatingSpec}
                 />
-              ) : null}
-            </View>
+                <ActionButton
+                  styles={styles}
+                  label={isSpawningSpecAgent ? "Opening Agent..." : "+ Spec with Agent"}
+                  accessibilityLabel="Open a dedicated Spec Agent to discuss and create a Spec card"
+                  disabled={isSpawningSpecAgent}
+                  onPress={() => onSpawnSpecAgent()}
+                />
+              </>
+            ) : null}
+            {activeProjectRun && onOpenSupervisor ? (
+              <ActionButton
+                styles={styles}
+                label="Open Supervisor Chat"
+                accessibilityLabel={`Open Supervisor chat for ${activeProjectRun.title}`}
+                onPress={() => onOpenSupervisor(activeProjectRun.supervisorAgentId)}
+              />
+            ) : null}
           </View>
         )}
       </ScrollView>

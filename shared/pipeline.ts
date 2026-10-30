@@ -32,9 +32,10 @@ export const PipelinePeerDefinitionSchema = z.object({
 });
 export type PipelinePeerDefinition = z.infer<typeof PipelinePeerDefinitionSchema>;
 
-// planning: advisor peers discuss techniques/design with the Lead and end with a locked brief;
+// planning: advisor peers discuss techniques/design with the Lead;
+// mockup: engineer peers analyze sub-parts and assemble a multi-version HTML/CSS/JS mockup under .slp/mockups/<feature>;
 // implement: the single developer builds the brief; verify: QA peers grade it (QA pipelines only).
-export const STAGE_KINDS = ["planning", "implement", "verify"] as const;
+export const STAGE_KINDS = ["planning", "mockup", "implement", "verify"] as const;
 export const StageKindSchema = z.enum(STAGE_KINDS);
 export type StageKind = z.infer<typeof StageKindSchema>;
 

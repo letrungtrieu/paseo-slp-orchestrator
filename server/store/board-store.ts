@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   BoardTicketSchema,
   briefItemsFromPipelineBrief,
+  deriveFeatureMockupSlug,
   type BoardColumn,
   type BoardTicket,
   type BriefItemInput,
@@ -16,6 +17,12 @@ import {
   applyScorecardToTicket,
   mergeBriefItemsForRevision,
 } from "./board-item-scoring";
+import {
+  applyMockupReviewToTicket,
+  applyMockupSubmissionToTicket,
+  type ReviewMockupRevisionParams,
+  type SaveMockupRevisionParams,
+} from "./board-mockup-revisions";
 import { transaction } from "./database";
 import { computeUnifiedTextDiff, serializeBriefForDiff } from "./diff";
 
@@ -186,10 +193,13 @@ export class BoardStore {
       };
 
       // Preserve existing Brief history when updating an existing ticket, or initialize a clean SPEC card for new features.
+      const allocatedTicketKey = existingTicket?.ticketKey ?? this.allocateTicketKey(database, input.repoPath);
+      const resolvedTitle = input.title?.trim() || existingTicket?.title || "Feature Ticket";
       const updatedTicket: BoardTicket = existingTicket
         ? {
             ...existingTicket,
-            title: input.title?.trim() || existingTicket.title,
+            title: resolvedTitle,
+            featureSlug: existingTicket.featureSlug || deriveFeatureMockupSlug(resolvedTitle, allocatedTicketKey),
             acceptanceCriteria: input.acceptanceCriteria?.trim() || existingTicket.acceptanceCriteria,
             currentSpecRev: nextSpecRevisionNumber,
             specRevisions: [...existingTicket.specRevisions, createdSpecRevision],
@@ -200,15 +210,19 @@ export class BoardStore {
           }
         : {
             id: randomUUID(),
-            ticketKey: this.allocateTicketKey(database, input.repoPath),
+            ticketKey: allocatedTicketKey,
             repoPath: input.repoPath,
-            title: input.title?.trim() || "Feature Ticket",
+            title: resolvedTitle,
+            featureSlug: deriveFeatureMockupSlug(resolvedTitle, allocatedTicketKey),
             acceptanceCriteria: input.acceptanceCriteria?.trim() || "",
             column: "spec",
             currentSpecRev: 1,
+            currentMockupRev: 0,
+            approvedMockupRev: null,
             currentBriefRev: 0,
             lastSyncedSpecRev: 0,
             specRevisions: [createdSpecRevision],
+            mockupRevisions: [],
             briefRevisions: [],
             approach: "",
             items: [],
@@ -265,10 +279,13 @@ export class BoardStore {
         createdAt: nowIso,
       };
 
-      // Move a ticket from SPEC (or reopened DONE) into BRIEF once its actionable bullet items are recorded.
-      const nextColumn: BoardColumn = existingTicket.column === "spec" || existingTicket.column === "done"
-        ? "brief"
-        : existingTicket.column;
+      // Move a ticket from SPEC, MOCKUP, or reopened DONE into BRIEF once its actionable bullet items are recorded.
+      const nextColumn: BoardColumn =
+        existingTicket.column === "spec" ||
+        existingTicket.column === "mockup" ||
+        existingTicket.column === "done"
+          ? "brief"
+          : existingTicket.column;
 
       const updatedTicket: BoardTicket = {
         ...existingTicket,
@@ -410,6 +427,32 @@ export class BoardStore {
         params.feedback,
         params.itemIds,
       );
+      this.persistTicket(database, updatedTicket);
+      return updatedTicket;
+    });
+  }
+
+  // Records a newly snapshotted HTML/CSS/JS mockup version (v1, v2, ...) on a ticket and moves it to MOCKUP.
+  saveMockupRevision(
+    params: SaveMockupRevisionParams & { ticketIdOrKey: string; repoPath?: string },
+  ): BoardTicket {
+    const database = this.resolveDatabase();
+    return transaction(database, () => {
+      const existingTicket = this.requireTicket(params.ticketIdOrKey, params.repoPath);
+      const updatedTicket = applyMockupSubmissionToTicket(existingTicket, params);
+      this.persistTicket(database, updatedTicket);
+      return updatedTicket;
+    });
+  }
+
+  // Records approval or rework feedback for a specific mockup version (v1, v2, ...) on a ticket.
+  reviewMockupRevision(
+    params: ReviewMockupRevisionParams & { ticketIdOrKey: string; repoPath?: string },
+  ): BoardTicket {
+    const database = this.resolveDatabase();
+    return transaction(database, () => {
+      const existingTicket = this.requireTicket(params.ticketIdOrKey, params.repoPath);
+      const updatedTicket = applyMockupReviewToTicket(existingTicket, params);
       this.persistTicket(database, updatedTicket);
       return updatedTicket;
     });

@@ -21,9 +21,17 @@ export function approveStage(
 ): string {
   const { run, pipeline, stage } = requireStageLead(ctx, caller);
   const { summary, brief } = input;
-  // The planning stage exists to produce the initial brief; later stages may also pass an updated brief if conflicts required changing approach.
-  if (stage.kind === "planning" && !brief && !pipeline.brief) {
-    throw new ToolError("Approving the planning stage requires brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }. It becomes the contract for the next stages.");
+  const nextStage = pipeline.stages[pipeline.currentStageIndex + 1];
+  // The final pre-implement stage (planning or mockup) must lock the brief before the developer implement stage starts.
+  if (
+    (stage.kind === "planning" || stage.kind === "mockup") &&
+    nextStage?.kind === "implement" &&
+    !brief &&
+    !pipeline.brief
+  ) {
+    throw new ToolError(
+      `Approving the ${stage.kind} stage requires brief: { approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }. It becomes the contract for the implement stage.`,
+    );
   }
   // Keep stage approval from silently overwriting an already locked brief; intentional technical pivots go through slp_board_update_brief with an explicit reason and diff.
   if (brief && pipeline.briefLockedAt) {

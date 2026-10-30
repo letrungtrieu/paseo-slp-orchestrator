@@ -2,3 +2,4 @@ node_modules
 MEMORY.md
 .vitest/
 .slp/comm-log.jsonl
+.slp/mockups/
