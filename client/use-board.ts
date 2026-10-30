@@ -1,7 +1,11 @@
 // React Query hooks for polling the project Kanban board and saving human Spec edits from the UI.
 import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { listBoardTicketsRpc, saveBoardSpecFromUiRpc } from "../shared/rpc";
+import {
+  listBoardTicketsRpc,
+  saveBoardSpecFromUiRpc,
+  spawnBoardSpecAgentRpc,
+} from "../shared/rpc";
 
 // Poll at 2 s so realtime agent badges, Lead pause states and Brief bullet scores update live on the board.
 const BOARD_POLL_INTERVAL_MS = 2_000;
@@ -24,12 +28,17 @@ export function useBoardTickets(params: { repoPath?: string | null; runId?: stri
 export function useBoardActions() {
   const queryClient = useQueryClient();
   const saveBoardSpecFromUi = useRpc(saveBoardSpecFromUiRpc);
+  const spawnBoardSpecAgent = useRpc(spawnBoardSpecAgentRpc);
   // Invalidate all ["slp"] queries so the Kanban card, diff viewer and Supervisor mailbox reflect the new Spec revision immediately.
   const refreshBoardAndRuns = () => queryClient.invalidateQueries({ queryKey: ["slp"] });
 
   return {
     saveBoardSpec: useMutation({
       mutationFn: saveBoardSpecFromUi,
+      onSuccess: refreshBoardAndRuns,
+    }),
+    spawnSpecAgent: useMutation({
+      mutationFn: spawnBoardSpecAgent,
       onSuccess: refreshBoardAndRuns,
     }),
   };

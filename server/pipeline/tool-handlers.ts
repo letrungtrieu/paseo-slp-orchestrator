@@ -27,6 +27,10 @@ import {
   updateBoardBrief,
   updateBoardBriefItem,
 } from "./board-tools";
+import {
+  findStandaloneSpecAgentByToken,
+  STANDALONE_SPEC_AGENT_TOOLS,
+} from "./spec-agent";
 import { ToolError } from "./tool-error";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
@@ -77,7 +81,21 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
   return {
     resolveCaller(token: string): BusCaller | null {
       const lookup = ctx.store.findCallerByToken(token);
-      if (!lookup || lookup.agentRecord.archivedAt) return null;
+      if (!lookup) {
+        // Authenticate standalone normal Spec Agents that operate on a repository's Kanban board outside any SLP Run.
+        const standaloneSpecSession = findStandaloneSpecAgentByToken(token);
+        if (!standaloneSpecSession) return null;
+        return {
+          runId: "",
+          agentId: standaloneSpecSession.agentId,
+          role: "supervisor",
+          projectRole: "spec-agent",
+          taskId: null,
+          repoPath: standaloneSpecSession.repoPath,
+          allowedTools: STANDALONE_SPEC_AGENT_TOOLS,
+        };
+      }
+      if (lookup.agentRecord.archivedAt) return null;
       const { agentRecord, run } = lookup;
       // Old persisted capability names never become authority in the new orchestration bus.
       if (!(SLP_ROLES as readonly string[]).includes(agentRecord.role)) return null;
@@ -86,6 +104,23 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
         projectRole: agentRecord.projectRole, taskId: null };
     },
     async dispatch(caller: BusCaller, toolName: string, rawArguments: unknown, abortSignal?: AbortSignal): Promise<BusToolOutcome> {
+      // Handle standalone Spec Agents that are not bound to any SLP Run in SQLite.
+      if (caller.allowedTools && !caller.runId) {
+        try {
+          if (!isBusToolName(toolName) || !caller.allowedTools.includes(toolName)) {
+            throw new ToolError(`Tool '${toolName}' is not available to this Spec session.`);
+          }
+          const definition = BUS_TOOL_DEFINITIONS[toolName];
+          const parsedInput = definition.input.safeParse(rawArguments ?? {});
+          if (!parsedInput.success) throw new ToolError(parsedInput.error.message);
+          const invoke = TOOL_HANDLERS[toolName] as ToolHandler<typeof toolName>;
+          const text = await invoke(ctx, caller, parsedInput.data, abortSignal);
+          return { text, isError: false };
+        } catch (failure) {
+          const reason = failure instanceof Error ? failure.message : String(failure);
+          return { text: reason, isError: true };
+        }
+      }
       const logCall = (outcome: "delivered" | "blocked" | "error", reason?: string) => {
         const argumentsText = JSON.stringify(rawArguments ?? {});
         ctx.logEvent(caller.runId, { taskId: null, from: `${caller.role}:${caller.agentId.slice(0, 8)}`,

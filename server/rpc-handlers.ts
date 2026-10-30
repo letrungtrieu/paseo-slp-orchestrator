@@ -16,6 +16,7 @@ import {
   resumeTaskRpc,
   saveBoardSpecFromUiRpc,
   setRunModeRpc,
+  spawnBoardSpecAgentRpc,
   startRunRpc,
   tailLogRpc,
   initializeProjectPromptsRpc,
@@ -26,8 +27,9 @@ import type { Run } from "../shared/state";
 import { enrichTicketWithLiveAgents } from "./pipeline/board-tools";
 import type { PipelineContext } from "./pipeline/context";
 import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
-import { abortRun, approveMain, approveRunGate, startRun } from "./pipeline/run-lifecycle";
+import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } from "./pipeline/run-lifecycle";
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
+import { spawnBoardSpecAgent } from "./pipeline/spec-agent";
 import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
@@ -279,5 +281,21 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
       ticket: enrichTicketWithLiveAgents(activeRun, savedTicket),
       notifiedSupervisor,
     };
+  });
+
+  // Spawns a standalone normal Paseo agent connected to the project's Kanban board for interactive Spec discussion.
+  server.handle(spawnBoardSpecAgentRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const savedSettings = globalSettings ? await globalSettings.read() : null;
+    if (savedSettings?.status === "invalid") throw new Error(savedSettings.error);
+    const defaults = savedSettings?.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
+    const supervisorDefaults = roleRunDefaults(defaults.roles.supervisor);
+    return spawnBoardSpecAgent(ctx, {
+      repoPath: input.repoPath,
+      ticketId: input.ticketId,
+      provider: supervisorDefaults.provider ?? DEFAULT_PROVIDER,
+      thinkingOptionId: supervisorDefaults.thinkingOptionId,
+      permissionModeId: supervisorDefaults.permissionModeId,
+    });
   });
 }

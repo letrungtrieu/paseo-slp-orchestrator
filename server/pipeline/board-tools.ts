@@ -53,21 +53,22 @@ export function enrichTicketWithLiveAgents(run: Run | undefined, ticket: BoardTi
   };
 }
 
-// Resolves the Kanban ticket targeted by an agent tool call, inferring it from the caller's pipeline when ticketId is omitted.
+// Resolves the Kanban ticket targeted by an agent tool call, inferring it from the caller's pipeline or repository when ticketId is omitted.
 function resolveTargetTicketForCaller(
   ctx: PipelineContext,
-  run: Run,
+  run: Run | undefined,
   caller: BusCaller,
   explicitTicketIdOrKey?: string,
   explicitPipelineId?: string,
 ): BoardTicket {
+  const effectiveRepoPath = run?.repoPath ?? caller.repoPath ?? "";
   // Prefer an explicit ticket key (e.g. SLP-1) or UUID when the calling agent supplies one.
   if (explicitTicketIdOrKey?.trim()) {
-    const foundByKey = ctx.store.board.find(explicitTicketIdOrKey, run.repoPath);
+    const foundByKey = ctx.store.board.find(explicitTicketIdOrKey, effectiveRepoPath || undefined);
     if (!foundByKey) throw new ToolError(`Kanban ticket '${explicitTicketIdOrKey}' was not found in this project.`);
     return foundByKey;
   }
-  const callerRecord = run.agents[caller.agentId];
+  const callerRecord = run ? run.agents[caller.agentId] : undefined;
   const candidatePipelineId = explicitPipelineId?.trim() || callerRecord?.pipelineId || null;
   // Peers and stage Leads are bound to a pipelineId, which maps 1:1 to their feature ticket.
   if (candidatePipelineId) {
@@ -75,30 +76,38 @@ function resolveTargetTicketForCaller(
     if (foundByPipeline) return foundByPipeline;
   }
   // Fall back to matching the Lead's assigned feature name or the single active ticket of the run.
-  if (callerRecord?.featureName) {
+  if (callerRecord?.featureName && effectiveRepoPath) {
     const foundByFeatureName = ctx.store.board
-      .listByRepo(run.repoPath)
+      .listByRepo(effectiveRepoPath)
       .find((ticket) => ticket.title.toLowerCase() === callerRecord.featureName!.toLowerCase());
     if (foundByFeatureName) return foundByFeatureName;
   }
   // Single-ticket runs and repositories resolve unambiguously without forcing the agent to pass ticketId.
-  const runTickets = ctx.store.board.listByRun(run.id);
-  if (runTickets.length === 1) return runTickets[0];
-  const repoTickets = ctx.store.board.listByRepo(run.repoPath);
-  if (repoTickets.length === 1) return repoTickets[0];
+  if (run) {
+    const runTickets = ctx.store.board.listByRun(run.id);
+    if (runTickets.length === 1) return runTickets[0];
+  }
+  if (effectiveRepoPath) {
+    const repoTickets = ctx.store.board.listByRepo(effectiveRepoPath);
+    if (repoTickets.length === 1) return repoTickets[0];
+  }
   throw new ToolError("Provide ticketId (for example 'SLP-1') or call slp_board_list_tickets first.");
 }
 
 // Returns a compact summary of all tickets in the project repository for agent discovery.
 export function listBoardTickets(ctx: PipelineContext, caller: BusCaller): string {
-  const run = ctx.store.require(caller.runId);
+  const run = caller.runId ? ctx.store.find(caller.runId) : undefined;
+  const effectiveRepoPath = run?.repoPath ?? caller.repoPath ?? "";
+  if (!effectiveRepoPath) {
+    throw new ToolError("No project repository is associated with this session.");
+  }
   const projectTickets = ctx.store.board
-    .listByRepo(run.repoPath)
+    .listByRepo(effectiveRepoPath)
     .map((ticket) => enrichTicketWithLiveAgents(run, ticket));
 
   // Project only summary fields and bullet counts so listing many project tickets stays token-efficient.
   return JSON.stringify({
-    repoPath: run.repoPath,
+    repoPath: effectiveRepoPath,
     tickets: projectTickets.map((ticket) => {
       const inScopeItems = ticket.items.filter((bullet) => bullet.scope === "in");
       return {
@@ -132,7 +141,7 @@ export function getBoardTicket(
   caller: BusCaller,
   input: { ticketId?: string },
 ): string {
-  const run = ctx.store.require(caller.runId);
+  const run = caller.runId ? ctx.store.find(caller.runId) : undefined;
   const resolvedTicket = enrichTicketWithLiveAgents(
     run,
     resolveTargetTicketForCaller(ctx, run, caller, input.ticketId),
@@ -177,7 +186,7 @@ export function getBoardTicket(
   });
 }
 
-// Allows the Supervisor to create or update the human-approved Spec on the Kanban board.
+// Allows the Supervisor or a standalone Spec Agent to create or update the Product Spec on the Kanban board.
 export function saveBoardSpec(
   ctx: PipelineContext,
   caller: BusCaller,
@@ -189,32 +198,44 @@ export function saveBoardSpec(
     summary?: string;
   },
 ): string {
-  const run = ctx.store.require(caller.runId);
-  // Persist the Supervisor-authored Spec revision and compute its unified diff against any prior version.
+  const run = caller.runId ? ctx.store.find(caller.runId) : undefined;
+  const effectiveRepoPath = run?.repoPath ?? caller.repoPath ?? "";
+  if (!effectiveRepoPath) {
+    throw new ToolError("No project repository is associated with this session.");
+  }
+  const firstMeaningfulSpecLine = input.spec
+    .split(/\r?\n/)
+    .map((rawLine) => rawLine.replace(/^[#*\-\d.)\s]+/, "").trim())
+    .find((cleanedLine) => cleanedLine.length > 0);
+  const derivedSpecTitle = firstMeaningfulSpecLine
+    ? firstMeaningfulSpecLine.slice(0, 80)
+    : "Product Spec";
+  // Persist the authored Spec revision and compute its unified diff against any prior version.
   const savedTicket = ctx.store.board.saveSpec({
-    repoPath: run.repoPath,
+    repoPath: effectiveRepoPath,
     ticketIdOrKey: input.ticketId,
-    title: input.title ?? run.title,
-    acceptanceCriteria: input.acceptanceCriteria ?? run.criteria ?? "",
+    title: input.title ?? run?.title ?? derivedSpecTitle,
+    acceptanceCriteria: input.acceptanceCriteria ?? run?.criteria ?? "",
     specContent: input.spec,
     author: "supervisor",
     summary: input.summary,
-    activeRunId: run.id,
+    activeRunId: run?.id ?? null,
   });
-  // Keep run.productSpec updated so legacy readers and QA checks also see the latest Spec text.
-  ctx.store.mutate(run.id, (mutableRun) => {
-    mutableRun.productSpec = input.spec.trim();
-  });
+  // Keep run.productSpec updated when called from an active SLP run.
+  if (run) {
+    ctx.store.mutate(run.id, (mutableRun) => {
+      mutableRun.productSpec = input.spec.trim();
+    });
+    ctx.logEvent(run.id, {
+      taskId: savedTicket.activePipelineId,
+      from: caller.agentId,
+      to: "board",
+      kind: "board.spec_saved",
+      summary: `${savedTicket.ticketKey} Spec v${savedTicket.currentSpecRev}`,
+      outcome: "delivered",
+    });
+  }
   const latestSpecRevision = savedTicket.specRevisions.at(-1);
-  // Record the Spec revision in the run communication log for operator auditability.
-  ctx.logEvent(run.id, {
-    taskId: savedTicket.activePipelineId,
-    from: caller.agentId,
-    to: "board",
-    kind: "board.spec_saved",
-    summary: `${savedTicket.ticketKey} Spec v${savedTicket.currentSpecRev}`,
-    outcome: "delivered",
-  });
   return JSON.stringify({
     ticketId: savedTicket.id,
     ticketKey: savedTicket.ticketKey,

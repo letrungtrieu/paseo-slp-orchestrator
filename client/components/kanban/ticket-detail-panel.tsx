@@ -14,6 +14,7 @@ import {
   resolveSpecColorIdentity,
 } from "./kanban-palette";
 import { InspectorTagBadge, OptionCardInspector } from "./option-card-inspector";
+import { SpecMarkdownEditor } from "./spec-markdown-editor";
 
 interface TicketDetailPanelProps {
   styles: UiStyles;
@@ -21,6 +22,8 @@ interface TicketDetailPanelProps {
   ticket: BoardTicket;
   selection: KanbanCardSelection;
   selectedRunId: string | null;
+  isSpawningSpecAgent?: boolean;
+  onSpawnSpecAgent?: (targetTicketKey?: string) => void;
   onClose: () => void;
 }
 
@@ -30,12 +33,16 @@ function SpecCardInspector({
   theme,
   ticket,
   selectedRunId,
+  isSpawningSpecAgent,
+  onSpawnSpecAgent,
   onClose,
 }: {
   styles: UiStyles;
   theme: PluginTheme;
   ticket: BoardTicket;
   selectedRunId: string | null;
+  isSpawningSpecAgent?: boolean;
+  onSpawnSpecAgent?: (targetTicketKey?: string) => void;
   onClose: () => void;
 }) {
   const { saveBoardSpec } = useBoardActions();
@@ -43,25 +50,18 @@ function SpecCardInspector({
   const latestSpecRevision = ticket.specRevisions[ticket.specRevisions.length - 1] ?? null;
   const currentSpecContent = latestSpecRevision?.content ?? "";
 
-  const [editedTitle, setEditedTitle] = useState(ticket.title);
-  const [editedAcceptanceCriteria, setEditedAcceptanceCriteria] = useState(ticket.acceptanceCriteria);
   const [editedSpecContent, setEditedSpecContent] = useState(currentSpecContent);
   const [specChangeSummary, setSpecChangeSummary] = useState("");
   const [showSpecDiffHistory, setShowSpecDiffHistory] = useState(false);
 
   // Reset local Spec editor draft whenever the user switches to another Spec card or a new Spec revision arrives.
   useEffect(() => {
-    setEditedTitle(ticket.title);
-    setEditedAcceptanceCriteria(ticket.acceptanceCriteria);
     setEditedSpecContent(ticket.specRevisions[ticket.specRevisions.length - 1]?.content ?? "");
     setSpecChangeSummary("");
   }, [ticket.id, ticket.currentSpecRev]);
 
   const saveErrorMessage = describeRpcError(saveBoardSpec.error);
-  const hasUnsavedSpecEdits =
-    editedTitle.trim() !== ticket.title.trim() ||
-    editedAcceptanceCriteria.trim() !== ticket.acceptanceCriteria.trim() ||
-    editedSpecContent.trim() !== currentSpecContent.trim();
+  const hasUnsavedSpecEdits = editedSpecContent.trim() !== currentSpecContent.trim();
 
   const handleApplySpec = () => {
     // Saving a Spec edit creates a new Spec revision with unified diff and notifies the Supervisor.
@@ -69,8 +69,7 @@ function SpecCardInspector({
       repoPath: ticket.repoPath,
       runId: selectedRunId ?? ticket.activeRunId ?? undefined,
       ticketId: ticket.ticketKey,
-      title: editedTitle.trim() || ticket.title,
-      acceptanceCriteria: editedAcceptanceCriteria.trim() || undefined,
+      title: ticket.title,
       specContent: editedSpecContent.trim() || ticket.title,
       summary: specChangeSummary.trim() || undefined,
     });
@@ -102,6 +101,15 @@ function SpecCardInspector({
           <Text style={styles.sectionTitle}>Product Spec (Human & Supervisor)</Text>
         </View>
         <View style={styles.row}>
+          {onSpawnSpecAgent ? (
+            <ActionButton
+              styles={styles}
+              label={isSpawningSpecAgent ? "Opening Agent..." : "Discuss with Agent"}
+              accessibilityLabel={`Open a Spec Agent to discuss and refine ${ticket.ticketKey}`}
+              disabled={isSpawningSpecAgent}
+              onPress={() => onSpawnSpecAgent(ticket.ticketKey)}
+            />
+          ) : null}
           {ticket.specRevisions.length > 0 ? (
             <ActionButton
               styles={styles}
@@ -119,33 +127,15 @@ function SpecCardInspector({
         </View>
       </View>
 
-      <Text style={styles.fieldLabel}>Spec Title</Text>
-      <TextInput
-        style={styles.input}
-        value={editedTitle}
-        onChangeText={setEditedTitle}
-        placeholder="Spec title"
-        placeholderTextColor={theme.colors.foregroundMuted}
-      />
-
-      <Text style={styles.fieldLabel}>Acceptance Criteria</Text>
-      <TextInput
-        style={styles.input}
-        value={editedAcceptanceCriteria}
-        onChangeText={setEditedAcceptanceCriteria}
-        placeholder="High-level acceptance criteria"
-        placeholderTextColor={theme.colors.foregroundMuted}
-      />
-
-      <Text style={styles.fieldLabel}>Spec Content (Handed by Supervisor to Lead)</Text>
-      {/* Let the Spec Content editor expand vertically to fill the full height of the sidebar. */}
-      <TextInput
-        style={[styles.input, { flex: 1, minHeight: 200, textAlignVertical: "top" }]}
-        value={editedSpecContent}
-        onChangeText={setEditedSpecContent}
-        multiline
+      {/* Allow toggling between formatted Markdown preview and raw text editing for existing Spec cards. */}
+      <SpecMarkdownEditor
+        styles={styles}
+        theme={theme}
+        markdownContent={editedSpecContent}
+        onChangeMarkdownContent={setEditedSpecContent}
         placeholder="Full 5-section Product Spec..."
-        placeholderTextColor={theme.colors.foregroundMuted}
+        initialMode="preview"
+        minHeight={240}
       />
 
       <Text style={styles.fieldLabel}>Revision Note (optional)</Text>
@@ -360,6 +350,8 @@ export function TicketDetailPanel({
   ticket,
   selection,
   selectedRunId,
+  isSpawningSpecAgent,
+  onSpawnSpecAgent,
   onClose,
 }: TicketDetailPanelProps) {
   if (selection.kind === "spec") {
@@ -369,6 +361,8 @@ export function TicketDetailPanel({
         theme={theme}
         ticket={ticket}
         selectedRunId={selectedRunId}
+        isSpawningSpecAgent={isSpawningSpecAgent}
+        onSpawnSpecAgent={onSpawnSpecAgent}
         onClose={onClose}
       />
     );

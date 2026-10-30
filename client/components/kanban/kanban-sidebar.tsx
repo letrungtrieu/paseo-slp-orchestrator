@@ -7,6 +7,7 @@ import type { RunSummary } from "../../../shared/rpc";
 import type { UiStyles } from "../../styles";
 import { ActionButton } from "../action-button";
 import { type KanbanCardSelection, resolveSpecColorIdentity } from "./kanban-palette";
+import { SpecMarkdownEditor } from "./spec-markdown-editor";
 import { TicketDetailPanel } from "./ticket-detail-panel";
 
 // Enforce sensible sidebar width bounds so form inputs remain usable when narrowed and columns stay visible when widened.
@@ -31,14 +32,12 @@ export interface KanbanSidebarProps {
   onSelectFilterMode: (nextFilterMode: "active_supervisor" | "all" | string) => void;
   isCreatingSpec: boolean;
   onToggleCreatingSpec: () => void;
-  newSpecTitle: string;
-  onChangeNewSpecTitle: (nextTitle: string) => void;
-  newSpecCriteria: string;
-  onChangeNewSpecCriteria: (nextCriteria: string) => void;
   newSpecContent: string;
   onChangeNewSpecContent: (nextContent: string) => void;
   isSavingNewSpec: boolean;
   onSubmitNewSpec: () => void;
+  isSpawningSpecAgent: boolean;
+  onSpawnSpecAgent: (targetTicketKey?: string) => void;
   boardErrorMessage: string | null;
   selectedTicket: BoardTicket | null;
   selectedCard: KanbanCardSelection | null;
@@ -176,7 +175,6 @@ export function KanbanSidebarResizeHandle({
 export function KanbanSidebar({
   styles,
   theme,
-  projectDisplayName,
   projectRepoPath,
   effectiveRepoPath,
   customRepoPath,
@@ -189,14 +187,12 @@ export function KanbanSidebar({
   onSelectFilterMode,
   isCreatingSpec,
   onToggleCreatingSpec,
-  newSpecTitle,
-  onChangeNewSpecTitle,
-  newSpecCriteria,
-  onChangeNewSpecCriteria,
   newSpecContent,
   onChangeNewSpecContent,
   isSavingNewSpec,
   onSubmitNewSpec,
+  isSpawningSpecAgent,
+  onSpawnSpecAgent,
   boardErrorMessage,
   selectedTicket,
   selectedCard,
@@ -222,42 +218,6 @@ export function KanbanSidebar({
         },
       ]}
     >
-      {/* Sidebar header displays project identity and active run status without duplicating the edge collapse control. */}
-      <View style={{ gap: 2 }}>
-        <Text style={styles.sectionTitle} numberOfLines={2}>
-          {projectDisplayName ? `${projectDisplayName} · ` : ""}Spec & Brief Kanban
-        </Text>
-        <Text style={styles.mutedText} numberOfLines={2}>
-          {effectiveRepoPath || "No project selected"}
-        </Text>
-        {activeProjectRun ? (
-          <Text style={styles.mutedText} numberOfLines={1}>
-            Active Run: {activeProjectRun.title} ({activeProjectRun.status})
-          </Text>
-        ) : null}
-      </View>
-
-      {/* Primary sidebar actions for opening Supervisor chat or toggling the New Spec creation form inside the sidebar. */}
-      <View style={styles.row}>
-        {effectiveRepoPath ? (
-          <ActionButton
-            styles={styles}
-            tone={isCreatingSpec ? "secondary" : "primary"}
-            label={isCreatingSpec ? "Cancel New Spec" : "+ New Spec"}
-            accessibilityLabel="Create a new Spec card in the sidebar"
-            onPress={onToggleCreatingSpec}
-          />
-        ) : null}
-        {activeProjectRun && onOpenSupervisor ? (
-          <ActionButton
-            styles={styles}
-            label="Open Supervisor Chat"
-            accessibilityLabel={`Open Supervisor chat for ${activeProjectRun.title}`}
-            onPress={() => onOpenSupervisor(activeProjectRun.supervisorAgentId)}
-          />
-        ) : null}
-      </View>
-
       {/* Scope filter bar lets the operator isolate the active Supervisor's Spec or a single Spec family. */}
       {allProjectTickets.length > 0 ? (
         <View style={{ gap: 6 }}>
@@ -363,39 +323,40 @@ export function KanbanSidebar({
       >
         {isCreatingSpec ? (
           <View style={[styles.card, { flex: 1, backgroundColor: theme.colors.surface2, gap: 8 }]}>
-            <Text style={styles.sectionTitle}>Create New Spec Card</Text>
-            <Text style={styles.fieldLabel}>Title</Text>
-            <TextInput
-              style={styles.input}
-              value={newSpecTitle}
-              onChangeText={onChangeNewSpecTitle}
-              placeholder="Feature or Epic title"
-              placeholderTextColor={theme.colors.foregroundMuted}
-            />
-            <Text style={styles.fieldLabel}>Acceptance Criteria (optional)</Text>
-            <TextInput
-              style={styles.input}
-              value={newSpecCriteria}
-              onChangeText={onChangeNewSpecCriteria}
-              placeholder="High-level acceptance criteria"
-              placeholderTextColor={theme.colors.foregroundMuted}
-            />
-            <Text style={styles.fieldLabel}>Spec Requirements (Shared with Supervisor)</Text>
-            {/* Let the multiline Spec Requirements editor grow to fill the remaining vertical height of the sidebar card. */}
-            <TextInput
-              style={[styles.input, { flex: 1, minHeight: 220, textAlignVertical: "top" }]}
-              value={newSpecContent}
-              onChangeText={onChangeNewSpecContent}
-              multiline
-              placeholder="Write the full feature specification..."
-              placeholderTextColor={theme.colors.foregroundMuted}
+            <View style={[styles.row, { justifyContent: "space-between", alignItems: "center" }]}>
+              <Text style={styles.sectionTitle}>Create New Spec Card</Text>
+              <View style={styles.row}>
+                <ActionButton
+                  styles={styles}
+                  label={isSpawningSpecAgent ? "Opening Agent..." : "Discuss with Agent"}
+                  accessibilityLabel="Spawn a dedicated Spec Agent to discuss and draft this Spec"
+                  disabled={isSpawningSpecAgent}
+                  onPress={() => onSpawnSpecAgent()}
+                />
+                <ActionButton
+                  styles={styles}
+                  tone="secondary"
+                  label="Cancel"
+                  accessibilityLabel="Cancel creating new Spec card"
+                  onPress={onToggleCreatingSpec}
+                />
+              </View>
+            </View>
+            {/* Allow toggling between raw Markdown text editing and formatted Markdown preview in Create New Spec Card. */}
+            <SpecMarkdownEditor
+              styles={styles}
+              theme={theme}
+              markdownContent={newSpecContent}
+              onChangeMarkdownContent={onChangeNewSpecContent}
+              initialMode="edit"
+              minHeight={260}
             />
             <ActionButton
               styles={styles}
               tone="primary"
               label={isSavingNewSpec ? "Saving..." : "Create Spec & Notify Supervisor"}
               accessibilityLabel="Create Spec card and notify Supervisor"
-              disabled={isSavingNewSpec || !newSpecTitle.trim() || !newSpecContent.trim()}
+              disabled={isSavingNewSpec || !newSpecContent.trim()}
               onPress={onSubmitNewSpec}
             />
           </View>
@@ -406,16 +367,49 @@ export function KanbanSidebar({
             ticket={selectedTicket}
             selection={selectedCard}
             selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
+            isSpawningSpecAgent={isSpawningSpecAgent}
+            onSpawnSpecAgent={onSpawnSpecAgent}
             onClose={() => onSelectCard(null)}
           />
         ) : (
-          <View style={[styles.card, { backgroundColor: theme.colors.surface2, gap: 6 }]}>
-            <Text style={[styles.bodyText, { fontWeight: "600" }]}>
-              Inspector & Spec Sidebar
-            </Text>
-            <Text style={styles.mutedText}>
-              Select any Spec, Brief, or Option card on the Kanban board to inspect or edit it here, or click "+ New Spec" to author a new Spec card.
-            </Text>
+          <View style={{ gap: 12 }}>
+            <View style={[styles.card, { backgroundColor: theme.colors.surface2, gap: 6 }]}>
+              <Text style={[styles.bodyText, { fontWeight: "600" }]}>
+                Inspector & Spec Sidebar
+              </Text>
+              <Text style={styles.mutedText}>
+                Select any Spec, Brief, or Option card on the Kanban board to inspect or edit it here, click "+ New Spec" to write manually, or click "+ Spec with Agent" to discuss and draft a Spec with an Agent.
+              </Text>
+            </View>
+            {/* Render the primary "+ New Spec" and "+ Spec with Agent" actions directly below the Inspector card, centered horizontally. */}
+            <View style={[styles.row, { justifyContent: "center" }]}>
+              {effectiveRepoPath ? (
+                <>
+                  <ActionButton
+                    styles={styles}
+                    tone="primary"
+                    label="+ New Spec"
+                    accessibilityLabel="Create a new Spec card manually in the sidebar"
+                    onPress={onToggleCreatingSpec}
+                  />
+                  <ActionButton
+                    styles={styles}
+                    label={isSpawningSpecAgent ? "Opening Agent..." : "+ Spec with Agent"}
+                    accessibilityLabel="Open a dedicated Spec Agent to discuss and create a Spec card"
+                    disabled={isSpawningSpecAgent}
+                    onPress={() => onSpawnSpecAgent()}
+                  />
+                </>
+              ) : null}
+              {activeProjectRun && onOpenSupervisor ? (
+                <ActionButton
+                  styles={styles}
+                  label="Open Supervisor Chat"
+                  accessibilityLabel={`Open Supervisor chat for ${activeProjectRun.title}`}
+                  onPress={() => onOpenSupervisor(activeProjectRun.supervisorAgentId)}
+                />
+              ) : null}
+            </View>
           </View>
         )}
       </ScrollView>

@@ -199,3 +199,17 @@ export const saveBoardSpecFromUiRpc = defineRpc({
     notifiedSupervisor: z.boolean(),
   }),
 });
+
+// Spawns a standalone normal Paseo agent connected to the project's Kanban board so the human can discuss and draft Specs in chat.
+export const spawnBoardSpecAgentRpc = defineRpc({
+  name: "slp.board.spawn_spec_agent",
+  input: z.object({
+    repoPath: z.string().trim().min(1),
+    runId: z.string().optional(),
+    ticketId: z.string().optional(),
+  }),
+  output: z.object({
+    agentId: z.string(),
+    workspaceId: z.string(),
+  }),
+});

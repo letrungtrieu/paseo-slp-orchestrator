@@ -5,6 +5,7 @@ import type { AgentRecord, Run } from "../../shared/state";
 import type { PeerKind } from "../../shared/project-prompts";
 import { isPipelineLeadRole } from "../../shared/roles";
 import { agentPeerKind } from "../pipeline/stage-shape";
+import { findStandaloneSpecAgentById } from "../pipeline/spec-agent";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
 import { isKiroProvider } from "../runtime/agent-gateway-helpers";
@@ -93,6 +94,27 @@ export async function handlePermissionRequest(
   if (answeredRequestIds.has(request.id)) return;
   const lookup = ctx.store.findAgent(agentId);
   if (!lookup) {
+    const standaloneSpecSession = findStandaloneSpecAgentById(agentId);
+    if (standaloneSpecSession) {
+      // Standalone Spec Agents operate read-only in their repository and are allowed to call slp-bus board tools.
+      answeredRequestIds.add(request.id);
+      const standaloneDecision = decidePermission(request, {
+        role: "supervisor",
+        agentCwd: standaloneSpecSession.repoPath,
+        writableScope: [],
+        pipelineId: null,
+        stageId: null,
+        stageActive: false,
+        archived: false,
+      });
+      try {
+        await ctx.gateway.respondToPermission(agentId, request.id, buildResponse(request, standaloneDecision));
+      } catch (respondError) {
+        answeredRequestIds.delete(request.id);
+        console.error("[slp] standalone Spec Agent permission response failed", respondError);
+      }
+      return;
+    }
     // Standalone kiro-cli sessions outside an SLP run also auto-accept permission prompts when ACP chooser prompts fire.
     if (!isKiroProvider(agentProvider ?? request.provider)) return;
     answeredRequestIds.add(request.id);

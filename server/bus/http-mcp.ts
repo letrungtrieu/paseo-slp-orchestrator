@@ -12,6 +12,9 @@ export interface BusCaller {
   role: SlpRole;
   projectRole?: string | null;
   taskId: string | null;
+  // Populated for standalone Spec Agents that operate on a repository's Kanban board outside any SLP Run.
+  repoPath?: string | null;
+  allowedTools?: readonly BusToolName[] | null;
 }
 
 export interface BusToolOutcome {
@@ -42,8 +45,9 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-function describeTools(role: SlpRole) {
-  return toolNamesForRole(role).map((toolName: BusToolName) => {
+function describeTools(caller: BusCaller) {
+  const authorizedToolNames = caller.allowedTools ?? toolNamesForRole(caller.role);
+  return authorizedToolNames.map((toolName: BusToolName) => {
     const toolDefinition = BUS_TOOL_DEFINITIONS[toolName];
     // io:"input" keeps defaulted fields optional, matching what a caller is allowed to omit
     const { $schema: _ignoredSchemaUri, ...inputSchema } = z.toJSONSchema(toolDefinition.input, {
@@ -80,8 +84,8 @@ async function handleRpc(
     case "ping":
       return respondWith({});
     case "tools/list":
-      // The list is built from the caller's role so an agent cannot even discover tools it may not call.
-      return respondWith({ tools: describeTools(caller.role) });
+      // The list is built from the caller's role (or explicit tool subset) so an agent only discovers tools it may call.
+      return respondWith({ tools: describeTools(caller) });
     case "tools/call": {
       const toolName = String(rpcRequest.params?.name ?? "");
       // Dispatch errors come back as isError content, not JSON-RPC errors, so the model sees the message and can correct its call.

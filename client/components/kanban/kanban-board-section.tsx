@@ -46,6 +46,18 @@ function resolveColumnAccentColor(theme: PluginTheme, column: BoardColumn): stri
   return theme.colors.foregroundMuted;
 }
 
+// Derives a concise Spec ticket title from the first non-empty line of the Spec Requirements text.
+function deriveSpecTitleFromContent(specText: string, fallbackTitle = "Product Spec"): string {
+  const firstMeaningfulLine = specText
+    .split(/\r?\n/)
+    .map((rawLine) => rawLine.replace(/^[#*\-\d.)\s]+/, "").trim())
+    .find((cleanedLine) => cleanedLine.length > 0);
+  if (!firstMeaningfulLine) return fallbackTitle;
+  return firstMeaningfulLine.length > 80
+    ? `${firstMeaningfulLine.slice(0, 77).trimEnd()}...`
+    : firstMeaningfulLine;
+}
+
 // Checks whether a given card matches the currently selected card state.
 function isCardSelected(
   currentSelection: KanbanCardSelection | null,
@@ -96,14 +108,12 @@ export function KanbanBoardSection({
     repoPath: effectiveRepoPath || null,
     runId: activeProjectRun?.id ?? selectedRunId ?? null,
   });
-  const { saveBoardSpec } = useBoardActions();
+  const { saveBoardSpec, spawnSpecAgent } = useBoardActions();
 
   // Default to "active_supervisor" so only the Spec, Brief, and Options of the currently active Supervisor are shown.
   const [selectedCard, setSelectedCard] = useState<KanbanCardSelection | null>(null);
   const [filterMode, setFilterMode] = useState<"active_supervisor" | "all" | string>("active_supervisor");
   const [isCreatingSpec, setIsCreatingSpec] = useState(false);
-  const [newSpecTitle, setNewSpecTitle] = useState("");
-  const [newSpecCriteria, setNewSpecCriteria] = useState("");
   const [newSpecContent, setNewSpecContent] = useState("");
 
   // Sidebar width and collapsed state allow the operator to drag-resize or collapse the sidebar independently of the board.
@@ -128,7 +138,9 @@ export function KanbanBoardSection({
     : null;
 
   const boardErrorMessage =
-    describeRpcError(boardQuery.error) ?? describeRpcError(saveBoardSpec.error);
+    describeRpcError(boardQuery.error) ??
+    describeRpcError(saveBoardSpec.error) ??
+    describeRpcError(spawnSpecAgent.error);
 
   // Selecting a card on the Kanban board opens its inspector inside the sidebar and exits the New Spec creation form.
   const handleToggleCardSelection = (nextSelection: KanbanCardSelection) => {
@@ -154,15 +166,20 @@ export function KanbanBoardSection({
   };
 
   const handleCreateNewSpecTicket = () => {
-    if (!effectiveRepoPath || !newSpecTitle.trim() || !newSpecContent.trim()) return;
+    const trimmedSpecContent = newSpecContent.trim();
+    if (!effectiveRepoPath || !trimmedSpecContent) return;
+    // Derive the ticket title from the first line of the Spec Requirements so the user only needs one input field.
+    const derivedSpecTitle = deriveSpecTitleFromContent(
+      trimmedSpecContent,
+      activeProjectRun?.title || "Product Spec",
+    );
     // Creating a Spec ticket from the sidebar stores Spec v1 and notifies the active Supervisor if a run is active.
     saveBoardSpec.mutate(
       {
         repoPath: effectiveRepoPath,
         runId: activeProjectRun?.id ?? selectedRunId ?? undefined,
-        title: newSpecTitle.trim(),
-        acceptanceCriteria: newSpecCriteria.trim() || undefined,
-        specContent: newSpecContent.trim(),
+        title: derivedSpecTitle,
+        specContent: trimmedSpecContent,
         summary: "Created Spec ticket on Kanban board",
       },
       {
@@ -170,9 +187,24 @@ export function KanbanBoardSection({
           setSelectedCard({ kind: "spec", ticketId: createdResponse.ticket.id });
           setIsCreatingSpec(false);
           setIsSidebarCollapsed(false);
-          setNewSpecTitle("");
-          setNewSpecCriteria("");
           setNewSpecContent("");
+        },
+      },
+    );
+  };
+
+  // Spawns a dedicated Read-Only Spec Agent connected to this repository's Kanban board and opens its chat view.
+  const handleSpawnSpecAgent = (targetTicketKey?: string) => {
+    if (!effectiveRepoPath) return;
+    spawnSpecAgent.mutate(
+      {
+        repoPath: effectiveRepoPath,
+        runId: activeProjectRun?.id ?? selectedRunId ?? undefined,
+        ticketId: targetTicketKey,
+      },
+      {
+        onSuccess: (spawnedResponse) => {
+          onOpenSupervisor?.(spawnedResponse.agentId);
         },
       },
     );
@@ -348,14 +380,12 @@ export function KanbanBoardSection({
         onSelectFilterMode={setFilterMode}
         isCreatingSpec={isCreatingSpec}
         onToggleCreatingSpec={handleToggleCreatingSpec}
-        newSpecTitle={newSpecTitle}
-        onChangeNewSpecTitle={setNewSpecTitle}
-        newSpecCriteria={newSpecCriteria}
-        onChangeNewSpecCriteria={setNewSpecCriteria}
         newSpecContent={newSpecContent}
         onChangeNewSpecContent={setNewSpecContent}
         isSavingNewSpec={saveBoardSpec.isPending}
         onSubmitNewSpec={handleCreateNewSpecTicket}
+        isSpawningSpecAgent={spawnSpecAgent.isPending}
+        onSpawnSpecAgent={handleSpawnSpecAgent}
         boardErrorMessage={boardErrorMessage}
         selectedTicket={selectedTicket}
         selectedCard={selectedCard}

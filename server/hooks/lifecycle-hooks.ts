@@ -7,6 +7,7 @@ import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
 import { isMasterLeadObligationActive } from "../pipeline/master-lead-obligations";
 import type { PipelineContext } from "../pipeline/context";
 import { handleAgentArchived } from "../pipeline/run-lifecycle";
+import { findStandaloneSpecAgentById } from "../pipeline/spec-agent";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { isQaPhaseActive } from "../pipeline/qa/qa-phase-state";
 import { nudgeReminder } from "../prompts/messages";
@@ -222,7 +223,9 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
       server.before("agent.session_open", async ({ request: sessionOpenRequest }, hookContext) => {
         ctx.holder.capture(hookContext.paseo);
         const callerLookup = ctx.store.findAgent(sessionOpenRequest.agentId);
-        if (!callerLookup) return undefined;
+        const standaloneSpecSession = callerLookup ? null : findStandaloneSpecAgentById(sessionOpenRequest.agentId);
+        const resolvedAgentToken = callerLookup?.agentRecord.token ?? standaloneSpecSession?.token ?? null;
+        if (!resolvedAgentToken) return undefined;
         if (ctx.stateDirectory && sessionOpenRequest.provider.startsWith("antigravity")) {
           try {
             ensureAntigravityMcpBridge(ctx.stateDirectory);
@@ -231,7 +234,7 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
           }
         }
         const agentBusUrl = typeof ctx.gateway.busEndpointForToken === "function"
-          ? await ctx.gateway.busEndpointForToken(callerLookup.agentRecord.token)
+          ? await ctx.gateway.busEndpointForToken(resolvedAgentToken)
           : null;
         return {
           ...sessionOpenRequest,
@@ -240,7 +243,7 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
             // Ensure Antigravity child MCP processes inherit ELECTRON_RUN_AS_NODE=1 when invoking Paseo.bin.
             ELECTRON_RUN_AS_NODE: "1",
             SLP_AGENT_ID: sessionOpenRequest.agentId,
-            SLP_AGENT_TOKEN: callerLookup.agentRecord.token,
+            SLP_AGENT_TOKEN: resolvedAgentToken,
             ...(agentBusUrl ? { SLP_BUS_URL: agentBusUrl } : {}),
             ...(ctx.stateDirectory ? { SLP_HOME: ctx.stateDirectory } : {}),
           },
