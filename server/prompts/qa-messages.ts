@@ -26,7 +26,7 @@ function featureLeadRoster(featureLeads: ReadonlyArray<SiblingLeadSummary>): str
 export function qaLeadPreparationBriefing(context: QaLeadBriefingContext): string {
   return [
     "The Supervisor delegated this run. You are its QA Lead.",
-    `### Your QA Worktree\n- **Worktree**: \`${context.qaWorktreePath}\` (branch \`${context.qaBranch}\`)\n- Every feature Lead merges its finished branch into this branch with slp_finalize_pipeline and resolves merge conflicts before you start.`,
+    `### Your QA Checkout\n- **Checkout**: \`${context.qaWorktreePath}\` (branch \`${context.qaBranch}\`)\n- Every feature Lead merges its finished branch into this branch with slp_finalize_pipeline and resolves merge conflicts before you start.`,
     `### Overall Acceptance Criteria\n${context.acceptanceCriteria}`,
     context.sharedContext ? `### Shared Cross-Feature Context\n${context.sharedContext}` : "",
     `### Feature Leads Building in Parallel (reachable via slp_ask / slp_notify)\n${featureLeadRoster(context.featureLeads)}`,
@@ -60,13 +60,13 @@ export function qaHandoverBriefing(run: Run, mergedFeaturePipelines: readonly Pi
     [
       "## Next Action for QA Lead",
       "1. Inspect the merged QA branch and the hand-off items above.",
-      "2. Call slp_define_pipeline now with your verify stage(s) (omit worktree; QA pipelines always run in the QA worktree): QA peers grade the brief criteria and product spec scenarios, plus at most one developer peer per stage who fixes when you ask.",
+      "2. Call slp_define_pipeline now with your verify stage(s) (omit worktree; QA pipelines always run in the QA checkout): QA peers grade the brief criteria and product spec scenarios, plus at most one developer peer per stage who fixes when you ask.",
       "3. Decide from the scorecards, approve the last stage, close it with slp_finalize_pipeline, then call slp_report with the final scorecard (pass/fail per criterion and scenario).",
     ].join("\n"),
   ].join("\n\n");
 }
 
-// Supervisor rework returns to the QA Lead, who reuses the QA worktree for fix and re-verification stages.
+// Supervisor rework returns to the QA Lead, who reuses the QA checkout for fix and re-verification stages.
 export function qaReworkNotice(feedback: string, run: Run): string {
   return [
     `The Supervisor requested rework of the verified result on the QA branch \`${run.integrationBranch}\` (\`${run.devCwd}\`):`,

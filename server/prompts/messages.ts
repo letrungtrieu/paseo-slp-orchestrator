@@ -31,14 +31,14 @@ export interface DelegatedLeadContext {
 }
 
 export function delegationMessage(acceptanceCriteria: string, context?: DelegatedLeadContext): string {
-  // Each Lead runs inside its dedicated feature worktree and receives the full roster of sibling Leads running in parallel.
+  // Each Lead runs inside its assigned checkout, which is a feature worktree only when the run keeps worktrees on.
   const effectiveCriteria = context?.featureCriteria ?? acceptanceCriteria;
   const messageSections = [
     "The Supervisor delegated this feature to you as Lead.",
     context?.featureName
-      ? `### Your Assigned Feature: ${context.featureName}\n- **Lead Agent ID**: \`${context.leadAgentId ?? "self"}\`\n- **Dedicated Worktree**: \`${context.worktreePath ?? "assigned"}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
+      ? `### Your Assigned Feature: ${context.featureName}\n- **Lead Agent ID**: \`${context.leadAgentId ?? "self"}\`\n- **Assigned Checkout**: \`${context.worktreePath ?? "assigned"}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
       : context?.worktreePath
-        ? `### Your Dedicated Worktree\n- **Worktree**: \`${context.worktreePath}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
+        ? `### Your Assigned Checkout\n- **Checkout**: \`${context.worktreePath}\`${context.branch ? ` (branch \`${context.branch}\`)` : ""}`
         : "",
     `### Acceptance Criteria\n${effectiveCriteria}`,
     // The human approved this spec, so screens and interactions are a contract rather than a suggestion.
@@ -77,7 +77,7 @@ export function delegationMessage(acceptanceCriteria: string, context?: Delegate
 
   messageSections.push(
     // Remind Leads in pre-existing projects of the Kanban brief and peer-pause tools without overriding their .slp/LEAD.md workflow.
-    "Follow your configured .slp/LEAD.md workflow and available .slp peer roles to define your pipeline stages with slp_define_pipeline. Every stage peer will run in your worktree and fork directly from your session. When implementation/merge conflicts or a Supervisor Spec diff notification (slp_board_notify_lead) requires revising your Brief, call slp_pause_peers to pause active stage peers, call slp_board_update_brief to update the Brief bullets with a clear reason, and call slp_resume_peers to resume your peers on the updated Brief. Once defined, end your turn.",
+    "Follow your configured .slp/LEAD.md workflow and available .slp peer roles to define your pipeline stages with slp_define_pipeline. Every stage peer will run in your assigned checkout and fork directly from your session. When implementation/merge conflicts or a Supervisor Spec diff notification (slp_board_notify_lead) requires revising your Brief, call slp_pause_peers to pause active stage peers, call slp_board_update_brief to update the Brief bullets with a clear reason, and call slp_resume_peers to resume your peers on the updated Brief. Once defined, end your turn.",
   );
   return messageSections.join("\n\n");
 }
@@ -93,9 +93,9 @@ export function reworkNotice(feedback: string): string {
 }
 
 const TOP_LEVEL_NUDGE_GUIDANCE: Readonly<Record<string, string>> = {
-  slp_define_pipeline: "Inspect slp_get_run, create a pipeline worktree with slp_create_worktree if needed, and call slp_define_pipeline.",
+  slp_define_pipeline: "Inspect slp_get_run, then call slp_define_pipeline; it attaches the pipeline to its checkout for you.",
   slp_resume_pipeline: "Inspect slp_get_pipeline for the paused pipeline and call slp_resume_pipeline with your recovery decision.",
-  slp_finalize_pipeline: "Inspect slp_get_pipeline for the completed pipeline, verify its worktree (resolving any conflicts by consulting Peers or sibling Forked Leads via slp_ask), and call slp_finalize_pipeline.",
+  slp_finalize_pipeline: "Inspect slp_get_pipeline for the completed pipeline, verify its checkout (resolving any conflicts by consulting Peers or sibling Forked Leads via slp_ask), and call slp_finalize_pipeline.",
   slp_report: "Inspect slp_list_pipelines, verify the integrated branch, and call slp_report to hand the result to the Supervisor.",
   slp_present_to_manager: "Inspect slp_list_pipelines, slp_get_pipeline and git diff, then call slp_present_to_manager if accepted or slp_request_rework if changes are needed.",
 };

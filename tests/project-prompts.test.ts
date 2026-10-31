@@ -193,3 +193,32 @@ describe("project system prompt composition", () => {
   });
 });
 
+describe("checkout policy in system prompts", () => {
+  const worktreeFreeRun = { spawnWorktrees: false, repoPath: "/repo/app", baseBranch: "main" };
+
+  it("states the main checkout before the project workflow when the run has worktrees off", () => {
+    const leadPrompt = systemPromptFor("master_lead", null, undefined, undefined, worktreeFreeRun);
+
+    expect(leadPrompt).toContain("CHECKOUT POLICY FOR THIS RUN: git worktrees are off.");
+    expect(leadPrompt).toContain("main checkout at /repo/app on branch main");
+    // Older .slp workflows can still ask for worktrees, so the override must be read before them.
+    expect(leadPrompt.indexOf("CHECKOUT POLICY")).toBeLessThan(leadPrompt.indexOf("PROJECT WORKFLOW"));
+  });
+
+  it("leaves the prompt untouched when the run keeps worktrees on", () => {
+    const worktreeRun = { ...worktreeFreeRun, spawnWorktrees: true };
+
+    expect(systemPromptFor("master_lead", null, undefined, undefined, worktreeRun)).not.toContain("CHECKOUT POLICY");
+  });
+
+  it("adds the shared-checkout delegation rule to the Supervisor only when worktrees are off", () => {
+    const supervisorPrompt = systemPromptFor("supervisor", null, undefined, undefined, worktreeFreeRun);
+
+    // Features on one checkout can overlap without any merge step noticing, so the Supervisor's split carries the scope rule.
+    expect(supervisorPrompt).toContain("SHARED CHECKOUT DELEGATION RULE");
+    expect(supervisorPrompt.indexOf("SHARED CHECKOUT DELEGATION RULE")).toBeLessThan(supervisorPrompt.indexOf("PROJECT WORKFLOW"));
+    // Leads and peers receive the checkout policy but not the Supervisor's delegation rule.
+    expect(systemPromptFor("master_lead", null, undefined, undefined, worktreeFreeRun)).not.toContain("SHARED CHECKOUT DELEGATION RULE");
+    expect(systemPromptFor("supervisor", null, undefined, undefined, { ...worktreeFreeRun, spawnWorktrees: true })).not.toContain("SHARED CHECKOUT DELEGATION RULE");
+  });
+});

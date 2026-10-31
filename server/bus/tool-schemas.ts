@@ -18,10 +18,10 @@ import {
 const pipelineIdField = z.string().trim().min(1).describe("Id of the target pipeline");
 
 export const BUS_TOOL_DEFINITIONS = {
-  // Each Lead defines the stage pipeline for its dedicated feature worktree; the QA Lead defines QA pipelines on the QA branch.
+  // Each Lead defines the stage pipeline for its assigned checkout; the QA Lead defines QA pipelines on the QA branch.
   slp_define_pipeline: {
     roles: ["master_lead", "qa_lead"],
-    description: "Define the stage pipeline(s) for this Lead's feature worktree ([planning with advisor peers?] -> [mockup with advisor/developer peers?] -> one implement stage with exactly one developer peer; pass brief when there is no planning or mockup stage), or the QA Lead's verification pipeline on the QA branch (verify stages: QA peers grade, at most one developer fixes).",
+    description: "Define the stage pipeline(s) for this Lead's assigned checkout ([planning with advisor peers?] -> [mockup with advisor/developer peers?] -> one implement stage with exactly one developer peer; pass brief when there is no planning or mockup stage), or the QA Lead's verification pipeline on the QA branch (verify stages: QA peers grade, at most one developer fixes).",
     input: PipelineEnvelopeSchema,
   },
   slp_list_pipelines: {
@@ -36,7 +36,7 @@ export const BUS_TOOL_DEFINITIONS = {
   },
   slp_create_worktree: {
     roles: ["master_lead"],
-    description: "Create a worktree for the current run or pipeline and return its path and branch.",
+    description: "Create a git worktree for a pipeline you are about to define and return its path and branch. When the run has worktrees disabled it creates nothing and returns the main checkout on baseBranch.",
     input: z.object({ name: z.string().trim().min(1) }),
   },
   // A feature Lead merges its completed branch into the QA branch; the QA Lead closes its QA pipeline in place.
@@ -113,10 +113,10 @@ export const BUS_TOOL_DEFINITIONS = {
     input: z.object({ reason: z.string().trim().min(1) }),
   },
   // Supervisor lifecycle tools stay separate from stage coordination so only the Supervisor can
-  // decompose features into Lead worktrees and communicate acceptance decisions to the human manager.
+  // decompose features into Lead checkouts and communicate acceptance decisions to the human manager.
   slp_delegate: {
     roles: ["supervisor"],
-    description: "Delegate 1 or N parallel features/tasks to dedicated Lead agents in isolated worktrees with full cross-Lead awareness. Every feature needs the human-approved productSpec (screens, states, Given/When/Then interactions).",
+    description: "Delegate 1 or N parallel features/tasks to dedicated Lead agents, each on its own checkout (an isolated worktree unless the run disables worktrees), with full cross-Lead awareness. Every feature needs the human-approved productSpec (screens, states, Given/When/Then interactions).",
     input: DelegationSubmissionSchema,
   },
   slp_request_rework: {

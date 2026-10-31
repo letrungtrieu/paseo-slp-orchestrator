@@ -19,6 +19,36 @@ export interface StagePromptContext {
   history?: string[];
 }
 
+// Run-level checkout facts from the run's orchestration snapshot; only a worktree-free run needs an explicit statement.
+export interface CheckoutPolicy {
+  spawnWorktrees: boolean;
+  repoPath: string;
+  baseBranch: string;
+}
+
+function checkoutPolicySection(checkoutPolicy: CheckoutPolicy): string {
+  // .slp workflows are user-owned and can predate worktree-free runs, so the engine restates where agents work and says it wins.
+  return [
+    `CHECKOUT POLICY FOR THIS RUN: git worktrees are off. Every agent works directly in the main checkout at ${checkoutPolicy.repoPath} on branch ${checkoutPolicy.baseBranch}.`,
+    "Do not create, add, enter or switch to a git worktree or a new branch (no `git worktree add`, no EnterWorktree, no slp/* branch). Do not call slp_create_worktree to obtain a separate checkout: it returns this main checkout and creates nothing.",
+    "This policy overrides any workflow text below that asks for a worktree; read \"worktree\" there as this checkout.",
+  ].join("\n");
+}
+
+// Worktree-free runs put every feature on one checkout and branch, so the Supervisor's split is the only thing keeping features apart.
+function sharedCheckoutDelegationSection(): string {
+  return [
+    "SHARED CHECKOUT DELEGATION RULE (this run has worktrees off, so every delegated feature builds in the same checkout and branch):",
+    "- Before you call slp_delegate with more than one task, read the code (read-only) and work out which files, modules, screens and APIs each task would change.",
+    "- Give every task a write scope in its acceptanceCriteria: the paths or globs it may change (for example src/billing/**), and the shared files it must not change unless it is the single task that owns them (package manifests, lockfiles, migrations, global config and routing, shared types, generated files, global styles).",
+    "- Keep parallel tasks disjoint. If two tasks would change the same file or module, or one changes a contract the other uses, merge them into one task, or deliver them in sequence: delegate the second only after the first cycle has completed.",
+    "- Name one owner for each shared contract (API, schema, type) in sharedContext, and say which tasks only consume it.",
+    "- Leave tasks[].worktree empty: this run has no separate checkouts.",
+    "- Include the task split and each task's scope when you present the Spec to the human.",
+    "Nothing isolates these features: overlapping edits land in the same working tree with no merge step to flag them, and the engine does not stop a peer from editing files outside its feature. The scope you write is the only guard.",
+  ].join("\n");
+}
+
 function projectDefinition(
   role: SlpRole,
   projectPrompts: ProjectPromptConfig,
@@ -46,13 +76,20 @@ export function systemPromptFor(
   configuration?: ProjectPromptConfig | null,
   projectRoleId?: string,
   stage?: StagePromptContext,
+  checkoutPolicy?: CheckoutPolicy,
 ): string {
   const projectPrompts = configuration ?? defaultProjectPrompts();
   const selectedRoleDefinition = projectDefinition(role, projectPrompts, projectRoleId);
   const configuredWorkflow = selectedRoleDefinition.workflow || DEFAULT_WORKFLOWS[role];
-  // Do not wrap or override .slp workflows with hardcoded rules so user edits in .slp/*.md have full control.
+  // Workflows are injected untouched so user edits in .slp/*.md keep full control; the engine adds only run-level checkout rules, since it alone decides where agents run.
+  // Only a worktree-free run puts every feature on one checkout, so only that run gets the shared-checkout rules.
+  const sharedCheckoutPolicy = checkoutPolicy && !checkoutPolicy.spawnWorktrees ? checkoutPolicy : null;
   const promptSections = [
     `PROJECT ROLE: ${selectedRoleDefinition.name} (${selectedRoleDefinition.role})\n${selectedRoleDefinition.description}\nSOURCE: ${selectedRoleDefinition.sourcePath}`,
+    // Placed before the workflow so the rules are read first; runs that keep worktrees get no extra text.
+    sharedCheckoutPolicy ? checkoutPolicySection(sharedCheckoutPolicy) : "",
+    // Only the Supervisor splits work into features, so only it needs the scope rule.
+    role === "supervisor" && sharedCheckoutPolicy ? sharedCheckoutDelegationSection() : "",
     `PROJECT WORKFLOW:\n${configuredWorkflow}`,
   ];
   if (isPipelineLeadRole(role)) {

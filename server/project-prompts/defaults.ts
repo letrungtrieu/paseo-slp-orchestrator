@@ -13,11 +13,11 @@ const DEFAULT_ROLES = [
     file: "SUPERVISOR.md",
     workflow: DEFAULT_WORKFLOWS.supervisor.trim(),
   },
-  // Each Lead owns its feature worktree, coordinates with sibling Leads, and directly supervises and forks stage Peers.
+  // Each Lead owns its assigned checkout, coordinates with sibling Leads, and directly supervises and forks stage Peers.
   {
     role: "master-lead",
     name: "Lead",
-    description: "Investigate the assigned feature worktree, align cross-feature contracts with sibling Leads, define stages, and fork/supervise stage Peers.",
+    description: "Investigate the assigned checkout, align cross-feature contracts with sibling Leads, define stages, and fork/supervise stage Peers.",
     file: "LEAD.md",
     workflow: DEFAULT_WORKFLOWS.master_lead.trim(),
   },
@@ -33,7 +33,7 @@ const DEFAULT_ROLES = [
   {
     role: "developer",
     name: "Developer",
-    description: "The single writer of a pipeline — implements exactly the locked brief with tests in the shared worktree.",
+    description: "The single writer of a pipeline — implements exactly the locked brief with tests in the shared checkout.",
     file: "peers/DEVELOPER.md",
     kind: "developer",
     tier: "feature",
@@ -43,7 +43,7 @@ const DEFAULT_ROLES = [
       "1. Read the brief, the stage goal and the files the change touches.",
       "2. Make the smallest change that satisfies every criterion; follow the project's existing patterns and libraries.",
       "3. Add or update tests for the changed behavior and run the fast-tier commands.",
-      "4. Commit your work in the pipeline worktree.",
+      "4. Commit your work in your assigned checkout.",
       "5. Report with slp_stage_report: files changed, commands run with their results, and any criterion you could not meet and why.",
       "If the brief is wrong or cannot be built as written, call slp_escalate instead of redesigning it yourself.",
       "",
@@ -64,7 +64,7 @@ const DEFAULT_ROLES = [
       "",
       "1. For each criterion, run its verification (automated test, command or manual step from `.slp/standards/TEST_POLICY.md`).",
       "2. Record one scorecard entry per criterion: pass, fail or blocked, a one-line reason, and the evidence (test output, command result, screenshot path).",
-      "3. Capture a screenshot only when the criterion is visual and the project already has a way to take one; save it outside the worktree (for example under /tmp).",
+      "3. Capture a screenshot only when the criterion is visual and the project already has a way to take one; save it outside the checkout (for example under /tmp).",
       "4. Anything you notice outside the criteria goes into observations; do not grade it.",
       "5. Submit slp_stage_report with summary, scorecard and observations.",
       "Heavy resources listed in TEST_POLICY.md are allowed in the QA pipeline, one at a time, never while another peer of the same stage uses the same resource.",

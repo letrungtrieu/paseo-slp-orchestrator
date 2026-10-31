@@ -228,7 +228,7 @@ export async function requestRework(ctx: PipelineContext, runId: string, feedbac
     );
     // A rework request is a new pipeline assignment, so its message belongs to the same durable transition.
     mutableRun.mailbox.push(stageMail(activeMasterLeadId,
-      `${reworkNotice(feedback)}\nYour fresh worktree is \`${workspace.cwd}\` (branch \`${workspace.branch}\`). Define a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
+      `${reworkNotice(feedback)}\nYour checkout is \`${workspace.cwd}\` (branch \`${workspace.branch}\`). Define a fresh pipeline with slp_define_pipeline; do not reopen an integrated pipeline.`, "slp_define_pipeline"));
   });
   return "Sent back to the Lead. End your turn while it defines a fresh pipeline.";
 }

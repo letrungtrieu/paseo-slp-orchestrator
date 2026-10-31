@@ -2,6 +2,7 @@
 // private bus identity, prompt them, read their live status and archive them.
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
+import { runOrchestration } from "../../shared/orchestration";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import type { AgentRecord } from "../../shared/state";
 import { toolNamesForRole } from "../bus/tool-schemas";
@@ -211,6 +212,7 @@ export class AgentGateway {
       const openAgentWithSettings = async (activeModelSettings: typeof modelSettings): Promise<void> => {
         const selectedProviderId = activeModelSettings.provider.split("/", 1)[0];
         const providerFeatureValues = defaultFeatureValuesForProvider(activeModelSettings.provider);
+        const runSnapshot = this.store.require(spec.runId);
         const baseSessionConfig = {
           provider: activeModelSettings.provider,
           modeId: activeModelSettings.permissionModeId ?? permissionModeFor(activeModelSettings.provider),
@@ -218,9 +220,15 @@ export class AgentGateway {
           ...(providerFeatureValues ? { featureValues: providerFeatureValues } : {}),
           systemPrompt: systemPromptFor(
             spec.role,
-            this.store.require(spec.runId).promptConfig,
+            runSnapshot.promptConfig,
             spec.projectRole,
             spec.stageContext,
+            // The checkout is engine state, so the prompt states it rather than relying on each .slp workflow to match the run's setting.
+            {
+              spawnWorktrees: runOrchestration(runSnapshot).spawnWorktrees,
+              repoPath: runSnapshot.repoPath,
+              baseBranch: runSnapshot.baseBranch,
+            },
           ),
           mcpServers: {
             [BUS_SERVER_NAME]: {

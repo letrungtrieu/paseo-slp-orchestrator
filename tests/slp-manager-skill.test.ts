@@ -182,6 +182,22 @@ describe("slp-manager project skill provisioning", () => {
     expect(skillMarkdown).toContain("Delete the file only after the human confirms");
   });
 
+  // The worktree toggle is engine state, so the skill must name it, and older Lead files must drop their self-created worktree steps.
+  it("documents the worktree run setting and migrates away from Leads creating worktrees themselves", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    expect(skillMarkdown).toContain("`spawnWorktrees`");
+    expect(skillMarkdown).toContain("every agent works on the base branch in the main checkout");
+    expect(skillMarkdown).toContain("remove steps that create worktrees yourself");
+  });
+
+  // Without worktrees the Supervisor's split is the only guard, so the skill must say how to split and that the engine does not enforce it.
+  it("tells the Supervisor to keep parallel tasks on disjoint write scopes when worktrees are off", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    expect(skillMarkdown).toContain("shared-checkout delegation rule");
+    expect(skillMarkdown).toContain("disjoint write scopes");
+    expect(skillMarkdown).toContain("Nothing in the engine enforces the scope");
+  });
+
   // Every template an agent copies must load in the engine and carry the kind-specific protocol it relies on.
   it("ships developer, advisor and QA grader templates that parse with the kind and protocol the engine enforces", () => {
     const peerTemplatesText = slpManagerSkillFiles().find((skillFile) => skillFile.relativePath === "references/PEER_TEMPLATES.md")!.content;
