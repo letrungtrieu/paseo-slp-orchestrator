@@ -1,6 +1,6 @@
 // Spawns the standalone Product Agent (outside any SLP Run) that shapes a feature's mockup and Spec with the human.
 import { randomBytes, randomUUID } from "node:crypto";
-import { MOCKUP_ROOT, type BoardTicket } from "../../shared/board";
+import { describeSpecWriteBlocker, MOCKUP_ROOT, specNeedsMockupReview, type BoardTicket } from "../../shared/board";
 import { BUS_SERVER_NAME } from "../../shared/roles";
 import type { BusToolName } from "../bus/tool-schemas";
 import { assertGitRepository } from "../git/git";
@@ -85,15 +85,33 @@ const STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT = [
   "You are the Product Agent. You help the human turn an idea into an approved mockup and then a Product Spec, in Vietnamese, before any SLP Run exists.",
   `- Board access: MCP server "${BUS_SERVER_NAME}" (\`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`slp_board_save_spec\`, \`slp_board_set_mockup\`).`,
   `- Mockup first: for anything with a UI, build the idea as an interactive mockup and refine it with the human before writing a Spec. Features without a UI skip the mockup.`,
-  `- Layout: \`${MOCKUP_ROOT}/<feature>.html\` is one file per feature; \`${MOCKUP_ROOT}/core/core.css\` and \`${MOCKUP_ROOT}/core/core.js\` hold the shared style and logic; \`${MOCKUP_ROOT}/assets/\` holds shared images. Create core from the project's real design tokens the first time it is missing.`,
-  "- Prefer changing the feature file. Change core only for something truly shared, and tell the human because it affects every other mockup.",
-  "- Load core with plain `<link rel=\"stylesheet\">` and `<script src>` tags. The preview inlines those tags only, so ES module `import` statements between files will not run.",
+  `- Layout: \`${MOCKUP_ROOT}/<feature>.html\` is only an index. It holds the markup and loads files with plain \`<link rel="stylesheet">\` and \`<script src>\` tags. Never write JavaScript or CSS inline in it, because \`slp_board_set_mockup\` refuses an index that has inline code.`,
+  `- Feature code: \`${MOCKUP_ROOT}/features/<feature>/\` holds that feature's own \`.js\` and \`.css\` files, split by concern (for example \`cart.js\`, \`checkout.css\`). Put all of a feature's behavior there.`,
+  `- Shared code: \`${MOCKUP_ROOT}/core/\` holds the style and logic every mockup uses (\`core.css\`, \`core.js\`), and \`${MOCKUP_ROOT}/assets/\` holds shared images. Create core from the project's real design tokens the first time it is missing.`,
+  "- Change core only for something truly shared, and tell the human because it affects every other mockup. Prefer editing the feature's own files.",
+  "- Load every file with plain tags, because the preview inlines only those. ES module `import` statements between files will not run.",
   `- You may write only inside \`${MOCKUP_ROOT}/\`. Everything else in the repository is read-only, so read the real screens and terminology but never edit source files.`,
   "- After each meaningful mockup change, call `slp_board_set_mockup({ ticketId?, title?, file, summary })` so the card and preview stay current. That resets any approval and clears notes you have addressed.",
   `- Approval belongs to the human, through the Approve button on the board. It requires \`${MOCKUP_ROOT}\` to be committed. Commit or push only when the human asks, and stage only paths under \`${MOCKUP_ROOT}/\`.`,
-  "- Once a mockup is approved, write a thin Spec with `slp_board_save_spec({ ticketId, spec, summary })`: reference the mockup file for the UI and record only what it cannot show (business rules, data, permissions, edge cases, out of scope). Never restate the UI in prose, because that duplicates the mockup.",
+  "- The Spec depends on the mockup. While the mockup is a draft, `slp_board_save_spec` is refused for that ticket, even to keep an existing Spec in step with your edits. Change only the mockup and do not look for a way around the refusal.",
+  "- Approval starts the Spec work, and the engine tells you which kind. With no Spec yet, write a thin one with `slp_board_save_spec({ ticketId, spec, summary })`: reference the mockup file for the UI and record only what it cannot show (business rules, data, permissions, edge cases, out of scope). Never restate the UI in prose, because that duplicates the mockup.",
+  "- When a mockup was edited after approval and then approved again, the Spec exists already: review it against the mockup. Save a revised Spec if something changed, or save the same text again to confirm it still matches. Until you save, the ticket cannot start a Run.",
   "- Without a mockup, write the Spec in full: 1. Screens / surfaces, 2. States, 3. Interactions Given/When/Then, 4. Business rules & data, 5. Out of scope.",
 ].join("\n");
+
+// What the Product Agent owes the Spec once the human approves the mockup: write it the first time, review it after a re-approval.
+export function buildSpecWorkPrompt(ticket: BoardTicket): string | null {
+  if (ticket.mockup?.status !== "approved") return null;
+  const approvedMockupLabel = `\`${ticket.mockup.file}\` tại commit \`${ticket.mockup.approvedCommit ?? ""}\``;
+  const saveSpecCall = `\`slp_board_save_spec({ ticketId: "${ticket.ticketKey}", spec: "...", summary: "..." })\``;
+  if (ticket.currentSpecRev < 1) {
+    return `Mockup ${approvedMockupLabel} đã được chốt. Hãy soạn Spec mỏng và lưu bằng ${saveSpecCall}.`;
+  }
+  if (specNeedsMockupReview(ticket)) {
+    return `Mockup ${approvedMockupLabel} đã được chốt lại sau khi chỉnh sửa. Hãy rà soát Spec hiện tại (\`v${ticket.currentSpecRev}\`) so với mockup này, rồi lưu bằng ${saveSpecCall}: bản sửa nếu có điểm khác, hoặc lưu lại nguyên văn để xác nhận Spec vẫn đúng.`;
+  }
+  return null;
+}
 
 // Builds the initial user-facing prompt, resuming from whatever state the ticket has reached.
 function buildStandaloneProductKickoffPrompt(targetTicket: BoardTicket | null): string {
@@ -117,9 +135,12 @@ function buildStandaloneProductKickoffPrompt(targetTicket: BoardTicket | null): 
       ? `Nội dung Spec hiện tại (\`v${targetTicket.currentSpecRev}\`):\n\n${latestSpecRevision.content}`
       : "",
     openNotes.length > 0 ? `Góp ý mình vừa gửi cho mockup:\n\n${openNotes.join("\n\n")}` : "",
-    mockupState?.status === "approved" && !latestSpecRevision
-      ? `Mockup đã chốt, hãy soạn Spec mỏng và lưu bằng \`slp_board_save_spec({ ticketId: "${targetTicket.ticketKey}", spec: "...", summary: "..." })\`.`
-      : "Hãy tóm tắt ngắn gọn trạng thái hiện tại rồi làm tiếp theo góp ý, hoặc hỏi mình muốn chỉnh điểm nào.",
+    // A locked Spec is stated up front so the agent does not spend a turn trying to keep it in step with the draft.
+    describeSpecWriteBlocker(targetTicket) && latestSpecRevision
+      ? "Mockup còn là bản nháp nên Spec đang bị khóa: chỉ sửa mockup, Spec sẽ được rà soát sau khi mình duyệt lại."
+      : "",
+    buildSpecWorkPrompt(targetTicket)
+      ?? "Hãy tóm tắt ngắn gọn trạng thái hiện tại rồi làm tiếp theo góp ý, hoặc hỏi mình muốn chỉnh điểm nào.",
   ]
     .filter(Boolean)
     .join("\n\n");

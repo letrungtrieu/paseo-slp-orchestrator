@@ -2,6 +2,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { migrateBoardPayloadsToRelations } from "./board-relations-migration";
 
 export function transaction<Outcome>(database: DatabaseSync, operation: () => Outcome): Outcome {
   // Taking the write lock first makes a state change and its task/report rows one durable decision.
@@ -16,7 +17,7 @@ export function transaction<Outcome>(database: DatabaseSync, operation: () => Ou
   }
 }
 
-const LATEST_SCHEMA_VERSION = 3;
+const LATEST_SCHEMA_VERSION = 4;
 
 // Peer questions get a relational table of their own: every ask/answer is audited, and rewriting the
 // whole Run payload for each exchange would make the synchronous write grow with the conversation.
@@ -63,6 +64,45 @@ const BOARD_TICKETS_SCHEMA = `
   PRAGMA user_version = 3;
 `;
 
+// A ticket's dependencies are tables, not JSON: a ticket has at most one mockup, a Spec depends on that mockup
+// (one to one), and every Brief revision depends on the Spec it was derived from (one Spec, many Briefs).
+const BOARD_RELATIONS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS board_mockups (
+    ticket_id TEXT PRIMARY KEY REFERENCES board_tickets(ticket_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('draft', 'approved')),
+    approved_commit TEXT,
+    updated_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS board_specs (
+    ticket_id TEXT PRIMARY KEY REFERENCES board_tickets(ticket_id) ON DELETE CASCADE,
+    mockup_ticket_id TEXT UNIQUE REFERENCES board_mockups(ticket_id),
+    -- Approved mockup commit this Spec was last written or reviewed against; null when it never matched one.
+    reviewed_mockup_commit TEXT,
+    updated_at TEXT NOT NULL,
+    CHECK (mockup_ticket_id IS NULL OR mockup_ticket_id = ticket_id)
+  );
+  CREATE TABLE IF NOT EXISTS board_spec_revisions (
+    ticket_id TEXT NOT NULL REFERENCES board_specs(ticket_id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL CHECK (rev >= 1),
+    author TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content TEXT NOT NULL,
+    diff TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (ticket_id, rev)
+  );
+  CREATE TABLE IF NOT EXISTS board_brief_revisions (
+    ticket_id TEXT NOT NULL REFERENCES board_specs(ticket_id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL CHECK (rev >= 1),
+    spec_rev INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (ticket_id, rev)
+  );
+  PRAGMA user_version = 4;
+`;
+
 export function openDatabase(databasePath: string): DatabaseSync {
   if (databasePath !== ":memory:") mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
   const database = new DatabaseSync(databasePath);
@@ -103,6 +143,13 @@ export function openDatabase(databasePath: string): DatabaseSync {
     if (schemaVersion < 2) transaction(database, () => database.exec(PEER_QUESTIONS_SCHEMA));
     // Upgrade existing v2 databases and fresh databases to v3 with the project-scoped board_tickets table.
     if (schemaVersion < 3) transaction(database, () => database.exec(BOARD_TICKETS_SCHEMA));
+    // v4 splits each stored ticket payload into the mockup, Spec and Brief tables in the same transaction as their creation.
+    if (schemaVersion < 4) {
+      transaction(database, () => {
+        database.exec(BOARD_RELATIONS_SCHEMA);
+        migrateBoardPayloadsToRelations(database);
+      });
+    }
     return database;
   } catch (databaseError) {
     // Failed initialization must release the handle so the next reload can repair or retry it.

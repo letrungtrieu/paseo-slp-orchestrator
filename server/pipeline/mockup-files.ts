@@ -1,5 +1,5 @@
 // Path rules and git checks for the project's single `.slp/mockup` source, with HTML preview bundling re-exported.
-import { stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { posix, resolve } from "node:path";
 import { MOCKUP_ROOT } from "../../shared/board";
 import { runGit } from "../git/git";
@@ -21,10 +21,24 @@ export function normalizeMockupFilePath(rawFilePath: string): string {
   return `${MOCKUP_ROOT}/${normalizedName}`;
 }
 
-export async function assertMockupFileExists(repoPath: string, mockupFile: string): Promise<void> {
-  const fileStats = await stat(resolve(repoPath, mockupFile)).catch(() => null);
-  if (!fileStats?.isFile()) {
+// Inline code hides logic from review and blurs git diffs, so the feature index may only load files.
+const INLINE_SCRIPT_BLOCK_REGEX = /<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi;
+const INLINE_STYLE_BLOCK_REGEX = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+
+// Refuses a missing index and one that still carries inline <script> or <style> code.
+export async function assertMockupIndexLoadsOnly(repoPath: string, mockupFile: string): Promise<void> {
+  const indexSource = await readFile(resolve(repoPath, mockupFile), "utf8").catch(() => null);
+  if (indexSource === null) {
     throw new ToolError(`Missing mockup file '${mockupFile}'. Write it before calling this tool.`);
+  }
+  const inlineBlocks = [
+    ...indexSource.matchAll(INLINE_SCRIPT_BLOCK_REGEX),
+    ...indexSource.matchAll(INLINE_STYLE_BLOCK_REGEX),
+  ];
+  if (inlineBlocks.some((inlineBlock) => inlineBlock[1].trim() !== "")) {
+    throw new ToolError(
+      `'${mockupFile}' contains inline <script> or <style> code. Move it into '${MOCKUP_ROOT}/features/<feature>/' as .js or .css files and load them with <script src> or <link>.`,
+    );
   }
 }
 

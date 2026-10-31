@@ -16,6 +16,8 @@ export interface SpecMarkdownEditorProps {
   placeholder?: string;
   initialMode?: SpecEditorMode;
   minHeight?: number;
+  // A locked Spec stays readable in both modes, but the raw text can no longer be typed into.
+  isReadOnly?: boolean;
 }
 
 // Renders the parsed Markdown blocks inside a scrollable full-height surface matching the Paseo theme.
@@ -271,6 +273,7 @@ export function SpecMarkdownEditor({
   onChangeMarkdownContent,
   placeholder = "Write the full feature specification in Markdown...",
   initialMode = "edit",
+  isReadOnly = false,
 }: SpecMarkdownEditorProps) {
   const [editorMode, setEditorMode] = useState<SpecEditorMode>(initialMode);
 
@@ -348,6 +351,7 @@ export function SpecMarkdownEditor({
           style={[styles.input, { flex: 1, minHeight: 0, textAlignVertical: "top" }]}
           value={markdownContent}
           onChangeText={onChangeMarkdownContent}
+          editable={!isReadOnly}
           multiline
           placeholder={placeholder}
           placeholderTextColor={theme.colors.foregroundMuted}

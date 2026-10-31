@@ -2,7 +2,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
 import { ScrollView, Text, TextInput, View } from "react-native";
-import type { BoardTicket } from "../../../shared/board";
+import { describeSpecWriteBlocker, type BoardTicket } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { useBoardActions } from "../../use-board";
 import { describeRpcError } from "../../use-run";
@@ -65,6 +65,8 @@ function SpecCardInspector({
 
   const saveErrorMessage = describeRpcError(saveBoardSpec.error);
   const hasUnsavedSpecEdits = editedSpecContent.trim() !== currentSpecContent.trim();
+  // The same rule the daemon enforces: a draft mockup locks its Spec, so the editor says why instead of failing on save.
+  const specLockReason = describeSpecWriteBlocker(ticket);
 
   const handleApplySpec = () => {
     // Saving a Spec edit creates a new Spec revision with unified diff and notifies the Supervisor.
@@ -141,6 +143,7 @@ function SpecCardInspector({
         onChangeMarkdownContent={setEditedSpecContent}
         placeholder="Full 5-section Product Spec..."
         initialMode="preview"
+        isReadOnly={specLockReason !== null}
       />
 
       {showSpecDiffHistory ? (
@@ -163,9 +166,11 @@ function SpecCardInspector({
 
       {/* Fixed bottom controls so the Revision Note input and Apply button never scroll out of view. */}
       <View style={{ gap: 6, flexShrink: 0 }}>
+        {specLockReason ? <Text style={styles.mutedText}>{specLockReason}</Text> : null}
         <Text style={styles.fieldLabel}>Revision Note (optional)</Text>
         <TextInput
           style={styles.input}
+          editable={specLockReason === null}
           value={specChangeSummary}
           onChangeText={setSpecChangeSummary}
           placeholder="Why did you edit this Spec?"
@@ -178,7 +183,7 @@ function SpecCardInspector({
             tone="primary"
             label={saveBoardSpec.isPending ? "Applying..." : "Apply Spec"}
             accessibilityLabel={`Apply Spec changes for ${ticket.ticketKey}`}
-            disabled={saveBoardSpec.isPending || !hasUnsavedSpecEdits}
+            disabled={saveBoardSpec.isPending || !hasUnsavedSpecEdits || specLockReason !== null}
             onPress={handleApplySpec}
           />
           {latestSpecRevision ? (

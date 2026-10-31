@@ -1,15 +1,15 @@
 // Verifies the mockup-first flow: the Product Agent shapes one git-tracked file per feature outside any Run,
 // the human approves it at a commit, and a Run then starts from the prepared ticket.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { BusCaller, BusToolOutcome } from "../server/bus/http-mcp";
 import { approveBoardMockup, sendMockupFeedback } from "../server/pipeline/mockup-tools";
 import { bundleMockupHtmlPreview } from "../server/pipeline/mockup-files";
-import { STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
+import { buildSpecWorkPrompt, STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
 import { createBusDispatcher } from "../server/pipeline/tool-handlers";
 import { upgradeLegacyTicketPayload } from "../server/store/board-mockup";
-import { BoardTicketSchema, BOARD_COLUMNS, describeTicketRunBlocker } from "../shared/board";
+import { BoardTicketSchema, BOARD_COLUMNS, describeTicketRunBlocker, type BoardTicket } from "../shared/board";
 import { StageStateSchema } from "../shared/pipeline";
 import { useFlowFixture, type Flow } from "./helpers/flow-fixture";
 import { SAMPLE_PRODUCT_SPEC } from "./helpers/flow-steps";
@@ -32,15 +32,18 @@ function callAsProductAgent(flow: Flow, toolName: string, toolArguments: unknown
   return createBusDispatcher(flow.ctx).dispatch(productAgentCaller, toolName, toolArguments);
 }
 
-// Writes a feature file that shares core CSS and JS, matching the layout the Product Agent is told to use.
+// Writes the layout the Product Agent is told to use: an index that only loads core and feature files.
 async function writeCheckoutMockup(flow: Flow, buttonLabel = "Thanh toán"): Promise<void> {
   const mockupRoot = join(flow.repoPath, ".slp", "mockup");
   await mkdir(join(mockupRoot, "core"), { recursive: true });
+  await mkdir(join(mockupRoot, "features", "checkout"), { recursive: true });
   await writeFile(join(mockupRoot, "core", "core.css"), ".btn { background: #2563eb; }", "utf8");
   await writeFile(join(mockupRoot, "core", "core.js"), "window.__slpCore = true;", "utf8");
+  await writeFile(join(mockupRoot, "features", "checkout", "checkout.css"), ".pay { color: white; }", "utf8");
+  await writeFile(join(mockupRoot, "features", "checkout", "cart.js"), "window.__slpCartReady = true;", "utf8");
   await writeFile(
     join(flow.repoPath, MOCKUP_FILE),
-    `<!doctype html><html><head><link rel="stylesheet" href="./core/core.css"></head><body><button id="pay" class="btn">${buttonLabel}</button><script src="./core/core.js"></script></body></html>`,
+    `<!doctype html><html><head><link rel="stylesheet" href="./core/core.css"><link rel="stylesheet" href="./features/checkout/checkout.css"></head><body><button id="pay" class="btn pay">${buttonLabel}</button><script src="./core/core.js"></script><script src="./features/checkout/cart.js"></script></body></html>`,
     "utf8",
   );
 }
@@ -114,7 +117,29 @@ describe("mockup-first product flow", () => {
     const { bundledHtml } = await bundleMockupHtmlPreview(flow.repoPath, MOCKUP_FILE);
     expect(bundledHtml).toContain("background: #2563eb");
     expect(bundledHtml).toContain("window.__slpCore = true;");
+    expect(bundledHtml).toContain("color: white;");
+    expect(bundledHtml).toContain("window.__slpCartReady = true;");
     expect(bundledHtml).toContain('data-slp-mockup-inspector="true"');
+  });
+
+  it("refuses an index that carries inline script or style, and accepts one that only loads files", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    await writeCheckoutMockup(flow);
+    const indexPath = join(flow.repoPath, MOCKUP_FILE);
+    const loaderOnlyIndex = await readFile(indexPath, "utf8");
+
+    await writeFile(indexPath, loaderOnlyIndex.replace("</body>", "<script>window.__inline = 1;</script></body>"), "utf8");
+    const inlineScriptOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", { file: "checkout.html", summary: "x" });
+    expect(inlineScriptOutcome.isError).toBe(true);
+    expect(inlineScriptOutcome.text).toContain("features/<feature>");
+
+    await writeFile(indexPath, loaderOnlyIndex.replace("</head>", "<style>.pay { color: red; }</style></head>"), "utf8");
+    const inlineStyleOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", { file: "checkout.html", summary: "x" });
+    expect(inlineStyleOutcome.isError).toBe(true);
+
+    await writeFile(indexPath, loaderOnlyIndex, "utf8");
+    const loaderOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", { file: "checkout.html", summary: "x" });
+    expect(loaderOutcome.isError).toBe(false);
   });
 
   it("refuses approval until the mockup is committed, then pins the commit and moves to SPEC", async () => {
@@ -246,6 +271,82 @@ describe("mockup-first product flow", () => {
 
     // A persisted run may already hold a mockup stage; it must load as planning so its history stays readable.
     expect(StageStateSchema.shape.kind.parse("mockup")).toBe("planning");
+  });
+
+  it("keeps the Spec locked while the mockup is a draft and asks for it on approval", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const ticketKey = await createMockupTicket(flow);
+    const lockedAttempt = await callAsProductAgent(flow, "slp_board_save_spec", {
+      ticketId: ticketKey,
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Viết Spec khi mockup còn nháp",
+    });
+    // The refusal comes from the store, so every caller of it is covered and nothing is written.
+    expect(lockedAttempt.isError).toBe(true);
+    expect(lockedAttempt.text).toMatch(/still a draft/);
+    expect(flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath).currentSpecRev).toBe(0);
+
+    commitMockups(flow);
+    const agentRequests: BoardTicket[] = [];
+    const approvedTicket = await approveBoardMockup(flow.ctx, {
+      repoPath: flow.repoPath,
+      ticketIdOrKey: ticketKey,
+      openProductAgent: async (ticketNeedingSpec) => {
+        agentRequests.push(ticketNeedingSpec);
+        return "fresh-product-agent";
+      },
+    });
+    // No live Product Agent holds the ticket in this test, so approval itself must open one to create the Spec.
+    expect(agentRequests).toHaveLength(1);
+    expect(buildSpecWorkPrompt(approvedTicket)).toMatch(/soạn Spec mỏng/);
+
+    const unlockedAttempt = await callAsProductAgent(flow, "slp_board_save_spec", {
+      ticketId: ticketKey,
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Spec mỏng từ mockup",
+    });
+    expect(unlockedAttempt.isError).toBe(false);
+    const specifiedTicket = flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath);
+    expect(specifiedTicket.specMockupCommit).toBe(approvedTicket.mockup?.approvedCommit);
+  });
+
+  it("relocks the Spec when an approved mockup is edited and reviews it on the next approval", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const ticketKey = await prepareReadyTicket(flow);
+    const readyTicket = flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath);
+    expect(describeTicketRunBlocker(readyTicket)).toBeNull();
+
+    await writeCheckoutMockup(flow, "Trả tiền");
+    await callAsProductAgent(flow, "slp_board_set_mockup", { ticketId: ticketKey, file: "checkout.html", summary: "Đổi nhãn nút" });
+    const editedSpecAttempt = await callAsProductAgent(flow, "slp_board_save_spec", {
+      ticketId: ticketKey,
+      spec: `${SAMPLE_PRODUCT_SPEC}\n\nThêm quy tắc mới`,
+      summary: "Cố giữ Spec khớp bản nháp",
+    });
+    expect(editedSpecAttempt.isError).toBe(true);
+    expect(flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath).currentSpecRev).toBe(1);
+
+    const reapprovalCommit = commitMockups(flow);
+    const reapprovedTicket = await approveBoardMockup(flow.ctx, {
+      repoPath: flow.repoPath,
+      ticketIdOrKey: ticketKey,
+      openProductAgent: async () => "fresh-product-agent",
+    });
+    // The Spec exists, so approval asks for a review rather than a new Spec, and the ticket cannot run until it is done.
+    expect(buildSpecWorkPrompt(reapprovedTicket)).toMatch(/rà soát/);
+    expect(describeTicketRunBlocker(reapprovedTicket)).toMatch(/Review the Spec/);
+
+    // Saving the unchanged text confirms the review without inventing a revision.
+    const confirmation = await callAsProductAgent(flow, "slp_board_save_spec", {
+      ticketId: ticketKey,
+      spec: SAMPLE_PRODUCT_SPEC,
+      summary: "Spec vẫn đúng",
+    });
+    expect(confirmation.isError).toBe(false);
+    const reviewedTicket = flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath);
+    expect(reviewedTicket.currentSpecRev).toBe(1);
+    expect(reviewedTicket.specMockupCommit).toBe(reapprovalCommit);
+    expect(describeTicketRunBlocker(reviewedTicket)).toBeNull();
   });
 
   it("upgrades tickets saved with versioned mockups so old work stays previewable", () => {

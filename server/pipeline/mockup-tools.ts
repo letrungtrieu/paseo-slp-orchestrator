@@ -9,11 +9,11 @@ import { formatMockupElementCommentsMarkdown } from "../store/board-mockup";
 import { resolveTargetTicketForCaller } from "./board-tools";
 import type { PipelineContext } from "./context";
 import {
-  assertMockupFileExists,
+  assertMockupIndexLoadsOnly,
   normalizeMockupFilePath,
   resolveApprovedMockupCommit,
 } from "./mockup-files";
-import { bindProductAgentToTicket, promptProductAgentForTicket } from "./product-agent";
+import { bindProductAgentToTicket, buildSpecWorkPrompt, promptProductAgentForTicket } from "./product-agent";
 import { liveRunForTicket, notifySupervisorOfMockupChange } from "./ticket-change-notices";
 import { ToolError } from "./tool-error";
 
@@ -35,7 +35,7 @@ export async function setBoardMockup(
   const mockupFile = normalizeMockupFilePath(
     input.file ?? `${deriveFeatureMockupSlug(fallbackFeatureName ?? "feature")}.html`,
   );
-  await assertMockupFileExists(repoPath, mockupFile);
+  await assertMockupIndexLoadsOnly(repoPath, mockupFile);
 
   const wasApproved = existingTicket?.mockup?.status === "approved";
   const updatedTicket = ctx.store.board.saveMockup({
@@ -90,22 +90,32 @@ export async function sendMockupFeedback(
 // Approval pins the current commit; commits stay the human's or agent's explicit action, so uncommitted work is refused, not committed here.
 export async function approveBoardMockup(
   ctx: PipelineContext,
-  params: { repoPath: string; ticketIdOrKey: string },
+  params: {
+    repoPath: string;
+    ticketIdOrKey: string;
+    // Opens a fresh Product Agent when no live session holds the ticket, for example after the daemon restarted.
+    openProductAgent?: (ticket: BoardTicket) => Promise<string>;
+  },
 ): Promise<BoardTicket> {
   const existingTicket = ctx.store.board.requireTicket(params.ticketIdOrKey, params.repoPath);
   if (!existingTicket.mockup) {
     throw new ToolError(`Ticket '${existingTicket.ticketKey}' has no mockup to approve yet.`);
   }
   const approvedCommit = await resolveApprovedMockupCommit(params.repoPath, existingTicket.mockup.file);
-  const approvedTicket = ctx.store.board.approveMockup({ ...params, approvedCommit });
+  const approvedTicket = ctx.store.board.approveMockup({
+    repoPath: params.repoPath,
+    ticketIdOrKey: params.ticketIdOrKey,
+    approvedCommit,
+  });
 
   const boundRun = liveRunForTicket(ctx, approvedTicket);
   if (boundRun) await notifySupervisorOfMockupChange(ctx, boundRun, approvedTicket);
-  // Writing the Spec is the next step, and the session that built the mockup knows why each decision was made.
-  await promptProductAgentForTicket(
-    ctx,
-    approvedTicket.id,
-    `Mockup \`${approvedTicket.mockup?.file ?? ""}\` đã được chốt tại commit \`${approvedCommit}\`. Hãy soạn Spec mỏng và lưu bằng \`slp_board_save_spec({ ticketId: "${approvedTicket.ticketKey}", spec: "...", summary: "..." })\`.`,
-  );
+  // Approval is what unlocks the Spec: create it the first time, review it when the mockup was edited and approved again.
+  const specWorkPrompt = buildSpecWorkPrompt(approvedTicket);
+  if (specWorkPrompt) {
+    // The session that built the mockup knows why each decision was made, so it gets the work first.
+    const promptedAgentId = await promptProductAgentForTicket(ctx, approvedTicket.id, specWorkPrompt);
+    if (!promptedAgentId) await params.openProductAgent?.(approvedTicket);
+  }
   return approvedTicket;
 }

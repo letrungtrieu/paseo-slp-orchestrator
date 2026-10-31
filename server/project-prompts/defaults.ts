@@ -1,5 +1,5 @@
 // Defaults seed editable project files; keeping them in code also supports runs created before project prompts existed.
-import type { ProjectPromptConfig, ProjectRole } from "../../shared/project-prompts";
+import { SLP_CONTRACT_VERSION, type ProjectPromptConfig, type ProjectRole } from "../../shared/project-prompts";
 import { DEFAULT_WORKFLOWS } from "../prompts/default-workflows";
 import { normalizeRoleId, parseRoleMarkdown } from "./markdown";
 
@@ -108,7 +108,7 @@ export function defaultPromptFiles(): Array<{ relativePath: string; markdown: st
     // Each .slp file is the editable system prompt for that role; peer YAML front matter is the summary injected into the Lead.
     // Root roles have no tier; peers declare one so the Lead's catalog shows where each may be scheduled.
     // Peers also declare a kind, which decides the stages they may join and whether they can write.
-    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n${"kind" in definition ? `kind: ${definition.kind}\n` : ""}${"tier" in definition ? `tier: ${definition.tier}\n` : ""}---\n\n# Workflow\n\n${definition.workflow}\n`,
+    markdown: `---\nrole: ${definition.role}\nname: ${definition.name}\ndescription: ${definition.description}\nmodel:\nthinking:\n${"kind" in definition ? `kind: ${definition.kind}\n` : ""}${"tier" in definition ? `tier: ${definition.tier}\n` : ""}slp-contract: ${SLP_CONTRACT_VERSION}\n---\n\n# Workflow\n\n${definition.workflow}\n`,
   }));
 }
 

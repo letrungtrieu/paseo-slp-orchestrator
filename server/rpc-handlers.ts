@@ -361,9 +361,11 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   server.handle(approveBoardMockupRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
     const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
+    const approvalRepoPath = effectiveRepoPath || input.repoPath;
     const approvedTicket = await approveBoardMockup(ctx, {
-      repoPath: effectiveRepoPath || input.repoPath,
+      repoPath: approvalRepoPath,
       ticketIdOrKey: input.ticketId,
+      openProductAgent: async (targetTicket) => (await openProductAgent(approvalRepoPath, targetTicket.id)).agentId,
     });
     return { ticket: enrichTicketWithLiveAgents(liveRunForTicket(ctx, approvedTicket), approvedTicket) };
   });

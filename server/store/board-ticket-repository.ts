@@ -1,43 +1,15 @@
 // SQLite reads and writes for Kanban ticket rows, kept apart from the Spec, mockup and Brief lifecycle rules.
 import type { DatabaseSync } from "node:sqlite";
-import { BoardTicketSchema, type BoardTicket } from "../../shared/board";
-import { upgradeLegacyTicketPayload } from "./board-mockup";
-
-// Every stored row goes through the legacy upgrade so tickets written before the single-file mockup still parse with their mockup.
-function parseStoredTicket(storedPayload: unknown): BoardTicket {
-  return BoardTicketSchema.parse(upgradeLegacyTicketPayload(JSON.parse(String(storedPayload))));
-}
+import type { BoardTicket } from "../../shared/board";
+import { readTicketFromCardPayload, writeTicketRows } from "./board-ticket-rows";
 
 // Row-level ticket access shared by the board's workflow operations; lifecycle rules live in BoardStore.
 export class BoardTicketRepository {
   constructor(protected readonly resolveDatabase: () => DatabaseSync) {}
 
+  // The card and its mockup, Spec and Brief rows are written together so a ticket never persists half of its dependencies.
   protected persistTicket(database: DatabaseSync, ticket: BoardTicket): void {
-    // Store indexed columns alongside the JSON payload so project and run lookups avoid full-table JSON scans.
-    database
-      .prepare(
-        `INSERT INTO board_tickets (
-          ticket_id, repo_path, ticket_key, column_name, active_run_id, active_pipeline_id, updated_at, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticket_id) DO UPDATE SET
-          repo_path = excluded.repo_path,
-          ticket_key = excluded.ticket_key,
-          column_name = excluded.column_name,
-          active_run_id = excluded.active_run_id,
-          active_pipeline_id = excluded.active_pipeline_id,
-          updated_at = excluded.updated_at,
-          payload = excluded.payload`,
-      )
-      .run(
-        ticket.id,
-        ticket.repoPath,
-        ticket.ticketKey,
-        ticket.column,
-        ticket.activeRunId,
-        ticket.activePipelineId,
-        ticket.updatedAt,
-        JSON.stringify(ticket),
-      );
+    writeTicketRows(database, ticket);
   }
 
   // Lists all Kanban tickets belonging to a repository ordered by most recent activity first.
@@ -45,7 +17,7 @@ export class BoardTicketRepository {
     const ticketRows = this.resolveDatabase()
       .prepare("SELECT payload FROM board_tickets WHERE repo_path = ? ORDER BY updated_at DESC")
       .all(repoPath);
-    return ticketRows.map((ticketRow) => parseStoredTicket(ticketRow.payload));
+    return ticketRows.map((ticketRow) => readTicketFromCardPayload(this.resolveDatabase(), ticketRow.payload));
   }
 
   // Lists all Kanban tickets currently associated with a specific active run.
@@ -53,7 +25,7 @@ export class BoardTicketRepository {
     const ticketRows = this.resolveDatabase()
       .prepare("SELECT payload FROM board_tickets WHERE active_run_id = ? ORDER BY updated_at DESC")
       .all(runId);
-    return ticketRows.map((ticketRow) => parseStoredTicket(ticketRow.payload));
+    return ticketRows.map((ticketRow) => readTicketFromCardPayload(this.resolveDatabase(), ticketRow.payload));
   }
 
   // Resolves a ticket by its internal UUID or its human-readable Jira-style key (such as SLP-1).
@@ -65,7 +37,7 @@ export class BoardTicketRepository {
     const byIdRow = database
       .prepare("SELECT payload FROM board_tickets WHERE ticket_id = ?")
       .get(trimmedLookup);
-    if (byIdRow) return parseStoredTicket(byIdRow.payload);
+    if (byIdRow) return readTicketFromCardPayload(database, byIdRow.payload);
     // Scope key lookup to the repository when known so SLP-1 in project A never collides with SLP-1 in project B.
     const byKeyRow = repoPath
       ? database
@@ -74,7 +46,7 @@ export class BoardTicketRepository {
       : database
           .prepare("SELECT payload FROM board_tickets WHERE UPPER(ticket_key) = UPPER(?) ORDER BY updated_at DESC LIMIT 1")
           .get(trimmedLookup);
-    return byKeyRow ? parseStoredTicket(byKeyRow.payload) : null;
+    return byKeyRow ? readTicketFromCardPayload(database, byKeyRow.payload) : null;
   }
 
   // Finds the ticket bound to a specific pipeline so stage approvals and QA scorecards update the right card.
@@ -82,7 +54,7 @@ export class BoardTicketRepository {
     const ticketRow = this.resolveDatabase()
       .prepare("SELECT payload FROM board_tickets WHERE active_pipeline_id = ? LIMIT 1")
       .get(pipelineId);
-    return ticketRow ? parseStoredTicket(ticketRow.payload) : null;
+    return ticketRow ? readTicketFromCardPayload(this.resolveDatabase(), ticketRow.payload) : null;
   }
 
   // Throws a descriptive error when an agent or RPC caller references a non-existent ticket id or key.

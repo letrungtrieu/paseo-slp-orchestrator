@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { BUS_TOOL_DEFINITIONS } from "../server/bus/tool-schemas";
 import { defaultProjectPrompts } from "../server/project-prompts/defaults";
+import { openDatabase } from "../server/store/database";
 import { parseRoleMarkdown } from "../server/project-prompts/markdown";
 import { slpManagerSkillFiles } from "../server/skills/slp-manager/skill-files";
 import {
@@ -15,6 +16,7 @@ import {
   renderSlpManagerSkillMarkdown,
   SLP_MANAGER_SKILL_NAME,
 } from "../server/skills/slp-manager-skill";
+import { SLP_CONTRACT_VERSION } from "../shared/project-prompts";
 import { useTemporaryDirectories } from "./helpers/temp-directory";
 
 const createDirectory = useTemporaryDirectories();
@@ -67,7 +69,7 @@ describe("slp-manager project skill provisioning", () => {
     expect(installedSkillText).toContain("## 3. How to Create a New Grouped Peer Role in `.slp/peers/<group>/<ROLE>.md`");
     expect(installedSkillText).toContain("## 4. Rules for Editing `.slp/SUPERVISOR.md`, `.slp/LEAD.md` and `.slp/QA_LEAD.md` Safely");
     // Agents editing .slp must learn that only the QA Lead reports and that it never edits code itself.
-    expect(installedSkillText).toContain("### Mandatory Checklist When Editing `.slp/QA_LEAD.md`");
+    expect(installedSkillText).toContain("### Checklist When Editing `.slp/QA_LEAD.md`");
   });
 
   it("embeds a grouped peer role template in SKILL.md that parses cleanly with parseRoleMarkdown", () => {
@@ -171,9 +173,29 @@ describe("slp-manager project skill provisioning", () => {
     }
   });
 
+  it("tells the agent what to do on 'update' and stamps the contract version it expects", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    // The update procedure must come before the reference sections so an agent reads it first.
+    expect(skillMarkdown.indexOf("## 0. When the User Says \"update\"")).toBeGreaterThan(-1);
+    expect(skillMarkdown.indexOf("## 0. When the User Says \"update\"")).toBeLessThan(skillMarkdown.indexOf("## 1. How the 3-Tier"));
+    expect(skillMarkdown).toContain(`slp-contract: ${SLP_CONTRACT_VERSION}`);
+  });
+
+  it("documents the mockup -> Spec -> Brief dependency using tables that exist in the schema", () => {
+    const skillMarkdown = renderSlpManagerSkillMarkdown();
+    const database = openDatabase(":memory:");
+    for (const tableName of ["board_mockups", "board_specs", "board_spec_revisions", "board_brief_revisions"]) {
+      // A renamed table would leave the skill describing storage that no longer exists.
+      expect(skillMarkdown).toContain(tableName);
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE name = ?").get(tableName)).toBeTruthy();
+    }
+    expect(skillMarkdown).toContain("**Spec lock:**");
+    database.close();
+  });
+
   it("lists the QA Lead root file among the files the engine injects", () => {
-    const criticalRule = renderSlpManagerSkillMarkdown().split("\n").find((line) => line.includes("CRITICAL RULE")) ?? "";
-    expect(criticalRule).toContain("`.slp/QA_LEAD.md`");
+    const invariantLine = renderSlpManagerSkillMarkdown().split("\n").find((line) => line.includes("**Invariant:**")) ?? "";
+    expect(invariantLine).toContain("`.slp/QA_LEAD.md`");
   });
 
   it("gives older .slp folders a migration checklist that confirms before deleting UAT content", () => {

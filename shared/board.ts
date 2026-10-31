@@ -171,6 +171,8 @@ export const BoardTicketSchema = z.object({
   currentBriefRev: z.number().int().min(0).default(0),
   // When currentSpecRev > lastSyncedSpecRev, the UI and Lead know the Spec changed since the Brief was written.
   lastSyncedSpecRev: z.number().int().min(0).default(0),
+  // Approved mockup commit the current Spec was last written or reviewed against; a different approved commit means the Spec awaits review.
+  specMockupCommit: z.string().nullable().default(null),
   specRevisions: z.array(SpecRevisionSchema).default([]),
   mockup: TicketMockupSchema.nullable().default(null),
   briefRevisions: z.array(BriefRevisionSchema).default([]),
@@ -185,9 +187,26 @@ export const BoardTicketSchema = z.object({
 });
 export type BoardTicket = z.infer<typeof BoardTicketSchema>;
 
+// A draft mockup is still moving, so a Spec written now would describe something the human has not settled on.
+export function describeSpecWriteBlocker(ticket: Pick<BoardTicket, "ticketKey" | "mockup">): string | null {
+  if (!ticket.mockup || ticket.mockup.status === "approved") return null;
+  return `The mockup of '${ticket.ticketKey}' is still a draft, so its Spec cannot be written or changed yet. Change the mockup only; when the human approves it, the engine asks for the Spec.`;
+}
+
+// True when the human approved a mockup commit that the existing Spec has not been checked against, which is what re-approval after an edit leaves behind.
+export function specNeedsMockupReview(
+  ticket: Pick<BoardTicket, "currentSpecRev" | "mockup" | "specMockupCommit">,
+): boolean {
+  return (
+    ticket.currentSpecRev >= 1 &&
+    ticket.mockup?.status === "approved" &&
+    ticket.specMockupCommit !== ticket.mockup.approvedCommit
+  );
+}
+
 // Explains why a ticket cannot start a Run yet, or returns null when it is ready; shared so the UI and daemon apply the same gate.
 export function describeTicketRunBlocker(
-  ticket: Pick<BoardTicket, "ticketKey" | "currentSpecRev" | "mockup" | "activeRunId">,
+  ticket: Pick<BoardTicket, "ticketKey" | "currentSpecRev" | "mockup" | "activeRunId" | "specMockupCommit">,
 ): string | null {
   if (ticket.activeRunId) return `Ticket '${ticket.ticketKey}' already belongs to a Run.`;
   // An unapproved mockup means the idea is still moving, so a Run would build something the human has not settled on.
@@ -195,6 +214,10 @@ export function describeTicketRunBlocker(
     return `Approve the mockup of '${ticket.ticketKey}' before starting a Run.`;
   }
   if (ticket.currentSpecRev < 1) return `Write the Spec of '${ticket.ticketKey}' before starting a Run.`;
+  // After a mockup edit and re-approval the Spec may no longer match what the Run would build.
+  if (specNeedsMockupReview(ticket)) {
+    return `Review the Spec of '${ticket.ticketKey}' against its re-approved mockup before starting a Run.`;
+  }
   return null;
 }
 

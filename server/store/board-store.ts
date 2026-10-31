@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   briefItemsFromPipelineBrief,
   deriveFeatureMockupSlug,
+  describeSpecWriteBlocker,
   type BoardColumn,
   type BoardTicket,
   type BriefItemInput,
@@ -26,6 +27,11 @@ import {
 import { BoardTicketRepository } from "./board-ticket-repository";
 import { transaction } from "./database";
 import { computeUnifiedTextDiff, serializeBriefForDiff } from "./diff";
+
+// A Spec saved while its mockup is approved has now been checked against that exact commit; otherwise the old stamp stands.
+function specCommitAfterSave(ticket: BoardTicket): string | null {
+  return ticket.mockup?.status === "approved" ? ticket.mockup.approvedCommit : ticket.specMockupCommit;
+}
 
 export interface SaveSpecInput {
   repoPath: string;
@@ -92,11 +98,17 @@ export class BoardStore extends BoardTicketRepository {
           activeRunId: input.activeRunId !== undefined ? input.activeRunId : existingTicket.activeRunId,
           activePipelineId: input.activePipelineId !== undefined ? input.activePipelineId : existingTicket.activePipelineId,
           leadAgentId: input.leadAgentId !== undefined ? input.leadAgentId : existingTicket.leadAgentId,
+          // Saving unchanged text under an approved mockup is how a review confirms the Spec still matches it.
+          specMockupCommit: specCommitAfterSave(existingTicket),
           updatedAt: nowIso,
         };
         this.persistTicket(database, updatedMetadataTicket);
         return updatedMetadataTicket;
       }
+
+      // A draft mockup locks its Spec: the lock sits here so no caller (agent tool, UI or Run) can write around it.
+      const specLockReason = existingTicket ? describeSpecWriteBlocker(existingTicket) : null;
+      if (specLockReason) throw new Error(specLockReason);
 
       // Compute a Git-style unified diff so the Supervisor and Lead can update only affected Brief bullets.
       const unifiedSpecDiff = computeUnifiedTextDiff(
@@ -124,6 +136,7 @@ export class BoardStore extends BoardTicketRepository {
             featureSlug: existingTicket.featureSlug || deriveFeatureMockupSlug(resolvedTitle, allocatedTicketKey),
             acceptanceCriteria: input.acceptanceCriteria?.trim() || existingTicket.acceptanceCriteria,
             currentSpecRev: nextSpecRevisionNumber,
+            specMockupCommit: specCommitAfterSave(existingTicket),
             specRevisions: [...existingTicket.specRevisions, createdSpecRevision],
             activeRunId: input.activeRunId !== undefined ? input.activeRunId : existingTicket.activeRunId,
             activePipelineId: input.activePipelineId !== undefined ? input.activePipelineId : existingTicket.activePipelineId,
@@ -141,6 +154,7 @@ export class BoardStore extends BoardTicketRepository {
             currentSpecRev: 1,
             currentBriefRev: 0,
             lastSyncedSpecRev: 0,
+            specMockupCommit: null,
             specRevisions: [createdSpecRevision],
             mockup: null,
             briefRevisions: [],

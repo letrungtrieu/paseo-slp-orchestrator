@@ -1,6 +1,7 @@
 // SKILL.md body of the `slp-manager` skill: the SLP architecture, .slp role authoring rules and invariants.
 // Long project-specific procedures and the advisor/QA templates live in sibling reference modules so the
 // always-loaded SKILL.md stays short; the developer template stays here because it is the canonical example.
+import { SLP_CONTRACT_VERSION } from "../../../shared/project-prompts";
 import { BUS_SERVER_NAME } from "../../../shared/roles";
 import { SLP_MANAGER_SKILL_NAME } from "./skill-name";
 
@@ -18,9 +19,29 @@ Use this skill whenever the user asks you to explain the SLP (Supervisor–Lead�
 
 > **INVESTIGATE BEFORE YOU GENERATE:** Never generate or regroup \`.slp/peers/\` from generic templates. First run the project investigation in \`references/PROJECT_INVESTIGATION.md\` (tech stack, how unit tests are written and run, how manual testing is done, which tools are heavy), write \`.slp/standards/TEST_POLICY.md\` from \`references/TEST_POLICY_TEMPLATE.md\`, and only then derive peers from those findings (\`references/STACK_PLAYBOOKS.md\` lists stack-specific starting points, \`references/PEER_TEMPLATES.md\` holds the advisor and QA grader templates).
 
-> **CRITICAL RULE:** At runtime, the SLP engine injects the Markdown body of \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, \`.slp/QA_LEAD.md\`, and \`.slp/peers/**/*.md\` **directly** as the role's \`PROJECT WORKFLOW\` without hidden wrappers. If an edit deletes a role's MCP tool obligations, turn-ending rules or read-only invariants, **the SLP state machine stalls**. Preserve the invariants in section 4 whenever you edit a role.
+> **Invariant:** At runtime, the SLP engine injects the Markdown body of \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, \`.slp/QA_LEAD.md\`, and \`.slp/peers/**/*.md\` **directly** as the role's \`PROJECT WORKFLOW\` without hidden wrappers. If an edit deletes a role's MCP tool obligations, turn-ending rules or read-only invariants, **the SLP state machine stalls**. Preserve the invariants in section 4 whenever you edit a role.
 
 > **WHY THE CURRENT MODEL EXISTS:** Agents used to over-engineer: several peers wrote code in one worktree, peers chatted with each other and widened the scope, and prompts full of "MANDATORY" rules made models over-apply them. The engine now enforces a small contract (section 1). Generated \`.slp\` files must describe that contract, never fight it. Write instructions in a calm voice ("Do X when Y"); do not use MANDATORY/MUST/STRICT walls, "enumerate all edge cases" or "always present rejected alternatives".
+
+---
+
+## 0. When the User Says "update"
+
+After this skill changes, the user often just says *update* (or *cập nhật*). Bring every \`.slp\` file in this repository in line with the contract below, and leave alone what the project has customized on purpose.
+
+**Contract version:** \`${SLP_CONTRACT_VERSION}\`. Every file the engine seeds, and every file you update, carries \`slp-contract: ${SLP_CONTRACT_VERSION}\` in its front matter. A file without that line predates this contract.
+
+1. **Read this whole file**, sections 1 to 6, and the references it names. Do not update from memory of an earlier version.
+2. **Inventory** \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, \`.slp/QA_LEAD.md\`, every \`.slp/peers/**/*.md\` and \`.slp/standards/*\`. Note each file's \`slp-contract\` value.
+3. **Check every file, stamped or not.** A stamp says when the file was last brought up to date, not that it still matches. A user may have edited it since.
+4. **Fix only what contradicts the contract:** a missing tool obligation, a stage shape the engine rejects, a removed turn rule, a tool name that does not exist, a mockup step that belongs to the retired flow. Apply the checklist for that role in section 4, and the peer checklist for peers.
+5. **Keep project-specific content:** peer groups, domains, stack commands, references to standards, custom front-matter keys and the project's tone. Edit in place; do not rewrite a file wholesale.
+6. **Apply section 6** for anything older than the current contract, and check the front-matter fields in section 3 (\`kind\`, \`tier\`, \`role\`) for every peer that lacks them.
+7. **Stamp** every file you changed with \`slp-contract: ${SLP_CONTRACT_VERSION}\`.
+8. **Verify** with section 5.
+9. **Report** every changed file and the reason; each contradiction you kept on purpose; and each decision you could not make without the user, such as two peers whose responsibilities now overlap. Ask instead of guessing.
+
+This skill is installed from the plugin. Its own file is refreshed by the plugin's skill initialization, so do not edit \`SKILL.md\` in place; if it is stale, ask the user to run that initialization again.
 
 ---
 
@@ -30,11 +51,14 @@ SLP orchestrates software delivery across three tiers and four runtime roles (\`
 
 **Before any Run — Product Agent (standalone, no \`.slp\` file):** new work starts here, not with a Supervisor. The human opens a **Product Agent** from the Kanban board (\`+ New Feature\`, or \`Discuss with Agent\` on a card). It runs outside any Run with the tools \`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`slp_board_save_spec\` and \`slp_board_set_mockup\`, and may write only inside \`.slp/mockup/\`.
 
-   - **Mockup first:** for anything with a UI it builds the idea as one git-tracked file per feature, \`.slp/mockup/<feature>.html\`, reusing \`.slp/mockup/core/core.css\`, \`.slp/mockup/core/core.js\` and \`.slp/mockup/assets/\` so every mockup keeps one style. Git holds the history; there are no version folders. Core loads through plain \`<link>\` and \`<script src>\` tags because the preview inlines only those.
+   - **Mockup first:** for anything with a UI it builds the idea as a git-tracked set of files. \`.slp/mockup/<feature>.html\` is only an index that loads files with plain \`<link>\` and \`<script src>\` tags. The feature's own \`.js\` and \`.css\` live in \`.slp/mockup/features/<feature>/\`, and shared style and logic live in \`.slp/mockup/core/\` with images in \`.slp/mockup/assets/\`. Inline \`<script>\` or \`<style>\` code in the index is refused. Git holds the history; there are no version folders.
    - **Review loop:** \`slp_board_set_mockup({ ticketId?, title?, file, summary })\` links the file to its card. The human previews it in the \`1. MOCKUP\` column, attaches element-level comments, and sends them to the agent, which revises the file.
    - **Approval:** the human presses **Approve**. The engine refuses while \`.slp/mockup\` has uncommitted changes and otherwise pins the current commit on the ticket. The human commits and pushes, or asks the Product Agent to; agents never do this unprompted.
-   - **Thin Spec:** the Product Agent then saves a Spec with \`slp_board_save_spec\` that references the mockup and records only what it cannot show (business rules, data, permissions, edge cases, out of scope). Features without a UI skip the mockup and get a full Spec.
-   - **Starting a Run:** a ticket whose mockup is approved and whose Spec exists shows **Start Run**. That Run opens the Supervisor on the ticket.
+   - **Dependency (stored in SQLite):** a ticket has at most one mockup; its Spec depends on that mockup (one to one); every Brief revision depends on the Spec it was derived from (one Spec, many Briefs). The tables are \`board_mockups\`, \`board_specs\`, \`board_spec_revisions\` and \`board_brief_revisions\`.
+   - **Spec lock:** while a ticket's mockup is a draft, the Spec cannot be created or changed by anyone: \`slp_board_save_spec\` and the Spec editor are refused. Agents edit the mockup only and never keep the Spec in step with a draft.
+   - **Thin Spec on approval:** approving the mockup makes the engine ask the Product Agent for the Spec (a fresh agent is opened when no session holds the ticket). It saves a Spec with \`slp_board_save_spec\` that references the mockup and records only what it cannot show (business rules, data, permissions, edge cases, out of scope). Features without a UI skip the mockup and get a full Spec.
+   - **Edit after approval:** changing an approved mockup returns it to draft and locks the Spec again. The next approval asks the Product Agent to review the existing Spec against the new commit: it saves a revised Spec, or the same text to confirm. The ticket cannot start a Run until that review is saved.
+   - **Starting a Run:** a ticket whose mockup is approved and whose Spec exists and matches the approved commit shows **Start Run**. That Run opens the Supervisor on the ticket.
 
 1. **Tier 1 — Supervisor (\`.slp/SUPERVISOR.md\`, runtime role \`supervisor\`):**
    - The human-facing tier. It stays **read-only** on the repository.
@@ -57,15 +81,17 @@ SLP orchestrates software delivery across three tiers and four runtime roles (\`
    - **Planning (optional, always first):** \`kind: advisor\` peers investigate techniques and design options and discuss them **with the Lead only**. They are read-only and are retired when planning closes. Small, clear changes skip planning.
    - **Approved mockup:** its delegation briefing names the approved file and commit. That file is the UI source of truth: the Lead names it in the developer's task and never edits it.
    - **Brief & Controlled Revisions on the Kanban Board:** \`{ approach, criteria: [{ id, requirement, verification }], inScope, outOfScope }\`. The Lead supplies the initial Brief in \`slp_approve_stage({ summary, brief })\` when closing planning, or as \`pipeline.brief\` in \`slp_define_pipeline\` when there is no planning stage. For stage peers, the Brief is a **locked contract** (developers and QA graders never edit it). When the Supervisor notifies the Lead of a Spec diff (\`slp_board_notify_lead\`) or when implementation/merge conflicts require switching technical approaches, the Lead calls \`slp_pause_peers({ pipelineId, reason })\` to immediately stop active child stage peers and lock their writes, calls \`slp_board_update_brief({ ticketId, pipelineId, reason, approach, items })\` to record a new Brief revision with a unified diff (preserving \`pass\` scores on unchanged bullets while resetting modified/added bullets to \`todo\`), and calls \`slp_resume_peers({ pipelineId, guidance })\` to resume its peers on the updated Brief.
+   - \`slp_create_worktree\` exists for a pipeline that needs a checkout of its own. \`slp_define_pipeline\` already attaches each pipeline to the Lead's checkout, so leave the call out unless the pipeline truly needs a second one.
    - **Implement:** exactly one \`kind: developer\` peer builds the locked brief. Feature pipelines never contain a QA/verify stage.
    - The Lead decides every stage with \`slp_approve_stage\` or \`slp_stage_rework\`. Each stage has a rework cap (run setting, default 3). At the cap \`slp_stage_rework\` is refused; the Lead approves or calls \`slp_escalate\`, and the human decides through the Supervisor.
    - When the implement stage is approved, the Lead merges into the QA branch with \`slp_finalize_pipeline\`. Feature Leads never report to the Supervisor.
 
    **QA Lead (\`.slp/QA_LEAD.md\`, runtime role \`qa_lead\`):**
-   - Spawned with the feature Leads; prepares the QA plan from \`TEST_POLICY.md\`, the product specs and the feature briefs while features are built. Read-only: it never edits code.
+   - Spawned with the feature Leads; prepares the QA plan from \`TEST_POLICY.md\`, the product specs and the feature briefs while features are built. Read-only: it never edits code. Phase 1 ends your turn once the plan is ready; phase 2 starts only when the engine says every feature branch is merged.
    - \`slp_define_pipeline\` is rejected until every feature branch is merged. QA pipelines run in the QA checkout, one at a time, and contain only **verify** stages: one or more \`kind: qa\` graders plus at most one \`kind: developer\` fixer.
    - **Scorecard loop:** graders submit \`slp_stage_report\` with \`scorecard: [{ criterionId, status: pass|fail|blocked, reason, evidence }]\` (which automatically updates item scores on the project Kanban board; \`slp_board_score_item\` and \`slp_board_get_ticket\` are also available) and optional \`observations\` (anything outside the criteria, not graded). The QA Lead decides from the scorecard alone: approve, or send a fix to the developer with \`slp_stage_rework\`. The developer stays idle until asked; after its fix the engine asks the graders to re-grade before waking the QA Lead. The same rework cap and human escalation apply.
    - Closes with \`slp_finalize_pipeline\` (no merge), then \`slp_report\` with the final scorecard.
+   - Besides the verify-stage tools, it also holds \`slp_stage_rework\`, \`slp_pause_peers\`, \`slp_resume_peers\`, \`slp_board_update_brief\`, \`slp_board_score_item\` and \`slp_handle_peer_shell\`, and it observes the same rework cap as a Lead.
 
 3. **Tier 3 — Stage Peers (\`.slp/peers/**/*.md\`, runtime role \`peer\`):**
    - Every peer has a \`kind\`. It decides which stage the peer may join and whether it may write:
@@ -127,7 +153,7 @@ A brand-new repository is seeded with five flat peers: \`DEVELOPER.md\` (develop
 ### Discovery & Validation Constraints (Enforced by \`loadProjectPrompts\`)
 - **Parsed files:** only \`.slp/SUPERVISOR.md\`, \`.slp/LEAD.md\`, \`.slp/QA_LEAD.md\` and \`.md\` files inside \`.slp/peers/\` (recursively) are roles. \`.slp/standards/\` and other folders are ignored by the parser.
 - **Role IDs** come only from the YAML \`role\` field, normalized by trimming, lowercasing and turning spaces/underscores into hyphens (\`"Backend Engineer"\` -> \`backend-engineer\`), and must match \`/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/\`.
-- **\`kind\`** must be \`advisor\`, \`developer\` or \`qa\`; any other value is rejected with the file path. When omitted, the engine guesses from the role ID (review/audit/architect/design/research/consult/analyst -> advisor, qa/test/verif/playtest -> qa, otherwise developer). Always set it explicitly.
+- **\`kind\`** must be \`advisor\`, \`developer\` or \`qa\`; any other value is rejected with the file path. When omitted, the engine guesses from the role ID: an ID containing review, audit, architect, design, advis, research, consult or analyst is an advisor; an ID whose segment starts with qa, test, tester, testing, verif or playtest is a QA grader; anything else is a developer. Always set it explicitly.
 - **Reserved root IDs:** peers must never use \`supervisor\`, \`lead\`, \`master-lead\` or \`qa-lead\`. \`.slp/SUPERVISOR.md\` has \`role: supervisor\`, \`.slp/QA_LEAD.md\` has \`role: qa-lead\` (re-seeded when missing), \`.slp/LEAD.md\` has \`role: master-lead\` (or \`lead\`).
 - **No duplicate role IDs** across all peer folders.
 
@@ -185,8 +211,8 @@ ROLE: Pipeline peer (Backend & API Engineer), the only developer of this pipelin
 3. \`name\` *(optional)*: display title, defaults to \`role\`.
 4. \`model\` *(optional)*: empty inherits the run's Peer model. A short ID keeps the run's provider; \`provider/model\` switches it. When the run forks peers, a model from another provider than the Lead's automatically falls back to a fresh session on that provider with full stage mail.
 5. \`thinking\` *(optional)*: reasoning option ID (\`low\`, \`medium\`, \`high\`), empty inherits.
-6. \`kind\` *(required for generated peers)*: \`advisor\`, \`developer\` or \`qa\` (see section 1).
-7. \`tier\` *(required for generated peers)*: \`feature\` or \`integration\`, matching the kind (section 2, step 4).
+6. \`kind\` *(recommended)*: \`advisor\`, \`developer\` or \`qa\` (see section 1). Set it explicitly: when omitted, the engine guesses from the role ID.
+7. \`tier\` *(convention; the engine does not enforce it)*: \`feature\` or \`integration\`, matching the kind (section 2, step 4).
 8. **Custom keys** (\`domains\`, \`skills\`, \`features\`, ...): kept and shown to the Lead with the rest of the front matter, so listing owned modules helps it pick the right developer.
 
 ---
@@ -195,7 +221,7 @@ ROLE: Pipeline peer (Backend & API Engineer), the only developer of this pipelin
 
 Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and adapt them to the project; keep every item of the matching checklist.
 
-### Mandatory Checklist When Editing \`.slp/SUPERVISOR.md\`
+### Checklist When Editing \`.slp/SUPERVISOR.md\`
 1. **Front matter:** \`role: supervisor\` and a non-empty \`description\`.
 2. **Read-only:** the Supervisor never edits files or commits.
 3. **Prepared tickets first:** a Run started from a ticket uses its approved mockup and Spec unchanged as \`productSpec\`. Only without a starting ticket, draft the five-section spec (screens and elements, states, Given/When/Then interactions, business rules, out of scope), immediately persist every draft or revision onto the project Kanban board with \`slp_board_save_spec({ title, acceptanceCriteria, spec, summary })\` instead of only sending it in chat, get explicit human approval, and pass it unchanged as \`productSpec\`. Adapt section names to the project (HUD/input/feedback for games, endpoints/payloads for APIs) but keep the scenarios.
@@ -205,7 +231,7 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 7. **Verification and completion:** inspect with \`slp_list_pipelines\`, \`slp_get_pipeline\`, \`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`slp_get_run\`, \`git diff\`; revive with \`slp_revive_agent\`; finish with \`slp_request_rework\` or \`slp_present_to_manager\`.
 8. **Turn rule:** *"After \`slp_delegate\`, \`slp_board_notify_lead\`, \`slp_request_rework\`, \`slp_relay_decision\` or \`slp_present_to_manager\` succeeds, END YOUR TURN."*
 
-### Mandatory Checklist When Editing \`.slp/LEAD.md\`
+### Checklist When Editing \`.slp/LEAD.md\`
 1. **Front matter:** \`role: master-lead\` (or \`lead\`) and a non-empty \`description\`. A \`model\` from another provider switches the Lead's provider.
 2. **Product spec and approved mockup are a contract:** the mockup under \`.slp/mockup/\` is the UI source of truth, the developer's task names it, and sibling Leads align shared contracts via \`slp_ask\`.
 3. **Pipeline shape:** \`{ pipeline: { name, description, stages: [{ name, kind?, goal, peers: [{ role, task }] }], brief? } }\` with role IDs from the catalog, no \`systemPrompt\` field, and the enforced shape \`[planning with advisors]? -> implement with one developer\`. Never recommend a review, QA or verify stage inside a feature pipeline.
@@ -217,7 +243,7 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 9. **No runtime files, no push:** runtime specs and reports live in SQLite; never \`git push\` \`slp/*\` branches.
 10. **Turn rule:** *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_resume_peers\`, \`slp_handle_peer_shell\` or \`slp_finalize_pipeline\` succeeds, END YOUR TURN."*
 
-### Mandatory Checklist When Editing \`.slp/QA_LEAD.md\`
+### Checklist When Editing \`.slp/QA_LEAD.md\`
 1. **Front matter:** \`role: qa-lead\` and a non-empty \`description\`. A \`model\` here applies to the QA Lead only.
 2. **Two phases:** preparation (read \`TEST_POLICY.md\`, map every product spec scenario and every feature brief criterion to a check, ask feature Leads via \`slp_ask\`, do not define a pipeline) and post-handover (define the QA pipeline, omitting \`worktree\`).
 3. **Never edit code:** the runtime denies its writes; fixes go to the verify stage's developer.
@@ -226,7 +252,7 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 6. **Close then report:** \`slp_finalize_pipeline\` (closes, no merge) then \`slp_report\` with the final scorecard; Supervisor rework arrives as a new QA pipeline with a new name.
 7. **Turn rule:** *"After \`slp_define_pipeline\`, \`slp_approve_stage\`, \`slp_stage_rework\`, \`slp_resume_pipeline\`, \`slp_handle_peer_shell\`, \`slp_finalize_pipeline\` or \`slp_report\` succeeds, END YOUR TURN."*
 
-### Mandatory Checklist When Editing Any \`.slp/peers/<group>/*.md\` File
+### Checklist When Editing Any \`.slp/peers/<group>/*.md\` File
 1. **Front matter:** unique, valid, non-reserved \`role\`, a clear \`description\`, an explicit \`kind\` and a \`tier\` that matches it.
 2. **Work from the stage mail:** the workflow relies on the goal, task, acceptance criteria and brief in the stage mail, never on an inherited Lead session.
 3. **Stay inside the kind:** advisors never write or propose implementing it themselves; QA graders never fix; the developer never widens the brief.
@@ -246,6 +272,7 @@ Start from the seeded files (the plugin writes them into an empty \`.slp/\`) and
 5. No role file mentions peer-to-peer messages, a "Prior Stage Peers" roster, a review/QA stage inside feature pipelines, or MANDATORY-style method contracts.
 6. Every \`slp_*\` tool named in a role file exists, the \`${BUS_SERVER_NAME}\` transport rule, the no-push rule and the turn rules are intact.
 7. Run the plugin's "Reload role workflows" button; it parses every file and reports the exact path of any error.
+8. Every changed file carries \`slp-contract: ${SLP_CONTRACT_VERSION}\` in its front matter.
 
 ## 6. Upgrading an Existing \`.slp\` to the Current Structure
 
@@ -255,7 +282,7 @@ Old files still load, but their instructions contradict the engine and cause rej
 2. **Lead:** replace recommended stage shapes such as \`design -> implement -> verify-and-review\` or multi-developer stages with \`[planning with advisors]? -> implement with one developer\`; remove any mockup stage or mockup submission step, and treat the approved \`.slp/mockup/<feature>.html\` as the UI contract; add the brief guidance, and the peer-pause / Brief-revision workflow (\`slp_pause_peers\` -> \`slp_board_update_brief\` -> \`slp_resume_peers\`, checklist item 5); remove \`slp_report\`, End-User UAT pipelines, merges into the base branch and "Prior Stage Peers" consultation; and remove steps that create worktrees yourself (a \`slp_create_worktree\` call before \`slp_define_pipeline\`, or a line saying the engine automatically creates an isolated worktree), because \`slp_define_pipeline\` attaches each pipeline to its checkout.
 3. **QA Lead:** the plugin re-seeds \`.slp/QA_LEAD.md\` when missing. Rewrite its stages as verify stages with graders and one fixer, and add the scorecard loop.
 4. **Peers:** add \`kind\` and a matching \`tier\` to every peer; turn code-reviewer style peers into planning advisors; give QA peers the scorecard report from \`references/PEER_TEMPLATES.md\`; delete "Method Contract", "Rejected Alternatives", "enumerate all edge cases", "STRICT TECHNICAL METRICS" and peer-to-peer coordination sections.
-5. **Mockups:** new mockups live in the git-tracked \`.slp/mockup/\`. Remove any ignore rule covering it. Old \`.slp/mockups/<feature>/versions/\` folders stay previewable from their tickets and can be deleted once nothing references them.
+5. **Mockups:** new mockups live in the git-tracked \`.slp/mockup/\`, with each \`<feature>.html\` as an index over \`features/<feature>/\`, \`core/\` and \`assets/\`. Move any inline script or style out of an old index. Remove any ignore rule covering it. Old \`.slp/mockups/<feature>/versions/\` folders stay previewable from their tickets and can be deleted once nothing references them.
 6. **Legacy \`.slp/peers/END_USER_UAT.md\`:** read it first and move project-specific journeys into the QA Lead's plan or into a \`kind: qa\` integration grader. Delete the file only after the human confirms, and remove every reference to the \`end-user\` role with it.
 7. **Standards:** create \`.slp/standards/TEST_POLICY.md\` from the investigation if it is missing.
 

@@ -1,6 +1,10 @@
 // A project role describes business expertise; its assignment is chosen by the Lead, not hardcoded in YAML.
 import { z } from "zod";
 
+// Version of the SLP role contract (engine rules plus the slp-manager skill). Every seeded or updated .slp file
+// carries it in front matter, so an update can tell which files predate the current contract.
+export const SLP_CONTRACT_VERSION = "2026-10-31";
+
 export const ProjectRoleIdSchema = z.string().regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/);
 
 // What a peer is allowed to do decides where the Lead may schedule it: advisors only discuss the plan,

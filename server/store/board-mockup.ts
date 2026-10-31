@@ -60,6 +60,7 @@ export function createMockupTicket(params: {
     currentSpecRev: 0,
     currentBriefRev: 0,
     lastSyncedSpecRev: 0,
+    specMockupCommit: null,
     specRevisions: [],
     mockup: null,
     briefRevisions: [],
