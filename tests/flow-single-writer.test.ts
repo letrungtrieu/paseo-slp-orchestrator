@@ -91,7 +91,8 @@ describe("single-writer pipeline shape", () => {
   it("does not fork peers unless the run enables it", async () => {
     const defaultFlow = await createFlow({ mode: "FULL_AUTO" });
     const { runId } = await startedRunWithPipeline(defaultFlow, DEFAULT_PIPELINE);
-    expect(defaultFlow.run(runId).orchestration).toEqual({ forkPeers: false, maxReworkRounds: 3 });
+    // Run settings default to no forking, checkouts per pipeline and three rework rounds.
+    expect(defaultFlow.run(runId).orchestration).toEqual({ forkPeers: false, spawnWorktrees: true, maxReworkRounds: 3 });
     const defaultPeerSpecs = defaultFlow.gateway.createdAgents.filter(({ spec }) => spec.role === "peer");
     expect(defaultPeerSpecs.length).toBeGreaterThan(0);
     expect(defaultPeerSpecs.every(({ spec }) => spec.extraOptions === undefined)).toBe(true);
