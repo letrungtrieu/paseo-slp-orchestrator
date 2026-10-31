@@ -7,7 +7,7 @@ import type { BusCaller, BusToolOutcome } from "../server/bus/http-mcp";
 import { approveBoardMockup, sendMockupFeedback } from "../server/pipeline/mockup-tools";
 import { abortRun } from "../server/pipeline/run-lifecycle";
 import { bundleMockupHtmlPreview } from "../server/pipeline/mockup-files";
-import { buildSpecWorkPrompt, STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
+import { buildSpecWorkPrompt, STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT, STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
 import { createBusDispatcher } from "../server/pipeline/tool-handlers";
 import { upgradeLegacyTicketPayload } from "../server/store/board-mockup";
 import { BoardTicketSchema, BOARD_COLUMNS, describeTicketRunBlocker, type BoardTicket } from "../shared/board";
@@ -104,6 +104,12 @@ describe("mockup-first product flow", () => {
     const coreOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", { file: "core/core.html", summary: "x" });
     const missingOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", { file: "missing.html", summary: "x" });
     expect([outsideOutcome.isError, coreOutcome.isError, missingOutcome.isError]).toEqual([true, true, true]);
+  });
+
+  it("tells the Product Agent to learn the project first and to do the mockup work itself", () => {
+    // A delegated agent starts without the project or the conversation, so the rule must be in the prompt every session gets.
+    expect(STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT).toContain("Orient yourself before you build");
+    expect(STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT).toContain("Never hand it to a sub-agent");
   });
 
   it("does not let a Product Agent reach Run-only tools", async () => {
