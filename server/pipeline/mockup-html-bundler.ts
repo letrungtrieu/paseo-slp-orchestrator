@@ -1,4 +1,4 @@
-// Self-contained HTML/CSS/JS/image bundler for `.slp/mockups/<feature>` so `<iframe srcDoc>` previews render all relative assets.
+// Self-contained HTML/CSS/JS/image bundler for `.slp/mockup` so `<iframe srcDoc>` previews render a feature file with its shared core.
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
@@ -8,10 +8,7 @@ import {
   encodeFileAsDataUri,
   EXTERNAL_ASSET_SCHEME_REGEX,
   resolveLocalAssetFilePath,
-  type BundleMockupHtmlPreviewOptions,
 } from "./mockup-asset-resolver";
-
-export type { BundleMockupHtmlPreviewOptions };
 
 const STYLESHEET_LINK_TAG_REGEX = /<link\b([^>]*?)>/gi;
 const EXTERNAL_SCRIPT_TAG_REGEX =
@@ -73,12 +70,11 @@ async function inlineCssUrlReferences(
 export async function bundleMockupHtmlPreview(
   repoPath: string,
   relativeEntryHtmlPath: string,
-  options?: BundleMockupHtmlPreviewOptions,
 ): Promise<{ absoluteHtmlPath: string; bundledHtml: string }> {
   const { allowedRoots, candidateBaseDirectories, mockupDirectoriesToIndex } =
-    buildCandidateBaseDirectories(repoPath, relativeEntryHtmlPath, options);
+    buildCandidateBaseDirectories(repoPath, relativeEntryHtmlPath);
 
-  // Locate the entry HTML file across repoPath and leadWorktreePath, falling back to repoPath for error reporting.
+  // Fall back to the plain repo path so a missing file reports where it was expected.
   const resolvedEntryCandidate = await resolveLocalAssetFilePath(
     relativeEntryHtmlPath,
     allowedRoots,

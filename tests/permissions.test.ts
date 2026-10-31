@@ -198,4 +198,32 @@ describe("Lead-assigned stage access", () => {
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), peer))).toBe(false);
     expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), { ...peer, archived: true }))).toBe(false);
   });
+
+  // The Product Agent has no stage, so these rules are all that keeps it away from production code.
+  describe("Product Agent mockup authoring", () => {
+    const productAgent = contextFor("supervisor", { stageActive: false, writableScope: [], mockupAuthor: true });
+
+    it("writes only inside the shared mockup source", () => {
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/mockup/checkout.html"), productAgent))).toBe(true);
+      expect(isAllowed(decidePermission(fileWriteRequest(`${WORKTREE}/.slp/mockup/core/core.css`), productAgent))).toBe(true);
+      expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), productAgent))).toBe(false);
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/mockups/old/index.html"), productAgent))).toBe(false);
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/LEAD.md"), productAgent))).toBe(false);
+    });
+
+    it("may commit and push mockup paths but nothing wider", () => {
+      const allowed = ["git add .slp/mockup && git commit -m mockup && git push", "git add ./.slp/mockup/checkout.html", "git status"];
+      for (const shellCommand of allowed) {
+        expect(isAllowed(decidePermission(shellRequest(shellCommand), productAgent))).toBe(true);
+      }
+      const denied = ["git add .", "git add -A", "git add src/a.ts", "rm -rf src", "git add .slp/mockup; rm -rf src", "git reset --hard", "git push && rm -rf src"];
+      for (const shellCommand of denied) {
+        expect(isAllowed(decidePermission(shellRequest(shellCommand), productAgent))).toBe(false);
+      }
+    });
+
+    it("keeps the push ban for every other role", () => {
+      expect(isAllowed(decidePermission(shellRequest("git push"), contextFor("master_lead")))).toBe(false);
+    });
+  });
 });

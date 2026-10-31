@@ -82,6 +82,8 @@ export const startRunRpc = defineRpc({
     peerPermissionModeId: z.string().optional(),
     // Optional per-run override controlling whether SLP spawns git worktrees or runs directly on baseBranch.
     spawnWorktrees: z.boolean().optional(),
+    // The prepared Kanban ticket this Run delivers; its Spec and approved mockup become the Supervisor's starting point.
+    ticketId: z.string().trim().min(1).optional(),
   }),
   output: z.object({
     runId: z.string(),
@@ -202,9 +204,9 @@ export const saveBoardSpecFromUiRpc = defineRpc({
   }),
 });
 
-// Spawns a standalone normal Paseo agent connected to the project's Kanban board so the human can discuss and draft Specs in chat.
-export const spawnBoardSpecAgentRpc = defineRpc({
-  name: "slp.board.spawn_spec_agent",
+// Spawns a standalone Product Agent so the human can shape a feature's mockup and Spec in chat before any Run exists.
+export const spawnBoardProductAgentRpc = defineRpc({
+  name: "slp.board.spawn_product_agent",
   input: z.object({
     repoPath: z.string().trim().min(1),
     runId: z.string().optional(),
@@ -216,40 +218,46 @@ export const spawnBoardSpecAgentRpc = defineRpc({
   }),
 });
 
-// Reads and bundles an HTML/CSS/JS mockup version (inlining relative .css and .js files) for instant live preview on the Kanban board.
+// Reads and bundles a ticket's mockup file (inlining relative .css and .js files) for instant live preview on the Kanban board.
 export const readBoardMockupPreviewRpc = defineRpc({
   name: "slp.board.read_mockup_preview",
   input: z.object({
     repoPath: z.string().trim().min(1),
     ticketId: z.string().trim().min(1),
-    version: z.number().int().min(1).optional(),
   }),
   output: z.object({
     ticketId: z.string(),
-    version: z.number().int().min(1),
     title: z.string(),
-    featureSlug: z.string(),
-    entryHtmlPath: z.string(),
+    file: z.string(),
     absoluteHtmlPath: z.string(),
     bundledHtml: z.string(),
   }),
 });
 
-// Allows the human to approve a specific mockup version or request a new mockup version (with optional HTML element comments) from the Kanban UI.
-export const reviewBoardMockupFromUiRpc = defineRpc({
-  name: "slp.board.review_mockup",
+// Stores the human's mockup notes on the ticket and hands them to the Product Agent, opening a new session when none is reachable.
+export const sendBoardMockupFeedbackRpc = defineRpc({
+  name: "slp.board.send_mockup_feedback",
   input: z.object({
     repoPath: z.string().trim().min(1),
-    runId: z.string().optional(),
     ticketId: z.string().trim().min(1),
-    decision: z.enum(["approve", "rework"]),
-    version: z.number().int().min(1).optional(),
     feedback: z.string().optional(),
     elementComments: z.array(MockupElementCommentInputSchema).optional(),
-    baseVersion: z.number().int().min(1).optional(),
   }),
   output: z.object({
     ticket: BoardTicketSchema,
-    notifiedAgentId: z.string().nullable(),
+    productAgentId: z.string(),
   }),
 });
+
+// Approves a ticket's mockup at the current commit; the daemon refuses while `.slp/mockup` has uncommitted changes.
+export const approveBoardMockupRpc = defineRpc({
+  name: "slp.board.approve_mockup",
+  input: z.object({
+    repoPath: z.string().trim().min(1),
+    ticketId: z.string().trim().min(1),
+  }),
+  output: z.object({
+    ticket: BoardTicketSchema,
+  }),
+});
+

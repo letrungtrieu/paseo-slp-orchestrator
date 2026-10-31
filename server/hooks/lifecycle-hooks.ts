@@ -7,7 +7,7 @@ import { ensureAntigravityMcpBridge } from "../bus/antigravity-mcp-bridge";
 import { isMasterLeadObligationActive } from "../pipeline/master-lead-obligations";
 import type { PipelineContext } from "../pipeline/context";
 import { handleAgentArchived } from "../pipeline/run-lifecycle";
-import { findStandaloneSpecAgentById } from "../pipeline/spec-agent";
+import { findStandaloneProductAgentById } from "../pipeline/product-agent";
 import { pausePipelineForAgent } from "../pipeline/stage-context";
 import { isQaPhaseActive } from "../pipeline/qa/qa-phase-state";
 import { nudgeReminder } from "../prompts/messages";
@@ -223,8 +223,8 @@ export function registerLifecycleHooks(server: PluginServerContext, ctx: Pipelin
       server.before("agent.session_open", async ({ request: sessionOpenRequest }, hookContext) => {
         ctx.holder.capture(hookContext.paseo);
         const callerLookup = ctx.store.findAgent(sessionOpenRequest.agentId);
-        const standaloneSpecSession = callerLookup ? null : findStandaloneSpecAgentById(sessionOpenRequest.agentId);
-        const resolvedAgentToken = callerLookup?.agentRecord.token ?? standaloneSpecSession?.token ?? null;
+        const standaloneProductSession = callerLookup ? null : findStandaloneProductAgentById(sessionOpenRequest.agentId);
+        const resolvedAgentToken = callerLookup?.agentRecord.token ?? standaloneProductSession?.token ?? null;
         if (!resolvedAgentToken) return undefined;
         if (ctx.stateDirectory && sessionOpenRequest.provider.startsWith("antigravity")) {
           try {

@@ -27,11 +27,11 @@ import {
   updateBoardBrief,
   updateBoardBriefItem,
 } from "./board-tools";
-import { reviewBoardMockup, submitBoardMockup } from "./mockup-tools";
+import { setBoardMockup } from "./mockup-tools";
 import {
-  findStandaloneSpecAgentByToken,
-  STANDALONE_SPEC_AGENT_TOOLS,
-} from "./spec-agent";
+  findStandaloneProductAgentByToken,
+  STANDALONE_PRODUCT_AGENT_TOOLS,
+} from "./product-agent";
 import { ToolError } from "./tool-error";
 
 type ToolInput<Name extends BusToolName> = z.output<(typeof BUS_TOOL_DEFINITIONS)[Name]["input"]>;
@@ -76,8 +76,7 @@ const TOOL_HANDLERS: { [Name in BusToolName]: ToolHandler<Name> } = {
   slp_board_update_brief: (ctx, caller, input) => updateBoardBrief(ctx, caller, input),
   slp_board_update_item: (ctx, caller, input) => updateBoardBriefItem(ctx, caller, input),
   slp_board_score_item: (ctx, caller, input) => scoreBoardBriefItems(ctx, caller, input),
-  slp_submit_mockup: (ctx, caller, input) => submitBoardMockup(ctx, caller, input),
-  slp_review_mockup: (ctx, caller, input) => reviewBoardMockup(ctx, caller, input),
+  slp_board_set_mockup: (ctx, caller, input) => setBoardMockup(ctx, caller, input),
 };
 
 export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
@@ -85,17 +84,17 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
     resolveCaller(token: string): BusCaller | null {
       const lookup = ctx.store.findCallerByToken(token);
       if (!lookup) {
-        // Authenticate standalone normal Spec Agents that operate on a repository's Kanban board outside any SLP Run.
-        const standaloneSpecSession = findStandaloneSpecAgentByToken(token);
-        if (!standaloneSpecSession) return null;
+        // Authenticate standalone Product Agents that operate on a repository's Kanban board outside any SLP Run.
+        const standaloneProductSession = findStandaloneProductAgentByToken(token);
+        if (!standaloneProductSession) return null;
         return {
           runId: "",
-          agentId: standaloneSpecSession.agentId,
+          agentId: standaloneProductSession.agentId,
           role: "supervisor",
-          projectRole: "spec-agent",
+          projectRole: "product-agent",
           taskId: null,
-          repoPath: standaloneSpecSession.repoPath,
-          allowedTools: STANDALONE_SPEC_AGENT_TOOLS,
+          repoPath: standaloneProductSession.repoPath,
+          allowedTools: STANDALONE_PRODUCT_AGENT_TOOLS,
         };
       }
       if (lookup.agentRecord.archivedAt) return null;
@@ -107,11 +106,11 @@ export function createBusDispatcher(ctx: PipelineContext): BusTransportDeps {
         projectRole: agentRecord.projectRole, taskId: null };
     },
     async dispatch(caller: BusCaller, toolName: string, rawArguments: unknown, abortSignal?: AbortSignal): Promise<BusToolOutcome> {
-      // Handle standalone Spec Agents that are not bound to any SLP Run in SQLite.
+      // Handle standalone Product Agents that are not bound to any SLP Run in SQLite.
       if (caller.allowedTools && !caller.runId) {
         try {
           if (!isBusToolName(toolName) || !caller.allowedTools.includes(toolName)) {
-            throw new ToolError(`Tool '${toolName}' is not available to this Spec session.`);
+            throw new ToolError(`Tool '${toolName}' is not available to this Product Agent session.`);
           }
           const definition = BUS_TOOL_DEFINITIONS[toolName];
           const parsedInput = definition.input.safeParse(rawArguments ?? {});

@@ -12,7 +12,7 @@ export interface BusCaller {
   role: SlpRole;
   projectRole?: string | null;
   taskId: string | null;
-  // Populated for standalone Spec Agents that operate on a repository's Kanban board outside any SLP Run.
+  // Populated for standalone Product Agents that operate on a repository's Kanban board outside any SLP Run.
   repoPath?: string | null;
   allowedTools?: readonly BusToolName[] | null;
 }

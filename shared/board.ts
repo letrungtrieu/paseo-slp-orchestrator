@@ -1,23 +1,21 @@
-// Project-scoped Kanban board contracts for tracking Spec -> Mockup -> Brief -> Score -> Rework across runs.
+// Project-scoped Kanban board contracts for tracking Mockup -> Spec -> Brief -> Score -> Rework across runs.
 import { z } from "zod";
 import type { PipelineBrief } from "./pipeline";
 
-// The six Kanban columns mirror the lifecycle of a feature from Spec and HTML Mockup review to verified delivery.
-export const BOARD_COLUMNS = ["spec", "mockup", "brief", "score", "rework", "done"] as const;
+// The six Kanban columns mirror a feature's lifecycle: ideas take shape in the mockup, the Spec records what was decided, then a Run delivers it.
+export const BOARD_COLUMNS = ["mockup", "spec", "brief", "score", "rework", "done"] as const;
 export const BoardColumnSchema = z.enum(BOARD_COLUMNS);
 export type BoardColumn = z.infer<typeof BoardColumnSchema>;
 
-// Tracks review state for each immutable HTML/CSS/JS mockup version stored under .slp/mockups/<feature>/versions/v<N>.
-export const MOCKUP_REVISION_STATUSES = [
-  "pending_review",
-  "approved",
-  "rework_requested",
-  "superseded",
-] as const;
-export const MockupRevisionStatusSchema = z.enum(MOCKUP_REVISION_STATUSES);
-export type MockupRevisionStatus = z.infer<typeof MockupRevisionStatusSchema>;
+// Single git-tracked mockup source for the whole project: one HTML file per feature sharing `core/` CSS and JS so every mockup keeps one style.
+export const MOCKUP_ROOT = ".slp/mockup";
 
-// Review comment anchored to a specific HTML element/tag inside a feature mockup (`index.html`).
+// Git owns the history of a mockup file, so a ticket only tracks whether the human has approved its current content.
+export const MOCKUP_STATUSES = ["draft", "approved"] as const;
+export const MockupStatusSchema = z.enum(MOCKUP_STATUSES);
+export type MockupStatus = z.infer<typeof MockupStatusSchema>;
+
+// Review comment anchored to a specific HTML element/tag inside a feature mockup file.
 export const MockupElementCommentSchema = z.object({
   id: z.string().trim().min(1),
   selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
@@ -37,26 +35,22 @@ export const MockupElementCommentInputSchema = z.object({
 });
 export type MockupElementCommentInput = z.infer<typeof MockupElementCommentInputSchema>;
 
-// Immutable snapshot metadata for one HTML/CSS/JS mockup version (v1, v2, v3...) of a feature ticket.
-export const MockupRevisionSchema = z.object({
-  version: z.number().int().min(1),
-  specRev: z.number().int().min(1).default(1),
-  title: z.string().trim().min(1),
+// A ticket's link to its feature mockup file, plus the open review notes the Product Agent still has to address.
+export const TicketMockupSchema = z.object({
+  file: z.string().trim().min(1).describe("Repository-relative path such as .slp/mockup/checkout.html"),
   summary: z.string().trim().default(""),
-  featureSlug: z.string().trim().min(1),
-  workingDirPath: z.string().trim().min(1),
-  versionDirPath: z.string().trim().min(1),
-  entryHtmlPath: z.string().trim().min(1),
-  status: MockupRevisionStatusSchema.default("pending_review"),
+  status: MockupStatusSchema.default("draft"),
+  // Pins the exact content the human approved, because the file itself can keep changing afterwards.
+  approvedCommit: z.string().nullable().default(null),
+  approvedAt: z.string().nullable().default(null),
   feedback: z.string().nullable().default(null),
   elementComments: z.array(MockupElementCommentSchema).default([]),
   authorAgentId: z.string(),
-  createdAt: z.string(),
-  reviewedAt: z.string().nullable().default(null),
+  updatedAt: z.string(),
 });
-export type MockupRevision = z.infer<typeof MockupRevisionSchema>;
+export type TicketMockup = z.infer<typeof TicketMockupSchema>;
 
-// Normalize a feature or ticket title into a filesystem-safe slug for `.slp/mockups/<feature>`.
+// Normalize a feature or ticket title into a filesystem-safe slug for `.slp/mockup/<feature>.html`.
 export function deriveFeatureMockupSlug(rawFeatureName: string, fallbackKey = "feature"): string {
   const asciiNormalized = rawFeatureName
     .normalize("NFD")
@@ -174,13 +168,11 @@ export const BoardTicketSchema = z.object({
   acceptanceCriteria: z.string().default(""),
   column: BoardColumnSchema.default("spec"),
   currentSpecRev: z.number().int().min(0).default(0),
-  currentMockupRev: z.number().int().min(0).default(0),
-  approvedMockupRev: z.number().int().min(0).nullable().default(null),
   currentBriefRev: z.number().int().min(0).default(0),
   // When currentSpecRev > lastSyncedSpecRev, the UI and Lead know the Spec changed since the Brief was written.
   lastSyncedSpecRev: z.number().int().min(0).default(0),
   specRevisions: z.array(SpecRevisionSchema).default([]),
-  mockupRevisions: z.array(MockupRevisionSchema).default([]),
+  mockup: TicketMockupSchema.nullable().default(null),
   briefRevisions: z.array(BriefRevisionSchema).default([]),
   approach: z.string().default(""),
   items: z.array(BriefItemSchema).default([]),
@@ -192,6 +184,19 @@ export const BoardTicketSchema = z.object({
   updatedAt: z.string(),
 });
 export type BoardTicket = z.infer<typeof BoardTicketSchema>;
+
+// Explains why a ticket cannot start a Run yet, or returns null when it is ready; shared so the UI and daemon apply the same gate.
+export function describeTicketRunBlocker(
+  ticket: Pick<BoardTicket, "ticketKey" | "currentSpecRev" | "mockup" | "activeRunId">,
+): string | null {
+  if (ticket.activeRunId) return `Ticket '${ticket.ticketKey}' already belongs to a Run.`;
+  // An unapproved mockup means the idea is still moving, so a Run would build something the human has not settled on.
+  if (ticket.mockup && ticket.mockup.status !== "approved") {
+    return `Approve the mockup of '${ticket.ticketKey}' before starting a Run.`;
+  }
+  if (ticket.currentSpecRev < 1) return `Write the Spec of '${ticket.ticketKey}' before starting a Run.`;
+  return null;
+}
 
 // Input schema for the Lead's tool to create or revise the Brief when planning or resolving conflicts.
 export const BriefItemInputSchema = z.object({

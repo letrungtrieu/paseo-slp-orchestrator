@@ -1,6 +1,7 @@
-// Path resolution, base64 data-URI encoding, and inspector bridge script generation for `.slp/mockups/<feature>` previews.
+// Path resolution, base64 data-URI encoding, and inspector bridge script generation for `.slp/mockup` previews.
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { MOCKUP_ROOT } from "../../shared/board";
 
 export const EXTERNAL_ASSET_SCHEME_REGEX = /^(?:https?:|data:|blob:|mailto:|tel:|javascript:|about:|\/\/|#)/i;
 
@@ -34,11 +35,6 @@ const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
   ".webmanifest": "application/manifest+json",
 };
 
-export interface BundleMockupHtmlPreviewOptions {
-  leadWorktreePath?: string | null;
-  workingDirPath?: string | null;
-}
-
 // Verify that a resolved candidate file stays inside one of the authorized repository or worktree roots.
 export function isPathInsideAllowedRoots(
   candidateFilePath: string,
@@ -54,45 +50,22 @@ export function isPathInsideAllowedRoots(
   });
 }
 
-// Construct ordered candidate base directories covering the archived version folder, the working mockup folder, and workspace roots.
+// Construct ordered candidate base directories: the mockup's own folder first, then workspace locations agents commonly reference.
 export function buildCandidateBaseDirectories(
   repoPath: string,
   relativeEntryHtmlPath: string,
-  options?: BundleMockupHtmlPreviewOptions,
 ): { allowedRoots: string[]; candidateBaseDirectories: string[]; mockupDirectoriesToIndex: string[] } {
-  const normalizedEntryDir = dirname(relativeEntryHtmlPath.replace(/\\/g, "/"));
-  // Archiving into `.slp/mockups/<feature>/versions/v<N>` shifts depth by 2 levels; recover `.slp/mockups/<feature>` so `../` paths still resolve.
-  const inferredWorkingRelativeDir =
-    options?.workingDirPath?.trim().replace(/\\/g, "/") ||
-    normalizedEntryDir.replace(/\/versions\/v\d+$/i, "");
-
-  const workspaceRoots = [
-    resolve(repoPath),
-    ...(options?.leadWorktreePath?.trim() ? [resolve(options.leadWorktreePath.trim())] : []),
-  ];
-  const uniqueAllowedRoots = [...new Set(workspaceRoots)];
-
-  const orderedCandidates: string[] = [];
-  const mockupDirectoriesToIndex: string[] = [];
-
-  for (const workspaceRoot of uniqueAllowedRoots) {
-    const versionDirectory = resolve(workspaceRoot, normalizedEntryDir);
-    const workingMockupDirectory = resolve(workspaceRoot, inferredWorkingRelativeDir);
-    orderedCandidates.push(versionDirectory, workingMockupDirectory);
-    mockupDirectoriesToIndex.push(versionDirectory, workingMockupDirectory);
-  }
-  for (const workspaceRoot of uniqueAllowedRoots) {
-    orderedCandidates.push(
-      resolve(workspaceRoot, ".slp/mockups"),
-      workspaceRoot,
-      resolve(workspaceRoot, "public"),
-    );
-  }
-
+  const repoRoot = resolve(repoPath);
+  const entryDirectory = resolve(repoRoot, dirname(relativeEntryHtmlPath.replace(/\\/g, "/")));
   return {
-    allowedRoots: uniqueAllowedRoots,
-    candidateBaseDirectories: [...new Set(orderedCandidates)],
-    mockupDirectoriesToIndex: [...new Set(mockupDirectoriesToIndex)],
+    allowedRoots: [repoRoot],
+    candidateBaseDirectories: [...new Set([
+      entryDirectory,
+      resolve(repoRoot, MOCKUP_ROOT),
+      repoRoot,
+      resolve(repoRoot, "public"),
+    ])],
+    mockupDirectoriesToIndex: [entryDirectory],
   };
 }
 
@@ -197,10 +170,6 @@ export async function collectMockupDirectoryAssetMap(
     }
     for (const directoryEntry of entries) {
       if (indexedImageCount >= MAX_PREINDEXED_MOCKUP_IMAGES) break;
-      // Skip archived `versions` subdirectories when walking the working mockup directory.
-      if (directoryEntry.name === "versions" && currentDir === rootMockupDir) {
-        continue;
-      }
       const fullEntryPath = join(currentDir, directoryEntry.name);
       if (!isPathInsideAllowedRoots(fullEntryPath, allowedRoots)) {
         continue;

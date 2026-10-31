@@ -16,35 +16,36 @@ import {
 import { MockupCardInspector } from "./mockup-card-inspector";
 import { InspectorTagBadge, OptionCardInspector } from "./option-card-inspector";
 import { SpecMarkdownEditor } from "./spec-markdown-editor";
+import { StartTicketRunButton } from "./start-ticket-run-button";
 
 interface TicketDetailPanelProps {
   styles: UiStyles;
   theme: PluginTheme;
   ticket: BoardTicket;
   selection: KanbanCardSelection;
-  selectedRunId: string | null;
-  isSpawningSpecAgent?: boolean;
-  onSpawnSpecAgent?: (targetTicketKey?: string) => void;
-  onOpenPreviewVersion?: (ticket: BoardTicket, versionNumber: number) => void;
+  isSpawningProductAgent?: boolean;
+  onSpawnProductAgent?: (targetTicketKey?: string) => void;
+  onOpenPreview?: (ticket: BoardTicket) => void;
+  onOpenSupervisor?: (agentId: string) => void;
   onClose: () => void;
 }
 
-// Inspector rendered ONLY when the user selects a Spec card in Column 1 (SPEC).
+// Inspector rendered ONLY when the user selects a Spec card in Column 2 (SPEC).
 function SpecCardInspector({
   styles,
   theme,
   ticket,
-  selectedRunId,
-  isSpawningSpecAgent,
-  onSpawnSpecAgent,
+  isSpawningProductAgent,
+  onSpawnProductAgent,
+  onOpenSupervisor,
   onClose,
 }: {
   styles: UiStyles;
   theme: PluginTheme;
   ticket: BoardTicket;
-  selectedRunId: string | null;
-  isSpawningSpecAgent?: boolean;
-  onSpawnSpecAgent?: (targetTicketKey?: string) => void;
+  isSpawningProductAgent?: boolean;
+  onSpawnProductAgent?: (targetTicketKey?: string) => void;
+  onOpenSupervisor?: (agentId: string) => void;
   onClose: () => void;
 }) {
   const { saveBoardSpec } = useBoardActions();
@@ -69,7 +70,8 @@ function SpecCardInspector({
     // Saving a Spec edit creates a new Spec revision with unified diff and notifies the Supervisor.
     saveBoardSpec.mutate({
       repoPath: ticket.repoPath,
-      runId: selectedRunId ?? ticket.activeRunId ?? undefined,
+      // Only the ticket's own Run counts: an unrelated selected Run must not absorb a card still being prepared.
+      runId: ticket.activeRunId ?? undefined,
       ticketId: ticket.ticketKey,
       title: ticket.title,
       specContent: editedSpecContent.trim() || ticket.title,
@@ -102,16 +104,16 @@ function SpecCardInspector({
             backgroundColor={specColor.badgeBackground}
             textColor={specColor.badgeTextColor}
           />
-          <Text style={styles.sectionTitle}>Product Spec (Human & Supervisor)</Text>
+          <Text style={styles.sectionTitle}>Product Spec</Text>
         </View>
         <View style={styles.row}>
-          {onSpawnSpecAgent ? (
+          {onSpawnProductAgent ? (
             <ActionButton
               styles={styles}
-              label={isSpawningSpecAgent ? "Opening Agent..." : "Discuss with Agent"}
-              accessibilityLabel={`Open a Spec Agent to discuss and refine ${ticket.ticketKey}`}
-              disabled={isSpawningSpecAgent}
-              onPress={() => onSpawnSpecAgent(ticket.ticketKey)}
+              label={isSpawningProductAgent ? "Opening Agent..." : "Discuss with Agent"}
+              accessibilityLabel={`Open a Product Agent to discuss and refine ${ticket.ticketKey}`}
+              disabled={isSpawningProductAgent}
+              onPress={() => onSpawnProductAgent(ticket.ticketKey)}
             />
           ) : null}
           {ticket.specRevisions.length > 0 ? (
@@ -174,8 +176,8 @@ function SpecCardInspector({
           <ActionButton
             styles={styles}
             tone="primary"
-            label={saveBoardSpec.isPending ? "Applying..." : "Apply Spec & Notify Supervisor"}
-            accessibilityLabel={`Apply Spec changes for ${ticket.ticketKey} and notify Supervisor`}
+            label={saveBoardSpec.isPending ? "Applying..." : "Apply Spec"}
+            accessibilityLabel={`Apply Spec changes for ${ticket.ticketKey}`}
             disabled={saveBoardSpec.isPending || !hasUnsavedSpecEdits}
             onPress={handleApplySpec}
           />
@@ -186,12 +188,13 @@ function SpecCardInspector({
           ) : null}
         </View>
         {saveErrorMessage ? <Text style={styles.dangerText}>{saveErrorMessage}</Text> : null}
+        <StartTicketRunButton styles={styles} ticket={ticket} onOpenSupervisor={onOpenSupervisor} />
       </View>
     </View>
   );
 }
 
-// Inspector rendered ONLY when the user selects a Brief card in Column 2 (BRIEF).
+// Inspector rendered ONLY when the user selects a Brief card in Column 3 (BRIEF).
 function BriefCardInspector({
   styles,
   theme,
@@ -368,10 +371,10 @@ export function TicketDetailPanel({
   theme,
   ticket,
   selection,
-  selectedRunId,
-  isSpawningSpecAgent,
-  onSpawnSpecAgent,
-  onOpenPreviewVersion,
+  isSpawningProductAgent,
+  onSpawnProductAgent,
+  onOpenPreview,
+  onOpenSupervisor,
   onClose,
 }: TicketDetailPanelProps) {
   if (selection.kind === "spec") {
@@ -380,9 +383,9 @@ export function TicketDetailPanel({
         styles={styles}
         theme={theme}
         ticket={ticket}
-        selectedRunId={selectedRunId}
-        isSpawningSpecAgent={isSpawningSpecAgent}
-        onSpawnSpecAgent={onSpawnSpecAgent}
+        isSpawningProductAgent={isSpawningProductAgent}
+        onSpawnProductAgent={onSpawnProductAgent}
+        onOpenSupervisor={onOpenSupervisor}
         onClose={onClose}
       />
     );
@@ -394,8 +397,8 @@ export function TicketDetailPanel({
         styles={styles}
         theme={theme}
         ticket={ticket}
-        selectedRunId={selectedRunId}
-        onOpenPreviewVersion={onOpenPreviewVersion ?? (() => undefined)}
+        onOpenPreview={onOpenPreview ?? (() => undefined)}
+        onOpenAgent={onOpenSupervisor}
         onClose={onClose}
       />
     );

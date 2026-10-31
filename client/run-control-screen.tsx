@@ -113,7 +113,7 @@ export function SlpOrchestratorTabbedView({
         })}
       </View>
 
-      {/* Tab 1 (SLP): Start a new SLP session with host selection, project selection, and session name. */}
+      {/* Tab 1 (SLP): Start a new SLP session with host selection, project selection, and a ready ticket. */}
       {activeTab === "slp" ? (
         <StartRunForm
           styles={styles}

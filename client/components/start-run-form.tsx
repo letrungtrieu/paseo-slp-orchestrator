@@ -1,20 +1,13 @@
-// Focused "SLP" tab form for starting a new SLP run with only project selection and session name.
+// Focused "SLP" tab form for starting an SLP run from a ticket prepared on the project Kanban board.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { ProviderRole } from "../../shared/settings";
-import {
-  resolvePermissionModeId,
-  resolveProviderModel,
-  resolveThinkingOptionId,
-} from "../models/provider-selection";
+import { describeTicketRunBlocker } from "../../shared/board";
 import type { UiStyles } from "../styles";
-import { useProjectPrompts } from "../use-project-prompts";
-import { useProviderCatalog } from "../use-provider-catalog";
+import { useBoardTickets } from "../use-board";
 import { describeRpcError, useRunActions } from "../use-run";
-import { useSlpSettings } from "../use-slp-settings";
+import { useRunStartOptions } from "../use-run-start-options";
 import { ActionButton } from "./action-button";
-import { LabeledInput } from "./labeled-input";
 import { RepositoryFolderPicker } from "./repository-folder-picker";
 
 interface StartRunFormProps {
@@ -44,10 +37,12 @@ export function StartRunForm({
   const effectiveRepoPath = selectedRepositoryPath ?? internalRepoPath;
   const handleSelectRepoPath = onSelectRepositoryPath ?? setInternalRepoPath;
 
-  const [runName, setRunName] = useState("");
-  const providerCatalog = useProviderCatalog(effectiveRepoPath, selectedHostId);
-  const settings = useSlpSettings(providerCatalog);
-  const { roles: roleSelections, orchestration } = settings.configuration;
+  const [selectedTicketKey, setSelectedTicketKey] = useState<string | null>(null);
+  const { runInput, isReady, settings, promptsErrorMessage } = useRunStartOptions(
+    effectiveRepoPath,
+    selectedHostId,
+  );
+  const { orchestration } = settings.configuration;
   const [spawnWorktrees, setSpawnWorktrees] = useState<boolean>(
     orchestration.spawnWorktrees ?? true,
   );
@@ -56,57 +51,23 @@ export function StartRunForm({
     setSpawnWorktrees(orchestration.spawnWorktrees ?? true);
   }, [orchestration.spawnWorktrees]);
 
-  // Ensure role workflow prompts are initialized for the chosen repository before starting the run.
-  const projectPrompts = useProjectPrompts(effectiveRepoPath);
-
-  // Resolve the catalog defaults configured in the Settings tab so submitted run options match persisted agent defaults.
-  const providerModelForRole = (providerRole: ProviderRole) =>
-    resolveProviderModel(roleSelections[providerRole], providerCatalog.modelChoices);
-  const roleProviderModels = {
-    supervisor: providerModelForRole("supervisor"),
-    lead: providerModelForRole("lead"),
-    peer: providerModelForRole("peer"),
-  };
-  const roleThinkingOptionIds = {
-    supervisor: resolveThinkingOptionId(roleSelections.supervisor, roleProviderModels.supervisor),
-    lead: resolveThinkingOptionId(roleSelections.lead, roleProviderModels.lead),
-    peer: resolveThinkingOptionId(roleSelections.peer, roleProviderModels.peer),
-  };
-  const rolePermissionModeIds = {
-    supervisor: resolvePermissionModeId(
-      roleSelections.supervisor,
-      roleProviderModels.supervisor,
-      providerCatalog.permissionModesByProvider,
-    ),
-    lead: resolvePermissionModeId(
-      roleSelections.lead,
-      roleProviderModels.lead,
-      providerCatalog.permissionModesByProvider,
-    ),
-    peer: resolvePermissionModeId(
-      roleSelections.peer,
-      roleProviderModels.peer,
-      providerCatalog.permissionModesByProvider,
-    ),
-  };
+  // Only prepared tickets can start a Run, because a Run delivers an approved mockup and Spec rather than a new idea.
+  const boardQuery = useBoardTickets({ repoPath: effectiveRepoPath || null });
+  const readyTickets = (boardQuery.data?.tickets ?? []).filter(
+    (ticket) => describeTicketRunBlocker(ticket) === null,
+  );
+  const selectedTicket =
+    readyTickets.find((ticket) => ticket.ticketKey === selectedTicketKey) ?? null;
 
   // Trimmed here because a pasted path often carries a trailing newline that git would reject.
-  // Omit baseBranch and force FULL_AUTO so the daemon auto-detects the project's checked-out branch and runs autonomously.
   const submitRun = () => {
+    if (!selectedTicket) return;
     startRun.mutate(
       {
+        ...runInput,
         repoPath: effectiveRepoPath.trim(),
-        name: runName.trim(),
-        mode: "FULL_AUTO",
-        supervisorProvider: roleProviderModels.supervisor?.value,
-        leadProvider: roleProviderModels.lead?.value,
-        peerProvider: roleProviderModels.peer?.value,
-        supervisorThinkingOptionId: roleThinkingOptionIds.supervisor ?? undefined,
-        leadThinkingOptionId: roleThinkingOptionIds.lead ?? undefined,
-        peerThinkingOptionId: roleThinkingOptionIds.peer ?? undefined,
-        supervisorPermissionModeId: rolePermissionModeIds.supervisor ?? undefined,
-        leadPermissionModeId: rolePermissionModeIds.lead ?? undefined,
-        peerPermissionModeId: rolePermissionModeIds.peer ?? undefined,
+        name: selectedTicket.title,
+        ticketId: selectedTicket.ticketKey,
         spawnWorktrees,
       },
       // The Supervisor is the human's control point; pass its id so the client can open that chat after creation.
@@ -124,18 +85,8 @@ export function StartRunForm({
   };
 
   // Daemon-side failures (not a git repo, detached HEAD) arrive as thrown RPC errors and are shown inline under the button.
-  const startErrorMessage =
-    describeRpcError(startRun.error) ?? describeRpcError(projectPrompts.error);
-  const isStartDisabled =
-    !settings.isEditable ||
-    effectiveRepoPath.trim() === "" ||
-    runName.trim() === "" ||
-    providerCatalog.isPending ||
-    providerCatalog.modelChoices.length === 0 ||
-    projectPrompts.isFetching ||
-    projectPrompts.isPending ||
-    projectPrompts.isError ||
-    startRun.isPending;
+  const startErrorMessage = describeRpcError(startRun.error) ?? promptsErrorMessage;
+  const isStartDisabled = !isReady || !selectedTicket || startRun.isPending;
 
   return (
     <View style={styles.card}>
@@ -149,13 +100,35 @@ export function StartRunForm({
         selectedHostId={selectedHostId}
         onSelectHostId={onSelectHostId}
       />
-      <LabeledInput
-        styles={styles}
-        theme={theme}
-        label="Name"
-        value={runName}
-        onChangeText={setRunName}
-      />
+      <Text style={styles.fieldLabel}>Ready Ticket</Text>
+      {readyTickets.length === 0 ? (
+        <Text style={styles.mutedText}>
+          No ready tickets. Open the project Kanban board, shape a feature with + New Feature, approve its mockup and write its Spec.
+        </Text>
+      ) : (
+        <View style={styles.row}>
+          {readyTickets.map((readyTicket) => {
+            const isSelectedTicket = readyTicket.ticketKey === selectedTicketKey;
+            return (
+              <Pressable
+                key={readyTicket.id}
+                accessibilityRole="button"
+                accessibilityState={{ selected: isSelectedTicket }}
+                accessibilityLabel={`Select ${readyTicket.ticketKey} ${readyTicket.title}`}
+                onPress={() => setSelectedTicketKey(readyTicket.ticketKey)}
+                style={[
+                  styles.chip,
+                  { borderColor: isSelectedTicket ? theme.colors.accent : theme.colors.border },
+                ]}
+              >
+                <Text style={styles.chipText}>
+                  {readyTicket.ticketKey} · {readyTicket.title}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
       {/* Checkbox allowing the user to disable worktree spawning so all SLP agents work directly on baseBranch. */}
       <Pressable
         accessibilityRole="checkbox"
@@ -189,7 +162,6 @@ export function StartRunForm({
         tone="primary"
         label={startRun.isPending ? "Starting..." : "Start run"}
         accessibilityLabel="Start SLP run"
-        // Missing project or model choices are blocked before a run can leave worktrees behind.
         disabled={isStartDisabled}
         onPress={submitRun}
       />

@@ -22,9 +22,9 @@ export function approveStage(
   const { run, pipeline, stage } = requireStageLead(ctx, caller);
   const { summary, brief } = input;
   const nextStage = pipeline.stages[pipeline.currentStageIndex + 1];
-  // The final pre-implement stage (planning or mockup) must lock the brief before the developer implement stage starts.
+  // The planning stage must lock the brief before the developer implement stage starts.
   if (
-    (stage.kind === "planning" || stage.kind === "mockup") &&
+    stage.kind === "planning" &&
     nextStage?.kind === "implement" &&
     !brief &&
     !pipeline.brief

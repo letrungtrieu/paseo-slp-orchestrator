@@ -130,7 +130,12 @@ export async function delegate(
   if (run.criteria !== null && run.status !== "delegating" && run.status !== "completed") {
     throw new ToolError("The project was already delegated. Use slp_request_rework for changes.");
   }
-  const { overallCriteria, overallProductSpec, sharedContext, tasks } = normalizeDelegationSubmission(run, rawInput);
+  const { overallCriteria, overallProductSpec: submittedProductSpec, sharedContext, tasks } = normalizeDelegationSubmission(run, rawInput);
+  // A Run started from a ticket already holds the approved Spec, so an omitted productSpec must not erase it.
+  const overallProductSpec = submittedProductSpec ?? run.productSpec ?? null;
+  // Every Lead builds against the same approved mockup; it travels by file and commit so Leads read the real source.
+  const approvedMockup = ctx.store.board.listByRun(runId)
+    .find((runTicket) => runTicket.mockup?.status === "approved")?.mockup ?? null;
   // The QA branch must exist first: feature worktrees fork from the run's integration branch, which it becomes.
   const qaWorkspace = await provisionQaWorkspace(ctx, runId);
   const provisionedLeads: Array<{
@@ -176,7 +181,7 @@ export async function delegate(
     worktreePath: workspace.cwd,
     branch: workspace.branch,
     acceptanceCriteria: task.acceptanceCriteria,
-    productSpec: task.productSpec ?? null,
+    productSpec: task.productSpec ?? overallProductSpec,
   }));
   const qaLeadContact = { agentId: qaLeadAgentId, worktreePath: qaWorkspace.cwd, branch: qaWorkspace.branch };
 
@@ -196,7 +201,7 @@ export async function delegate(
         leadRecord.worktreePath = workspace.cwd;
         leadRecord.featureName = task.name;
         leadRecord.featureCriteria = task.acceptanceCriteria;
-        leadRecord.featureSpec = task.productSpec ?? null;
+        leadRecord.featureSpec = task.productSpec ?? overallProductSpec;
       }
       // Preserve a descriptive title saved earlier via slp_board_save_spec when single-feature delegation fell back to run.title.
       const unboundRunTicket = ctx.store.board
@@ -232,7 +237,8 @@ export async function delegate(
           ? {
               featureName: currentLead.task.name,
               featureCriteria: currentLead.task.acceptanceCriteria,
-              productSpec: currentLead.task.productSpec,
+              productSpec: currentLead.task.productSpec ?? overallProductSpec ?? undefined,
+              approvedMockup,
               worktreePath: currentLead.workspace.cwd,
               branch: currentLead.workspace.branch,
               sharedContext,
@@ -240,7 +246,8 @@ export async function delegate(
               qaLead: qaLeadContact,
             }
           : {
-              productSpec: currentLead.task.productSpec,
+              productSpec: currentLead.task.productSpec ?? overallProductSpec ?? undefined,
+              approvedMockup,
               worktreePath: currentLead.workspace.cwd,
               branch: currentLead.workspace.branch,
               qaLead: qaLeadContact,

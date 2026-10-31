@@ -11,7 +11,7 @@ export interface SpecColorIdentity {
 // Selection state discriminating whether the user clicked a Spec card, a Mockup card, a Brief overview card, or a single Option card.
 export type KanbanCardSelection =
   | { kind: "spec"; ticketId: string }
-  | { kind: "mockup"; ticketId: string; version?: number }
+  | { kind: "mockup"; ticketId: string }
   | { kind: "brief"; ticketId: string }
   | { kind: "option"; ticketId: string; optionId: string };
 

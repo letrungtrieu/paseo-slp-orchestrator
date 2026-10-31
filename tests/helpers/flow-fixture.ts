@@ -43,7 +43,7 @@ export interface Flow {
   repoPath: string;
   baseBranch: string;
   databasePath: string;
-  startRun(): Promise<string>;
+  startRun(ticketId?: string): Promise<string>;
   run(runId: string): Run;
   pipeline(runId: string, pipelineId?: string): PipelineState | undefined;
   agentId(runId: string, role: string, stageId?: string | null): string;
@@ -143,8 +143,9 @@ export function useFlowFixture(): (options: FlowOptions) => Promise<Flow> {
       repoPath,
       baseBranch,
       databasePath,
-      startRun: async () => {
+      startRun: async (ticketId) => {
         const startedRun = await startRun(ctx, {
+          ticketId,
           repoPath,
           baseBranch,
           mode: options.mode,

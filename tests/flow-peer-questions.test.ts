@@ -261,7 +261,7 @@ describe("question rules", () => {
     const askedQuestion = onlyQuestion(flow, runId);
     const supervisorAnswer = await flow.callAs(supervisorId, "slp_answer", {
       questionId: askedQuestion.questionId,
-      answer: "NOT YET REVIEWED — wait for slp_review_mockup.",
+      answer: "NOT YET REVIEWED — wait for the human review.",
     });
     expect(supervisorAnswer.isError).toBe(false);
     expect(flow.store.questions.require(askedQuestion.questionId).status).toBe("answered");

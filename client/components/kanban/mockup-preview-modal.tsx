@@ -20,8 +20,7 @@ export interface MockupPreviewModalProps {
   styles: UiStyles;
   theme: PluginTheme;
   ticket: BoardTicket;
-  initialVersion: number;
-  selectedRunId: string | null;
+  onOpenAgent?: (agentId: string) => void;
   onClose: () => void;
 }
 
@@ -30,13 +29,11 @@ export function MockupPreviewModal({
   styles,
   theme,
   ticket,
-  initialVersion,
-  selectedRunId,
+  onOpenAgent,
   onClose,
 }: MockupPreviewModalProps) {
-  const { readMockupPreview, reviewBoardMockup } = useBoardActions();
+  const { approveMockup, readMockupPreview, sendMockupFeedback } = useBoardActions();
   const specColor = resolveSpecColorIdentity(ticket);
-  const [activeVersion, setActiveVersion] = useState<number>(initialVersion);
   const [bundledHtmlContent, setBundledHtmlContent] = useState<string>("");
   const [iframeReloadNonce, setIframeReloadNonce] = useState<number>(0);
   const [viewportWidthPx, setViewportWidthPx] = useState<number | null>(null);
@@ -49,26 +46,23 @@ export function MockupPreviewModal({
   const [pendingElementComments, setPendingElementComments] = useState<MockupElementCommentInput[]>([]);
   const [overallFeedbackDraft, setOverallFeedbackDraft] = useState<string>("");
 
-  const activeRevision =
-    ticket.mockupRevisions.find((candidateRev) => candidateRev.version === activeVersion) ??
-    ticket.mockupRevisions[ticket.mockupRevisions.length - 1] ??
-    null;
+  const mockupState = ticket.mockup;
+  const isApproved = mockupState?.status === "approved";
 
-  // Load the bundled HTML+CSS+JS (with injected element-comment inspector bridge) whenever the selected version changes.
+  // Seed the draft from the ticket's open notes once per card; agent saves must not wipe what the human is still typing.
   useEffect(() => {
-    const existingRevision = ticket.mockupRevisions.find(
-      (candidateRev) => candidateRev.version === activeVersion,
-    );
-    setPendingElementComments(existingRevision?.elementComments ?? []);
-    setOverallFeedbackDraft(existingRevision?.feedback ?? "");
+    setPendingElementComments(mockupState?.elementComments ?? []);
+    setOverallFeedbackDraft(mockupState?.feedback ?? "");
     setPickedHtmlElement(null);
     setHighlightedSelector(null);
+  }, [ticket.id]);
 
+  // The file has no versions to pick, so re-read it whenever the agent saves or the human presses Reload.
+  useEffect(() => {
     readMockupPreview.mutate(
       {
         repoPath: ticket.repoPath,
         ticketId: ticket.ticketKey,
-        version: activeVersion,
       },
       {
         onSuccess: (previewPayload) => {
@@ -76,7 +70,7 @@ export function MockupPreviewModal({
         },
       },
     );
-  }, [ticket.id, ticket.repoPath, ticket.ticketKey, activeVersion]);
+  }, [ticket.id, ticket.repoPath, ticket.ticketKey, mockupState?.updatedAt, iframeReloadNonce]);
 
   const handleAddElementComment = () => {
     if (!pickedHtmlElement || !elementCommentDraft.trim()) return;
@@ -98,20 +92,17 @@ export function MockupPreviewModal({
     );
   };
 
-  const handleRequestNewVersionWithComments = () => {
-    reviewBoardMockup.mutate(
+  const handleSendNotesToAgent = () => {
+    sendMockupFeedback.mutate(
       {
         repoPath: ticket.repoPath,
-        runId: selectedRunId ?? ticket.activeRunId ?? undefined,
         ticketId: ticket.ticketKey,
-        decision: "rework",
-        version: activeVersion,
-        baseVersion: activeVersion,
         feedback: overallFeedbackDraft.trim() || undefined,
         elementComments: pendingElementComments,
       },
       {
-        onSuccess: () => {
+        onSuccess: (feedbackOutcome) => {
+          onOpenAgent?.(feedbackOutcome.productAgentId);
           onClose();
         },
       },
@@ -119,12 +110,14 @@ export function MockupPreviewModal({
   };
 
   const errorMessage =
-    describeRpcError(readMockupPreview.error) ?? describeRpcError(reviewBoardMockup.error);
+    describeRpcError(readMockupPreview.error) ??
+    describeRpcError(sendMockupFeedback.error) ??
+    describeRpcError(approveMockup.error);
 
   const iframeNode = bundledHtmlContent
     ? renderMockupPreviewIframe({
         bundledHtml: bundledHtmlContent,
-        title: `${ticket.title} (v${activeVersion})`,
+        title: ticket.title,
         reloadNonce: iframeReloadNonce,
         maxWidthPx: viewportWidthPx,
         inspectModeEnabled,
@@ -149,7 +142,7 @@ export function MockupPreviewModal({
         },
       ]}
     >
-      {/* Compact Toolbar: Title (vN), Version Pills, Pick HTML Toggle, Viewport Pills, Reload, Close */}
+      {/* Compact Toolbar: Title, Pick HTML Toggle, Viewport Pills, Reload, Close */}
       <View
         style={[
           styles.row,
@@ -163,41 +156,10 @@ export function MockupPreviewModal({
         ]}
       >
         <Text style={[styles.sectionTitle, { color: specColor.badgeTextColor }]}>
-          {ticket.ticketKey} · {activeRevision?.title ?? ticket.title} (v{activeVersion})
+          {ticket.ticketKey} · {ticket.title}
         </Text>
 
         <View style={[styles.row, { gap: 6 }]}>
-          {ticket.mockupRevisions.map((revisionOption) => {
-            const isActiveVersion = revisionOption.version === activeVersion;
-            return (
-              <Pressable
-                key={`switch-v${revisionOption.version}`}
-                accessibilityRole="button"
-                accessibilityLabel={`${revisionOption.title} (v${revisionOption.version})`}
-                onPress={() => setActiveVersion(revisionOption.version)}
-                style={[
-                  styles.chip,
-                  {
-                    borderColor: isActiveVersion ? specColor.borderColor : theme.colors.border,
-                    backgroundColor: isActiveVersion
-                      ? specColor.badgeBackground
-                      : theme.colors.surface1,
-                  },
-                ]}
-              >
-                <Text
-                  style={{
-                    fontSize: 11,
-                    fontWeight: "700",
-                    color: isActiveVersion ? specColor.badgeTextColor : theme.colors.foreground,
-                  }}
-                >
-                  v{revisionOption.version}
-                </Text>
-              </Pressable>
-            );
-          })}
-
           {/* Concise 2-word toggle between running UI/JS vs clicking HTML tags to comment */}
           <Pressable
             accessibilityRole="button"
@@ -276,7 +238,7 @@ export function MockupPreviewModal({
         >
           {readMockupPreview.isPending ? (
             <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
-              <Text style={styles.mutedText}>Loading v{activeVersion}...</Text>
+              <Text style={styles.mutedText}>Loading...</Text>
             </View>
           ) : (
             iframeNode ?? (
@@ -405,18 +367,25 @@ export function MockupPreviewModal({
             />
           </View>
 
-          {/* Submit element comments & feedback to request next mockup version */}
+          {/* Send the notes to the Product Agent, or approve the mockup at the current commit. */}
           <View style={[styles.row, { justifyContent: "flex-end", paddingTop: 6, borderTopWidth: 1, borderColor: theme.colors.border }]}>
             <ActionButton
               styles={styles}
+              label={isApproved ? "Approved" : "Approve"}
+              accessibilityLabel={`Approve mockup of ${ticket.ticketKey} at the current commit`}
+              disabled={approveMockup.isPending || isApproved}
+              onPress={() => approveMockup.mutate({ repoPath: ticket.repoPath, ticketId: ticket.ticketKey })}
+            />
+            <ActionButton
+              styles={styles}
               tone="primary"
-              label={`Rework v${ticket.currentMockupRev + 1}`}
-              accessibilityLabel="Request mockup rework with HTML element comments"
+              label="Send to Agent"
+              accessibilityLabel="Send HTML element comments and notes to the Product Agent"
               disabled={
-                reviewBoardMockup.isPending ||
+                sendMockupFeedback.isPending ||
                 (pendingElementComments.length === 0 && !overallFeedbackDraft.trim())
               }
-              onPress={handleRequestNewVersionWithComments}
+              onPress={handleSendNotesToAgent}
             />
           </View>
         </View>

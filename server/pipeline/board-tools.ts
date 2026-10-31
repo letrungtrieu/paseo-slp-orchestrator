@@ -11,6 +11,8 @@ import type { Run } from "../../shared/state";
 import type { BusCaller } from "../bus/http-mcp";
 import { computeUnifiedTextDiff } from "../store/diff";
 import type { PipelineContext } from "./context";
+import { bindProductAgentToTicket } from "./product-agent";
+import { liveRunForTicket, notifySupervisorOfSpecChange } from "./ticket-change-notices";
 import { ToolError } from "./tool-error";
 
 // Attaches live agent activity (including Lead-initiated pause state) from the active run onto a Kanban ticket.
@@ -117,20 +119,15 @@ export function listBoardTickets(ctx: PipelineContext, caller: BusCaller): strin
         featureSlug: ticket.featureSlug,
         column: ticket.column,
         currentSpecRev: ticket.currentSpecRev,
-        currentMockupRev: ticket.currentMockupRev,
-        approvedMockupRev: ticket.approvedMockupRev,
         currentBriefRev: ticket.currentBriefRev,
         lastSyncedSpecRev: ticket.lastSyncedSpecRev,
         // True when the human or Supervisor edited the Spec after the current Brief revision was authored.
         hasUnappliedSpecDiff: ticket.currentSpecRev > ticket.lastSyncedSpecRev,
         activePipelineId: ticket.activePipelineId,
         leadAgentId: ticket.leadAgentId,
-        mockupVersions: ticket.mockupRevisions.map((mockupRev) => ({
-          version: mockupRev.version,
-          title: mockupRev.title,
-          status: mockupRev.status,
-          entryHtmlPath: mockupRev.entryHtmlPath,
-        })),
+        mockup: ticket.mockup
+          ? { file: ticket.mockup.file, status: ticket.mockup.status, approvedCommit: ticket.mockup.approvedCommit }
+          : null,
         itemSummary: {
           totalInScope: inScopeItems.length,
           passed: inScopeItems.filter((bullet) => bullet.status === "pass").length,
@@ -180,15 +177,13 @@ export function getBoardTicket(
     column: resolvedTicket.column,
     acceptanceCriteria: resolvedTicket.acceptanceCriteria,
     currentSpecRev: resolvedTicket.currentSpecRev,
-    currentMockupRev: resolvedTicket.currentMockupRev,
-    approvedMockupRev: resolvedTicket.approvedMockupRev,
     currentBriefRev: resolvedTicket.currentBriefRev,
     lastSyncedSpecRev: resolvedTicket.lastSyncedSpecRev,
     hasUnappliedSpecDiff: resolvedTicket.currentSpecRev > resolvedTicket.lastSyncedSpecRev,
     currentSpec: latestSpecRevision?.content ?? "",
     latestSpecDiff: latestSpecRevision?.diff ?? "",
     unappliedSpecDiff,
-    mockupRevisions: resolvedTicket.mockupRevisions,
+    mockup: resolvedTicket.mockup,
     approach: resolvedTicket.approach,
     items: resolvedTicket.items,
     latestBriefReason: latestBriefRevision?.reason ?? "",
@@ -199,8 +194,8 @@ export function getBoardTicket(
   });
 }
 
-// Allows the Supervisor or a standalone Spec Agent to create or update the Product Spec on the Kanban board.
-export function saveBoardSpec(
+// Allows the Supervisor or a standalone Product Agent to create or update the Product Spec on the Kanban board.
+export async function saveBoardSpec(
   ctx: PipelineContext,
   caller: BusCaller,
   input: {
@@ -210,7 +205,7 @@ export function saveBoardSpec(
     spec: string;
     summary?: string;
   },
-): string {
+): Promise<string> {
   const run = caller.runId ? ctx.store.find(caller.runId) : undefined;
   const effectiveRepoPath = run?.repoPath ?? caller.repoPath ?? "";
   if (!effectiveRepoPath) {
@@ -227,12 +222,14 @@ export function saveBoardSpec(
   const savedTicket = ctx.store.board.saveSpec({
     repoPath: effectiveRepoPath,
     ticketIdOrKey: input.ticketId,
-    title: input.title ?? run?.title ?? derivedSpecTitle,
+    // An existing card keeps its title: a Spec's first line is often a heading such as "Goals", not the feature name.
+    title: input.title ?? (input.ticketId ? undefined : run?.title ?? derivedSpecTitle),
     acceptanceCriteria: input.acceptanceCriteria ?? run?.criteria ?? "",
     specContent: input.spec,
     author: "supervisor",
     summary: input.summary,
-    activeRunId: run?.id ?? null,
+    // Left undefined outside a Run so a Product Agent edit cannot detach the ticket from the Run delivering it.
+    activeRunId: run?.id,
   });
   // Keep run.productSpec updated when called from an active SLP run.
   if (run) {
@@ -247,6 +244,11 @@ export function saveBoardSpec(
       summary: `${savedTicket.ticketKey} Spec v${savedTicket.currentSpecRev}`,
       outcome: "delivered",
     });
+  } else {
+    bindProductAgentToTicket(caller.agentId, savedTicket.id);
+    // The Product Agent has no route to a Lead, so the engine tells the Supervisor of any Run already delivering this ticket.
+    const boundRun = liveRunForTicket(ctx, savedTicket);
+    if (boundRun) await notifySupervisorOfSpecChange(ctx, boundRun, savedTicket, "product-agent");
   }
   const latestSpecRevision = savedTicket.specRevisions.at(-1);
   return JSON.stringify({
@@ -255,7 +257,7 @@ export function saveBoardSpec(
     currentSpecRev: savedTicket.currentSpecRev,
     diff: latestSpecRevision?.diff ?? "",
     leadAgentId: savedTicket.leadAgentId,
-    message: savedTicket.leadAgentId
+    message: run && savedTicket.leadAgentId
       ? `Saved Spec v${savedTicket.currentSpecRev} on ${savedTicket.ticketKey}. Call slp_board_notify_lead to inform Lead '${savedTicket.leadAgentId}' so it can pause its peers and update the Brief from the Spec diff.`
       : `Saved Spec v${savedTicket.currentSpecRev} on ${savedTicket.ticketKey}.`,
   });

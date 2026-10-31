@@ -33,9 +33,8 @@ export const PipelinePeerDefinitionSchema = z.object({
 export type PipelinePeerDefinition = z.infer<typeof PipelinePeerDefinitionSchema>;
 
 // planning: advisor peers discuss techniques/design with the Lead;
-// mockup: engineer peers analyze sub-parts and assemble a multi-version HTML/CSS/JS mockup under .slp/mockups/<feature>;
 // implement: the single developer builds the brief; verify: QA peers grade it (QA pipelines only).
-export const STAGE_KINDS = ["planning", "mockup", "implement", "verify"] as const;
+export const STAGE_KINDS = ["planning", "implement", "verify"] as const;
 export const StageKindSchema = z.enum(STAGE_KINDS);
 export type StageKind = z.infer<typeof StageKindSchema>;
 
@@ -204,7 +203,11 @@ export type PipelineGate = z.infer<typeof PipelineGateSchema>;
 export const StageStateSchema = PipelineStageDefinitionSchema.extend({
   id: z.string().min(1),
   // Null only for stages stored before stage kinds existed; those keep the old free-form behavior.
-  kind: StageKindSchema.nullable().default(null),
+  // Runs persisted before mockups moved out of pipelines may hold a "mockup" stage; both end by locking the brief, so it reads as planning.
+  kind: z.preprocess(
+    (persistedKind) => (persistedKind === "mockup" ? "planning" : persistedKind),
+    StageKindSchema.nullable(),
+  ).default(null),
   status: StageStatusSchema.default("pending"),
   forkedLeadAgentId: z.string().nullable().default(null),
   peerAgentIds: z.array(z.string()).default([]),

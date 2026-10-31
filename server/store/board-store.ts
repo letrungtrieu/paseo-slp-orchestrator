@@ -1,8 +1,6 @@
-// Persistence and revision/diff management for project-scoped Kanban tickets (Spec -> Brief -> Score -> Rework).
+// Persistence and revision/diff management for project-scoped Kanban tickets (Mockup -> Spec -> Brief -> Score -> Rework).
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import {
-  BoardTicketSchema,
   briefItemsFromPipelineBrief,
   deriveFeatureMockupSlug,
   type BoardColumn,
@@ -18,11 +16,14 @@ import {
   mergeBriefItemsForRevision,
 } from "./board-item-scoring";
 import {
-  applyMockupReviewToTicket,
-  applyMockupSubmissionToTicket,
-  type ReviewMockupRevisionParams,
-  type SaveMockupRevisionParams,
-} from "./board-mockup-revisions";
+  applyMockupApprovalToTicket,
+  applyMockupFeedbackToTicket,
+  applyMockupUpdateToTicket,
+  createMockupTicket,
+  type RecordMockupFeedbackParams,
+  type SaveTicketMockupParams,
+} from "./board-mockup";
+import { BoardTicketRepository } from "./board-ticket-repository";
 import { transaction } from "./database";
 import { computeUnifiedTextDiff, serializeBriefForDiff } from "./diff";
 
@@ -39,6 +40,12 @@ export interface SaveSpecInput {
   leadAgentId?: string | null;
 }
 
+export interface SaveMockupInput extends SaveTicketMockupParams {
+  repoPath: string;
+  ticketIdOrKey?: string;
+  title?: string;
+}
+
 export interface SaveBriefInput {
   ticketId: string;
   authorAgentId: string;
@@ -50,98 +57,7 @@ export interface SaveBriefInput {
 }
 
 // SQLite-backed store managing project-scoped Spec and Brief tickets across multiple SLP runs.
-export class BoardStore {
-  constructor(private readonly resolveDatabase: () => DatabaseSync) {}
-
-  private persistTicket(database: DatabaseSync, ticket: BoardTicket): void {
-    // Store indexed columns alongside the JSON payload so project and run lookups avoid full-table JSON scans.
-    database
-      .prepare(
-        `INSERT INTO board_tickets (
-          ticket_id, repo_path, ticket_key, column_name, active_run_id, active_pipeline_id, updated_at, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticket_id) DO UPDATE SET
-          repo_path = excluded.repo_path,
-          ticket_key = excluded.ticket_key,
-          column_name = excluded.column_name,
-          active_run_id = excluded.active_run_id,
-          active_pipeline_id = excluded.active_pipeline_id,
-          updated_at = excluded.updated_at,
-          payload = excluded.payload`,
-      )
-      .run(
-        ticket.id,
-        ticket.repoPath,
-        ticket.ticketKey,
-        ticket.column,
-        ticket.activeRunId,
-        ticket.activePipelineId,
-        ticket.updatedAt,
-        JSON.stringify(ticket),
-      );
-  }
-
-  // Lists all Kanban tickets belonging to a repository ordered by most recent activity first.
-  listByRepo(repoPath: string): BoardTicket[] {
-    const ticketRows = this.resolveDatabase()
-      .prepare("SELECT payload FROM board_tickets WHERE repo_path = ? ORDER BY updated_at DESC")
-      .all(repoPath);
-    return ticketRows.map((ticketRow) => BoardTicketSchema.parse(JSON.parse(String(ticketRow.payload))));
-  }
-
-  // Lists all Kanban tickets currently associated with a specific active run.
-  listByRun(runId: string): BoardTicket[] {
-    const ticketRows = this.resolveDatabase()
-      .prepare("SELECT payload FROM board_tickets WHERE active_run_id = ? ORDER BY updated_at DESC")
-      .all(runId);
-    return ticketRows.map((ticketRow) => BoardTicketSchema.parse(JSON.parse(String(ticketRow.payload))));
-  }
-
-  // Resolves a ticket by its internal UUID or its human-readable Jira-style key (such as SLP-1).
-  find(ticketIdOrKey: string, repoPath?: string): BoardTicket | null {
-    const trimmedLookup = ticketIdOrKey.trim();
-    if (!trimmedLookup) return null;
-    const database = this.resolveDatabase();
-    // Match exact UUID first, then fall back to human-friendly ticketKey (e.g. SLP-1) within the project.
-    const byIdRow = database
-      .prepare("SELECT payload FROM board_tickets WHERE ticket_id = ?")
-      .get(trimmedLookup);
-    if (byIdRow) return BoardTicketSchema.parse(JSON.parse(String(byIdRow.payload)));
-    // Scope key lookup to the repository when known so SLP-1 in project A never collides with SLP-1 in project B.
-    const byKeyRow = repoPath
-      ? database
-          .prepare("SELECT payload FROM board_tickets WHERE repo_path = ? AND UPPER(ticket_key) = UPPER(?)")
-          .get(repoPath, trimmedLookup)
-      : database
-          .prepare("SELECT payload FROM board_tickets WHERE UPPER(ticket_key) = UPPER(?) ORDER BY updated_at DESC LIMIT 1")
-          .get(trimmedLookup);
-    return byKeyRow ? BoardTicketSchema.parse(JSON.parse(String(byKeyRow.payload))) : null;
-  }
-
-  // Finds the ticket bound to a specific pipeline so stage approvals and QA scorecards update the right card.
-  findByPipeline(pipelineId: string): BoardTicket | null {
-    const ticketRow = this.resolveDatabase()
-      .prepare("SELECT payload FROM board_tickets WHERE active_pipeline_id = ? LIMIT 1")
-      .get(pipelineId);
-    return ticketRow ? BoardTicketSchema.parse(JSON.parse(String(ticketRow.payload))) : null;
-  }
-
-  // Throws a descriptive error when an agent or RPC caller references a non-existent ticket id or key.
-  requireTicket(ticketIdOrKey: string, repoPath?: string): BoardTicket {
-    const foundTicket = this.find(ticketIdOrKey, repoPath);
-    if (!foundTicket) throw new Error(`Unknown Kanban ticket '${ticketIdOrKey}'.`);
-    return foundTicket;
-  }
-
-  private allocateTicketKey(database: DatabaseSync, repoPath: string): string {
-    // Sequential per-repository keys (SLP-1, SLP-2, ...) give humans and agents a short reference like Jira.
-    const countRow = database
-      .prepare("SELECT COUNT(*) AS count FROM board_tickets WHERE repo_path = ?")
-      .get(repoPath) as { count?: number } | undefined;
-    const nextSequenceNumber = Number(countRow?.count ?? 0) + 1;
-    return `SLP-${nextSequenceNumber}`;
-  }
-
+export class BoardStore extends BoardTicketRepository {
   // Creates or updates the Spec document on a ticket, computing a Git-style unified diff against the previous revision.
   saveSpec(input: SaveSpecInput): BoardTicket {
     const database = this.resolveDatabase();
@@ -223,12 +139,10 @@ export class BoardStore {
             acceptanceCriteria: input.acceptanceCriteria?.trim() || "",
             column: "spec",
             currentSpecRev: 1,
-            currentMockupRev: 0,
-            approvedMockupRev: null,
             currentBriefRev: 0,
             lastSyncedSpecRev: 0,
             specRevisions: [createdSpecRevision],
-            mockupRevisions: [],
+            mockup: null,
             briefRevisions: [],
             approach: "",
             items: [],
@@ -438,27 +352,63 @@ export class BoardStore {
     });
   }
 
-  // Records a newly snapshotted HTML/CSS/JS mockup version (v1, v2, ...) on a ticket and moves it to MOCKUP.
-  saveMockupRevision(
-    params: SaveMockupRevisionParams & { ticketIdOrKey: string; repoPath?: string },
-  ): BoardTicket {
+  // Links a mockup file to its ticket, creating the ticket when the idea starts as a mockup with no Spec yet.
+  saveMockup(input: SaveMockupInput): BoardTicket {
     const database = this.resolveDatabase();
     return transaction(database, () => {
-      const existingTicket = this.requireTicket(params.ticketIdOrKey, params.repoPath);
-      const updatedTicket = applyMockupSubmissionToTicket(existingTicket, params);
+      // Matching by file keeps repeated saves on one card when the agent omits the ticket key between edits.
+      const existingTicket =
+        (input.ticketIdOrKey ? this.requireTicket(input.ticketIdOrKey, input.repoPath) : null) ??
+        this.listByRepo(input.repoPath).find((candidateTicket) => candidateTicket.mockup?.file === input.file) ??
+        null;
+      const baseTicket = existingTicket ?? createMockupTicket({
+        ticketKey: this.allocateTicketKey(database, input.repoPath),
+        repoPath: input.repoPath,
+        title: input.title?.trim() || input.file,
+        nowIso: new Date().toISOString(),
+      });
+      const updatedTicket = applyMockupUpdateToTicket(baseTicket, input);
       this.persistTicket(database, updatedTicket);
       return updatedTicket;
     });
   }
 
-  // Records approval or rework feedback for a specific mockup version (v1, v2, ...) on a ticket.
-  reviewMockupRevision(
-    params: ReviewMockupRevisionParams & { ticketIdOrKey: string; repoPath?: string },
+  // Stores the human's open notes on a ticket's mockup so they survive until the Product Agent addresses them.
+  recordMockupFeedback(
+    params: RecordMockupFeedbackParams & { ticketIdOrKey: string; repoPath: string },
+  ): BoardTicket {
+    return this.updateMockupTicket(params.ticketIdOrKey, params.repoPath, (existingTicket) =>
+      applyMockupFeedbackToTicket(existingTicket, params));
+  }
+
+  // Marks a ticket's mockup as approved at the commit that pins its content.
+  approveMockup(params: { ticketIdOrKey: string; repoPath: string; approvedCommit: string }): BoardTicket {
+    return this.updateMockupTicket(params.ticketIdOrKey, params.repoPath, (existingTicket) =>
+      applyMockupApprovalToTicket(existingTicket, params.approvedCommit));
+  }
+
+  private updateMockupTicket(
+    ticketIdOrKey: string,
+    repoPath: string,
+    applyTransition: (existingTicket: BoardTicket) => BoardTicket,
   ): BoardTicket {
     const database = this.resolveDatabase();
     return transaction(database, () => {
-      const existingTicket = this.requireTicket(params.ticketIdOrKey, params.repoPath);
-      const updatedTicket = applyMockupReviewToTicket(existingTicket, params);
+      const updatedTicket = applyTransition(this.requireTicket(ticketIdOrKey, repoPath));
+      this.persistTicket(database, updatedTicket);
+      return updatedTicket;
+    });
+  }
+
+  // Binds a prepared ticket to the Run started for it, which is how delegation later finds the feature's Spec and mockup.
+  bindRun(ticketIdOrKey: string, repoPath: string, runId: string): BoardTicket {
+    const database = this.resolveDatabase();
+    return transaction(database, () => {
+      const updatedTicket: BoardTicket = {
+        ...this.requireTicket(ticketIdOrKey, repoPath),
+        activeRunId: runId,
+        updatedAt: new Date().toISOString(),
+      };
       this.persistTicket(database, updatedTicket);
       return updatedTicket;
     });

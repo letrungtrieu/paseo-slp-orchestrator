@@ -29,10 +29,10 @@ interface KanbanBoardSectionProps {
   onOpenSupervisor?: (supervisorAgentId: string) => void;
 }
 
-// Column titles showing the flow from Supervisor Spec -> Lead HTML Mockup -> Lead Brief -> QA Score -> Rework -> Done.
+// Column titles showing the flow from Product Agent Mockup -> Spec -> Lead Brief -> QA Score -> Rework -> Done.
 const COLUMN_TITLES: Record<BoardColumn, string> = {
-  spec: "1. SPEC",
-  mockup: "2. MOCKUP",
+  mockup: "1. MOCKUP",
+  spec: "2. SPEC",
   brief: "3. BRIEF",
   score: "4. SCORE",
   rework: "5. REWORK",
@@ -111,14 +111,11 @@ export function KanbanBoardSection({
     repoPath: effectiveRepoPath || null,
     runId: activeProjectRun?.id ?? selectedRunId ?? null,
   });
-  const { saveBoardSpec, spawnSpecAgent } = useBoardActions();
+  const { saveBoardSpec, spawnProductAgent } = useBoardActions();
 
   // Default to "active_supervisor" so only the Spec, Mockup, Brief, and Options of the currently active Supervisor are shown.
   const [selectedCard, setSelectedCard] = useState<KanbanCardSelection | null>(null);
-  const [activePreviewTarget, setActivePreviewTarget] = useState<{
-    ticketId: string;
-    version: number;
-  } | null>(null);
+  const [previewedTicketId, setPreviewedTicketId] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<"active_supervisor" | "all" | string>("active_supervisor");
   const [isCreatingSpec, setIsCreatingSpec] = useState(false);
   const [newSpecContent, setNewSpecContent] = useState("");
@@ -129,8 +126,11 @@ export function KanbanBoardSection({
 
   const allProjectTickets = boardQuery.data?.tickets ?? [];
   // Scope tickets belonging to the active Supervisor's run so finished/aborted runs do not clutter the board.
+  // Tickets not yet in any Run stay visible because features are prepared before their Run exists.
   const activeSupervisorTickets = activeProjectRun
-    ? allProjectTickets.filter((ticket) => ticket.activeRunId === activeProjectRun.id)
+    ? allProjectTickets.filter(
+        (ticket) => ticket.activeRunId === activeProjectRun.id || !ticket.activeRunId,
+      )
     : allProjectTickets;
 
   const visibleTickets =
@@ -147,7 +147,7 @@ export function KanbanBoardSection({
   const boardErrorMessage =
     describeRpcError(boardQuery.error) ??
     describeRpcError(saveBoardSpec.error) ??
-    describeRpcError(spawnSpecAgent.error);
+    describeRpcError(spawnProductAgent.error);
 
   // Selecting a card on the Kanban board opens its inspector inside the sidebar and exits the New Spec creation form.
   const handleToggleCardSelection = (nextSelection: KanbanCardSelection) => {
@@ -180,11 +180,10 @@ export function KanbanBoardSection({
       trimmedSpecContent,
       activeProjectRun?.title || "Product Spec",
     );
-    // Creating a Spec ticket from the sidebar stores Spec v1 and notifies the active Supervisor if a run is active.
+    // A new card joins no Run: features enter one explicitly through Start Run once they are ready.
     saveBoardSpec.mutate(
       {
         repoPath: effectiveRepoPath,
-        runId: activeProjectRun?.id ?? selectedRunId ?? undefined,
         title: derivedSpecTitle,
         specContent: trimmedSpecContent,
         summary: "Created Spec ticket on Kanban board",
@@ -200,10 +199,10 @@ export function KanbanBoardSection({
     );
   };
 
-  // Spawns a dedicated Read-Only Spec Agent connected to this repository's Kanban board and opens its chat view.
-  const handleSpawnSpecAgent = (targetTicketKey?: string) => {
+  // Spawns a Product Agent connected to this repository's Kanban board and opens its chat view.
+  const handleSpawnProductAgent = (targetTicketKey?: string) => {
     if (!effectiveRepoPath) return;
-    spawnSpecAgent.mutate(
+    spawnProductAgent.mutate(
       {
         repoPath: effectiveRepoPath,
         runId: activeProjectRun?.id ?? selectedRunId ?? undefined,
@@ -219,7 +218,11 @@ export function KanbanBoardSection({
 
   // Precompute all Mockup cards, decomposed Brief cards, and individual Option cards across the visible Specs.
   const mockupTicketsInColumn = visibleTickets.filter(
-    (ticket) => ticket.column === "mockup" || ticket.mockupRevisions.length > 0,
+    (ticket) => ticket.column === "mockup" || ticket.mockup !== null,
+  );
+  // A mockup-first ticket earns its Spec card once it reaches SPEC, so an idea in progress does not show an empty Spec.
+  const specTicketsInColumn = visibleTickets.filter(
+    (ticket) => ticket.currentSpecRev > 0 || ticket.column === "spec",
   );
   const briefTicketsInColumn = visibleTickets.filter(
     (ticket) => ticket.currentBriefRev > 0 || Boolean(ticket.approach.trim()),
@@ -245,23 +248,18 @@ export function KanbanBoardSection({
     }
   }
 
-  const previewedTicket = activePreviewTarget
-    ? allProjectTickets.find((ticket) => ticket.id === activePreviewTarget.ticketId) ?? null
+  const previewedTicket = previewedTicketId
+    ? allProjectTickets.find((ticket) => ticket.id === previewedTicketId) ?? null
     : null;
 
-  const handleOpenPreviewVersion = (targetTicket: BoardTicket, versionNumber: number) => {
-    setActivePreviewTarget({ ticketId: targetTicket.id, version: versionNumber });
-  };
-
-  if (previewedTicket && activePreviewTarget) {
+  if (previewedTicket) {
     return (
       <MockupPreviewModal
         styles={styles}
         theme={theme}
         ticket={previewedTicket}
-        initialVersion={activePreviewTarget.version}
-        selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
-        onClose={() => setActivePreviewTarget(null)}
+        onOpenAgent={onOpenSupervisor}
+        onClose={() => setPreviewedTicketId(null)}
       />
     );
   }
@@ -309,7 +307,7 @@ export function KanbanBoardSection({
               const columnAccent = resolveColumnAccentColor(theme, columnKey);
               const columnCardCount =
                 columnKey === "spec"
-                  ? visibleTickets.length
+                  ? specTicketsInColumn.length
                   : columnKey === "mockup"
                     ? mockupTicketsInColumn.length
                     : columnKey === "brief"
@@ -346,9 +344,9 @@ export function KanbanBoardSection({
                       contentContainerStyle={styles.stack}
                       showsVerticalScrollIndicator
                     >
-                      {/* Column 1 (SPEC) holds only the high-level Spec cards handed from Supervisor to Lead. */}
+                      {/* Column 2 (SPEC) holds the high-level Spec cards handed to the Run. */}
                       {columnKey === "spec"
-                        ? visibleTickets.map((specTicket) => (
+                        ? specTicketsInColumn.map((specTicket) => (
                             <SpecKanbanCard
                               key={`spec-card-${specTicket.id}`}
                               styles={styles}
@@ -365,7 +363,7 @@ export function KanbanBoardSection({
                           ))
                         : null}
 
-                      {/* Column 2 (MOCKUP) holds multi-version HTML/CSS/JS mockups formatted as `title (vN) [ → ]`. */}
+                      {/* Column 1 (MOCKUP) holds one HTML/CSS/JS mockup file per feature. */}
                       {columnKey === "mockup"
                         ? mockupTicketsInColumn.map((mockupTicket) => (
                             <MockupKanbanCard
@@ -383,7 +381,6 @@ export function KanbanBoardSection({
                                   ticketId: mockupTicket.id,
                                 })
                               }
-                              onOpenPreviewVersion={handleOpenPreviewVersion}
                             />
                           ))
                         : null}
@@ -459,7 +456,6 @@ export function KanbanBoardSection({
         customRepoPath={customRepoPath}
         onChangeCustomRepoPath={setCustomRepoPath}
         activeProjectRun={activeProjectRun}
-        selectedRunId={selectedRunId}
         allProjectTickets={allProjectTickets}
         activeSupervisorTickets={activeSupervisorTickets}
         filterMode={filterMode}
@@ -470,13 +466,13 @@ export function KanbanBoardSection({
         onChangeNewSpecContent={setNewSpecContent}
         isSavingNewSpec={saveBoardSpec.isPending}
         onSubmitNewSpec={handleCreateNewSpecTicket}
-        isSpawningSpecAgent={spawnSpecAgent.isPending}
-        onSpawnSpecAgent={handleSpawnSpecAgent}
+        isSpawningProductAgent={spawnProductAgent.isPending}
+        onSpawnProductAgent={handleSpawnProductAgent}
         boardErrorMessage={boardErrorMessage}
         selectedTicket={selectedTicket}
         selectedCard={selectedCard}
         onSelectCard={setSelectedCard}
-        onOpenPreviewVersion={handleOpenPreviewVersion}
+        onOpenPreview={(targetTicket) => setPreviewedTicketId(targetTicket.id)}
         onOpenSupervisor={onOpenSupervisor}
         sidebarWidthPx={sidebarWidthPx}
         isSidebarCollapsed={isSidebarCollapsed}

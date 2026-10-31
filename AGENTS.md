@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > **Mandatory Requirement for Every Mechanism or Tool Change:**
-> Whenever you add, modify, or remove any SLP orchestration mechanism, pipeline stage rule, Kanban board workflow (`SPEC -> BRIEF -> SCORE -> REWORK`), peer lifecycle rule, or MCP bus tool (`slp_*` in `server/bus/tool-schemas.ts`), you **MUST** inspect and update the `initSkill` (`slp-manager`) skill content in the **same change** so provisioned project skills never drift behind the runtime engine.
+> Whenever you add, modify, or remove any SLP orchestration mechanism, pipeline stage rule, Kanban board workflow (`MOCKUP -> SPEC -> BRIEF -> SCORE -> REWORK`), peer lifecycle rule, or MCP bus tool (`slp_*` in `server/bus/tool-schemas.ts`), you **MUST** inspect and update the `initSkill` (`slp-manager`) skill content in the **same change** so provisioned project skills never drift behind the runtime engine.
 
 ### Required Lockstep Checklist Before Completing Any Mechanism Change
 
@@ -30,6 +30,7 @@
 - **`server/bus/`**: Loopback HTTP MCP server (`slp-bus`) and role-scoped tool definitions (`server/bus/tool-schemas.ts`).
 - **`server/pipeline/`**: Stage state machine (`stage-engine.ts`), stage reports/rework/escalation (`stage-messages.ts`), Kanban board operations (`board-tools.ts`), Lead peer pause/resume (`peer-pause.ts`), and verification scorecard loop (`verify-loop.ts`).
 - **`server/prompts/` & `server/project-prompts/`**: System prompt assembly (`system-prompts.ts`), default `.slp` role workflows (`default-workflows.ts`), `.slp` Markdown parser (`markdown.ts`), and per-tier provider/model resolution (`agent-settings.ts`).
+- **`server/pipeline/product-agent.ts` & `mockup-tools.ts`**: Standalone Product Agent (outside any Run) that builds `.slp/mockup/<feature>.html` on shared `core/` files and writes the Spec; the human approves a mockup at a commit, and a Run starts from the ready ticket.
 - **`server/skills/slp-manager/`**: Source files for the `slp-manager` skill installed into target repositories (`<repoPath>/.agents/skills/slp-manager` and `<repoPath>/.claude/skills/slp-manager`) via `ensureSlpManagerSkill` (`initProjectSkillsRpc`).
 - **`client/`**: Paseo UI screens and components (`run-control-screen.tsx`, `kanban-panel.tsx`, `settings-screen.tsx`, `components/kanban/*`).
 

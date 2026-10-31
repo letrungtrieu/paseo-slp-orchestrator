@@ -2,11 +2,12 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  approveBoardMockupRpc,
   listBoardTicketsRpc,
   readBoardMockupPreviewRpc,
-  reviewBoardMockupFromUiRpc,
   saveBoardSpecFromUiRpc,
-  spawnBoardSpecAgentRpc,
+  sendBoardMockupFeedbackRpc,
+  spawnBoardProductAgentRpc,
 } from "../shared/rpc";
 
 // Poll at 2 s so realtime agent badges, Lead pause states and Brief bullet scores update live on the board.
@@ -30,10 +31,11 @@ export function useBoardTickets(params: { repoPath?: string | null; runId?: stri
 export function useBoardActions() {
   const queryClient = useQueryClient();
   const saveBoardSpecFromUi = useRpc(saveBoardSpecFromUiRpc);
-  const spawnBoardSpecAgent = useRpc(spawnBoardSpecAgentRpc);
+  const spawnBoardProductAgent = useRpc(spawnBoardProductAgentRpc);
   const readBoardMockupPreview = useRpc(readBoardMockupPreviewRpc);
-  const reviewBoardMockupFromUi = useRpc(reviewBoardMockupFromUiRpc);
-  // Invalidate all ["slp"] queries so the Kanban card, diff viewer and Supervisor mailbox reflect the new Spec/Mockup revision immediately.
+  const sendBoardMockupFeedback = useRpc(sendBoardMockupFeedbackRpc);
+  const approveBoardMockup = useRpc(approveBoardMockupRpc);
+  // Invalidate all ["slp"] queries so the Kanban card, diff viewer and Supervisor mailbox reflect the new Spec or mockup state immediately.
   const refreshBoardAndRuns = () => queryClient.invalidateQueries({ queryKey: ["slp"] });
 
   return {
@@ -41,15 +43,19 @@ export function useBoardActions() {
       mutationFn: saveBoardSpecFromUi,
       onSuccess: refreshBoardAndRuns,
     }),
-    spawnSpecAgent: useMutation({
-      mutationFn: spawnBoardSpecAgent,
+    spawnProductAgent: useMutation({
+      mutationFn: spawnBoardProductAgent,
       onSuccess: refreshBoardAndRuns,
     }),
     readMockupPreview: useMutation({
       mutationFn: readBoardMockupPreview,
     }),
-    reviewBoardMockup: useMutation({
-      mutationFn: reviewBoardMockupFromUi,
+    sendMockupFeedback: useMutation({
+      mutationFn: sendBoardMockupFeedback,
+      onSuccess: refreshBoardAndRuns,
+    }),
+    approveMockup: useMutation({
+      mutationFn: approveBoardMockup,
       onSuccess: refreshBoardAndRuns,
     }),
   };

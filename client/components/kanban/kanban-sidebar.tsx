@@ -25,7 +25,6 @@ export interface KanbanSidebarProps {
   customRepoPath: string;
   onChangeCustomRepoPath: (nextRepoPath: string) => void;
   activeProjectRun: RunSummary | null;
-  selectedRunId?: string | null;
   allProjectTickets: BoardTicket[];
   activeSupervisorTickets: BoardTicket[];
   filterMode: "active_supervisor" | "all" | string;
@@ -36,13 +35,13 @@ export interface KanbanSidebarProps {
   onChangeNewSpecContent: (nextContent: string) => void;
   isSavingNewSpec: boolean;
   onSubmitNewSpec: () => void;
-  isSpawningSpecAgent: boolean;
-  onSpawnSpecAgent: (targetTicketKey?: string) => void;
+  isSpawningProductAgent: boolean;
+  onSpawnProductAgent: (targetTicketKey?: string) => void;
   boardErrorMessage: string | null;
   selectedTicket: BoardTicket | null;
   selectedCard: KanbanCardSelection | null;
   onSelectCard: (nextSelection: KanbanCardSelection | null) => void;
-  onOpenPreviewVersion?: (ticket: BoardTicket, versionNumber: number) => void;
+  onOpenPreview?: (ticket: BoardTicket) => void;
   onOpenSupervisor?: (supervisorAgentId: string) => void;
   sidebarWidthPx: number;
   isSidebarCollapsed: boolean;
@@ -181,7 +180,6 @@ export function KanbanSidebar({
   customRepoPath,
   onChangeCustomRepoPath,
   activeProjectRun,
-  selectedRunId,
   allProjectTickets,
   activeSupervisorTickets,
   filterMode,
@@ -192,13 +190,13 @@ export function KanbanSidebar({
   onChangeNewSpecContent,
   isSavingNewSpec,
   onSubmitNewSpec,
-  isSpawningSpecAgent,
-  onSpawnSpecAgent,
+  isSpawningProductAgent,
+  onSpawnProductAgent,
   boardErrorMessage,
   selectedTicket,
   selectedCard,
   onSelectCard,
-  onOpenPreviewVersion,
+  onOpenPreview,
   onOpenSupervisor,
   sidebarWidthPx,
   isSidebarCollapsed,
@@ -345,10 +343,10 @@ export function KanbanSidebar({
               <View style={styles.row}>
                 <ActionButton
                   styles={styles}
-                  label={isSpawningSpecAgent ? "Opening Agent..." : "Discuss with Agent"}
-                  accessibilityLabel="Spawn a dedicated Spec Agent to discuss and draft this Spec"
-                  disabled={isSpawningSpecAgent}
-                  onPress={() => onSpawnSpecAgent()}
+                  label={isSpawningProductAgent ? "Opening Agent..." : "Discuss with Agent"}
+                  accessibilityLabel="Open a Product Agent to discuss and draft this Spec"
+                  disabled={isSpawningProductAgent}
+                  onPress={() => onSpawnProductAgent()}
                 />
                 <ActionButton
                   styles={styles}
@@ -371,8 +369,8 @@ export function KanbanSidebar({
               <ActionButton
                 styles={styles}
                 tone="primary"
-                label={isSavingNewSpec ? "Saving..." : "Create Spec & Notify Supervisor"}
-                accessibilityLabel="Create Spec card and notify Supervisor"
+                label={isSavingNewSpec ? "Saving..." : "Create Spec"}
+                accessibilityLabel="Create Spec card"
                 disabled={isSavingNewSpec || !newSpecContent.trim()}
                 onPress={onSubmitNewSpec}
               />
@@ -384,30 +382,30 @@ export function KanbanSidebar({
             theme={theme}
             ticket={selectedTicket}
             selection={selectedCard}
-            selectedRunId={activeProjectRun?.id ?? selectedRunId ?? null}
-            isSpawningSpecAgent={isSpawningSpecAgent}
-            onSpawnSpecAgent={onSpawnSpecAgent}
-            onOpenPreviewVersion={onOpenPreviewVersion}
+            isSpawningProductAgent={isSpawningProductAgent}
+            onSpawnProductAgent={onSpawnProductAgent}
+            onOpenPreview={onOpenPreview}
+            onOpenSupervisor={onOpenSupervisor}
             onClose={() => onSelectCard(null)}
           />
         ) : (
-          // Render the primary "+ New Spec" and "+ Spec with Agent" actions directly at the top of the idle sidebar, centered horizontally.
+          // New work starts with the Product Agent; "+ New Spec" remains for features whose Spec is already written.
           <View style={[styles.row, { justifyContent: "center" }]}>
             {effectiveRepoPath ? (
               <>
                 <ActionButton
                   styles={styles}
                   tone="primary"
-                  label="+ New Spec"
-                  accessibilityLabel="Create a new Spec card manually in the sidebar"
-                  onPress={onToggleCreatingSpec}
+                  label={isSpawningProductAgent ? "Opening Agent..." : "+ New Feature"}
+                  accessibilityLabel="Open a Product Agent to shape a new feature"
+                  disabled={isSpawningProductAgent}
+                  onPress={() => onSpawnProductAgent()}
                 />
                 <ActionButton
                   styles={styles}
-                  label={isSpawningSpecAgent ? "Opening Agent..." : "+ Spec with Agent"}
-                  accessibilityLabel="Open a dedicated Spec Agent to discuss and create a Spec card"
-                  disabled={isSpawningSpecAgent}
-                  onPress={() => onSpawnSpecAgent()}
+                  label="+ New Spec"
+                  accessibilityLabel="Create a new Spec card manually in the sidebar"
+                  onPress={onToggleCreatingSpec}
                 />
               </>
             ) : null}

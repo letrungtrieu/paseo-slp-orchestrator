@@ -43,7 +43,7 @@ function resolveOptionStatusColor(theme: PluginTheme, optionStatus: BriefItem["s
   return theme.colors.foregroundMuted;
 }
 
-// Card rendered in Column 1 (SPEC) representing the overall Product Spec handed from Supervisor to Lead.
+// Card rendered in Column 2 (SPEC) representing the overall Product Spec handed from Supervisor to Lead.
 export function SpecKanbanCard({
   styles,
   theme,
@@ -91,8 +91,10 @@ export function SpecKanbanCard({
           textColor={specColor.badgeTextColor}
         />
         <View style={[styles.row, { gap: 6 }]}>
-          {ticket.currentMockupRev > 0 ? (
-            <Text style={styles.mutedText}>Mockup v{ticket.currentMockupRev}</Text>
+          {ticket.mockup ? (
+            <Text style={styles.mutedText}>
+              Mockup {ticket.mockup.status === "approved" ? "approved" : "draft"}
+            </Text>
           ) : null}
           {ticket.currentBriefRev > 0 ? (
             <Text style={styles.mutedText}>

@@ -1,8 +1,8 @@
-// Sidebar inspector for a selected Mockup card in Column 2 (MOCKUP), listing versions with concise 1-2 word controls.
+// Sidebar inspector for a selected Mockup card in Column 1 (MOCKUP), with concise 1-2 word review controls.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import type { BoardTicket, MockupRevision } from "../../../shared/board";
+import { ScrollView, Text, TextInput, View } from "react-native";
+import type { BoardTicket } from "../../../shared/board";
 import type { UiStyles } from "../../styles";
 import { useBoardActions } from "../../use-board";
 import { describeRpcError } from "../../use-run";
@@ -14,72 +14,43 @@ export interface MockupCardInspectorProps {
   styles: UiStyles;
   theme: PluginTheme;
   ticket: BoardTicket;
-  selectedRunId: string | null;
-  onOpenPreviewVersion: (ticket: BoardTicket, versionNumber: number) => void;
+  onOpenPreview: (ticket: BoardTicket) => void;
+  onOpenAgent?: (agentId: string) => void;
   onClose: () => void;
 }
 
-// Resolve a short 1-word status label and semantic color for each mockup version row in the sidebar.
-function resolveVersionStatusBadge(
-  theme: PluginTheme,
-  revision: MockupRevision,
-): { label: string; color: string } {
-  if (revision.status === "approved") {
-    return { label: "Approved", color: theme.colors.statusSuccess };
-  }
-  if (revision.status === "rework_requested") {
-    return { label: "Rework", color: theme.colors.statusDanger };
-  }
-  if (revision.status === "superseded") {
-    return { label: "Old", color: theme.colors.foregroundMuted };
-  }
-  return { label: "Pending", color: theme.colors.statusWarning };
-}
-
-// Renders `title (vN) [ → ]` version rows and concise review actions inside the Kanban sidebar.
+// Shows the ticket's mockup file, its open notes, and the Preview, Approve and feedback actions.
 export function MockupCardInspector({
   styles,
   theme,
   ticket,
-  selectedRunId,
-  onOpenPreviewVersion,
+  onOpenPreview,
+  onOpenAgent,
   onClose,
 }: MockupCardInspectorProps) {
-  const { reviewBoardMockup } = useBoardActions();
+  const { approveMockup, sendMockupFeedback } = useBoardActions();
   const specColor = resolveSpecColorIdentity(ticket);
-  // Order versions from newest to oldest so the active version sits at the top of the sidebar.
-  const orderedRevisions = [...ticket.mockupRevisions].sort(
-    (firstRev, secondRev) => secondRev.version - firstRev.version,
-  );
-  const [reworkFeedbackDraft, setReworkFeedbackDraft] = useState("");
-  const reviewErrorMessage = describeRpcError(reviewBoardMockup.error);
+  const [feedbackDraft, setFeedbackDraft] = useState("");
+  const mockupState = ticket.mockup;
+  // Approval failures carry git guidance, such as which files still need committing, so they must stay visible.
+  const reviewErrorMessage =
+    describeRpcError(approveMockup.error) ?? describeRpcError(sendMockupFeedback.error);
+  if (!mockupState) return null;
+  const isApproved = mockupState.status === "approved";
 
-  const handleApproveVersion = (versionNumber: number) => {
-    reviewBoardMockup.mutate({
-      repoPath: ticket.repoPath,
-      runId: selectedRunId ?? ticket.activeRunId ?? undefined,
-      ticketId: ticket.ticketKey,
-      decision: "approve",
-      version: versionNumber,
-      feedback: reworkFeedbackDraft.trim() || undefined,
-    });
-  };
-
-  const handleRequestNewVersion = (baseVersionNumber?: number) => {
-    if (!reworkFeedbackDraft.trim()) return;
-    reviewBoardMockup.mutate(
+  const handleSendFeedback = () => {
+    sendMockupFeedback.mutate(
       {
         repoPath: ticket.repoPath,
-        runId: selectedRunId ?? ticket.activeRunId ?? undefined,
         ticketId: ticket.ticketKey,
-        decision: "rework",
-        version: baseVersionNumber ?? ticket.currentMockupRev,
-        baseVersion: baseVersionNumber,
-        feedback: reworkFeedbackDraft.trim(),
+        feedback: feedbackDraft.trim(),
+        // The server replaces the open notes, so quick feedback must resend the element comments still awaiting work.
+        elementComments: mockupState.elementComments,
       },
       {
-        onSuccess: () => {
-          setReworkFeedbackDraft("");
+        onSuccess: (feedbackOutcome) => {
+          setFeedbackDraft("");
+          onOpenAgent?.(feedbackOutcome.productAgentId);
         },
       },
     );
@@ -101,27 +72,13 @@ export function MockupCardInspector({
         },
       ]}
     >
-      {/* Compact header with ticket badge, version badge, and Close button fixed at the top */}
-      <View
-        style={[
-          styles.row,
-          { justifyContent: "space-between", alignItems: "center", flexShrink: 0 },
-        ]}
-      >
-        <View style={[styles.row, { gap: 6 }]}>
-          <InspectorTagBadge
-            label={`MOCKUP · ${ticket.ticketKey}`}
-            borderColor={specColor.borderColor}
-            backgroundColor={specColor.badgeBackground}
-            textColor={specColor.badgeTextColor}
-          />
-          <InspectorTagBadge
-            label={`v${ticket.currentMockupRev}`}
-            borderColor={specColor.borderColor}
-            backgroundColor={theme.colors.surface2}
-            textColor={theme.colors.foreground}
-          />
-        </View>
+      <View style={[styles.row, { justifyContent: "space-between", alignItems: "center", flexShrink: 0 }]}>
+        <InspectorTagBadge
+          label={`MOCKUP · ${ticket.ticketKey}`}
+          borderColor={specColor.borderColor}
+          backgroundColor={specColor.badgeBackground}
+          textColor={specColor.badgeTextColor}
+        />
         <ActionButton
           styles={styles}
           label="Close"
@@ -130,127 +87,63 @@ export function MockupCardInspector({
         />
       </View>
 
-      {/* Scrollable version list in the middle so header and bottom rework input stay fixed */}
-      <ScrollView
-        style={{ flex: 1, minHeight: 0 }}
-        contentContainerStyle={{ gap: 6 }}
-        showsVerticalScrollIndicator
-      >
-        {orderedRevisions.map((mockupRev) => {
-          const statusBadge = resolveVersionStatusBadge(theme, mockupRev);
-          const elementCommentCount = mockupRev.elementComments?.length ?? 0;
-
-          return (
-            <View
-              key={`inspector-mockup-v${mockupRev.version}`}
-              style={[
-                styles.card,
-                {
-                  padding: 8,
-                  backgroundColor: theme.colors.surface2,
-                  borderColor:
-                    mockupRev.status === "approved"
-                      ? theme.colors.statusSuccess
-                      : specColor.borderColor,
-                  gap: 6,
-                },
-              ]}
-            >
-              <View style={[styles.row, { justifyContent: "space-between", alignItems: "center", gap: 6 }]}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Open preview for ${mockupRev.title} (v${mockupRev.version})`}
-                  onPress={() => onOpenPreviewVersion(ticket, mockupRev.version)}
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 8,
-                    flex: 1,
-                  }}
-                >
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text
-                      numberOfLines={1}
-                      style={{
-                        color: theme.colors.foreground,
-                        fontWeight: "700",
-                        fontSize: 12,
-                      }}
-                    >
-                      {mockupRev.title} (v{mockupRev.version})
-                    </Text>
-                    <View style={[styles.row, { gap: 6 }]}>
-                      <Text style={{ fontSize: 10, fontWeight: "700", color: statusBadge.color }}>
-                        {statusBadge.label}
-                      </Text>
-                      {elementCommentCount > 0 ? (
-                        <Text style={{ fontSize: 10, fontWeight: "600", color: theme.colors.accent }}>
-                          {elementCommentCount} {elementCommentCount === 1 ? "note" : "notes"}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </View>
-
-                  <View
-                    style={{
-                      paddingHorizontal: 8,
-                      paddingVertical: 3,
-                      borderRadius: 5,
-                      backgroundColor: specColor.badgeBackground,
-                      borderWidth: 1,
-                      borderColor: specColor.borderColor,
-                    }}
-                  >
-                    <Text style={{ color: specColor.badgeTextColor, fontWeight: "800", fontSize: 12 }}>
-                      →
-                    </Text>
-                  </View>
-                </Pressable>
-
-                <ActionButton
-                  styles={styles}
-                  tone="primary"
-                  label={mockupRev.status === "approved" ? "Approved" : "Approve"}
-                  accessibilityLabel={`Approve mockup v${mockupRev.version}`}
-                  disabled={reviewBoardMockup.isPending || mockupRev.status === "approved"}
-                  onPress={() => handleApproveVersion(mockupRev.version)}
-                />
-              </View>
-
-              {elementCommentCount > 0 ? (
-                <View style={{ gap: 2 }}>
-                  {mockupRev.elementComments.map((elementComment) => (
-                    <Text key={elementComment.id} style={styles.mutedText} numberOfLines={1}>
-                      [{elementComment.tagName}] {elementComment.comment}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-            </View>
-          );
-        })}
+      {/* Scrollable details in the middle so the header and bottom actions stay fixed */}
+      <ScrollView style={{ flex: 1, minHeight: 0 }} contentContainerStyle={{ gap: 6 }}>
+        <Text style={[styles.bodyText, { fontWeight: "700" }]}>{ticket.title}</Text>
+        <Text style={[styles.mutedText, { fontFamily: "monospace" }]}>{mockupState.file}</Text>
+        <Text
+          style={{
+            fontSize: 11,
+            fontWeight: "700",
+            color: isApproved ? theme.colors.statusSuccess : theme.colors.statusWarning,
+          }}
+        >
+          {isApproved
+            ? `Approved${mockupState.approvedCommit ? ` at ${mockupState.approvedCommit.slice(0, 8)}` : ""}`
+            : "Draft"}
+        </Text>
+        {mockupState.summary ? <Text style={styles.bodyText}>{mockupState.summary}</Text> : null}
+        {mockupState.feedback ? <Text style={styles.bodyText}>{mockupState.feedback}</Text> : null}
+        {mockupState.elementComments.map((elementComment) => (
+          <Text key={elementComment.id} style={styles.mutedText} numberOfLines={1}>
+            [{elementComment.tagName}] {elementComment.comment}
+          </Text>
+        ))}
       </ScrollView>
 
-      {/* Fixed bottom rework input with short 2-word submit button */}
-      {orderedRevisions.length > 0 ? (
-        <View style={[styles.row, { alignItems: "center", gap: 6, flexShrink: 0 }]}>
-          <TextInput
-            style={[styles.input, { flex: 1, minHeight: 36 }]}
-            value={reworkFeedbackDraft}
-            onChangeText={setReworkFeedbackDraft}
-            placeholder="Feedback..."
-            placeholderTextColor={theme.colors.foregroundMuted}
-          />
-          <ActionButton
-            styles={styles}
-            label={`Rework v${ticket.currentMockupRev + 1}`}
-            accessibilityLabel="Request mockup rework to create next version"
-            disabled={reviewBoardMockup.isPending || !reworkFeedbackDraft.trim()}
-            onPress={() => handleRequestNewVersion(ticket.currentMockupRev)}
-          />
-        </View>
-      ) : null}
+      <View style={[styles.row, { gap: 6, flexShrink: 0 }]}>
+        <ActionButton
+          styles={styles}
+          label="Preview"
+          accessibilityLabel={`Open preview for ${ticket.title}`}
+          onPress={() => onOpenPreview(ticket)}
+        />
+        <ActionButton
+          styles={styles}
+          tone="primary"
+          label={isApproved ? "Approved" : "Approve"}
+          accessibilityLabel={`Approve mockup of ${ticket.ticketKey} at the current commit`}
+          disabled={approveMockup.isPending || isApproved}
+          onPress={() => approveMockup.mutate({ repoPath: ticket.repoPath, ticketId: ticket.ticketKey })}
+        />
+      </View>
+
+      <View style={[styles.row, { alignItems: "center", gap: 6, flexShrink: 0 }]}>
+        <TextInput
+          style={[styles.input, { flex: 1, minHeight: 36 }]}
+          value={feedbackDraft}
+          onChangeText={setFeedbackDraft}
+          placeholder="Feedback..."
+          placeholderTextColor={theme.colors.foregroundMuted}
+        />
+        <ActionButton
+          styles={styles}
+          label="Send"
+          accessibilityLabel="Send feedback to the Product Agent"
+          disabled={sendMockupFeedback.isPending || !feedbackDraft.trim()}
+          onPress={handleSendFeedback}
+        />
+      </View>
 
       {reviewErrorMessage ? <Text style={styles.dangerText}>{reviewErrorMessage}</Text> : null}
     </View>

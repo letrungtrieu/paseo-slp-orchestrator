@@ -1,4 +1,4 @@
-// Compact Kanban card for Column 2 (MOCKUP); clicking selects the card to list all versions in the Sidebar.
+// Compact Kanban card for Column 1 (MOCKUP); clicking selects the card to show its file and review actions in the Sidebar.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Pressable, Text, View } from "react-native";
 import type { BoardTicket } from "../../../shared/board";
@@ -11,10 +11,9 @@ export interface MockupKanbanCardProps {
   ticket: BoardTicket;
   isSelected: boolean;
   onSelect: () => void;
-  onOpenPreviewVersion?: (ticket: BoardTicket, versionNumber: number) => void;
 }
 
-// Renders a compact Mockup card with concise 1-2 word status tags; full version list lives in the Sidebar inspector.
+// Renders a compact Mockup card with concise 1-2 word status tags; review actions live in the Sidebar inspector.
 export function MockupKanbanCard({
   styles,
   theme,
@@ -23,31 +22,14 @@ export function MockupKanbanCard({
   onSelect,
 }: MockupKanbanCardProps) {
   const specColor = resolveSpecColorIdentity(ticket);
-  const versionCount = ticket.mockupRevisions.length;
-  // Sum element comments across versions so the card surfaces feedback activity concisely.
-  const totalElementComments = ticket.mockupRevisions.reduce(
-    (sum, revisionItem) => sum + (revisionItem.elementComments?.length ?? 0),
-    0,
-  );
-  const latestRevision =
-    ticket.mockupRevisions[ticket.mockupRevisions.length - 1] ?? null;
-
-  const statusLabel = ticket.approvedMockupRev
-    ? "Approved"
-    : latestRevision?.status === "rework_requested"
-      ? "Rework"
-      : "Pending";
-  const statusColor = ticket.approvedMockupRev
-    ? theme.colors.statusSuccess
-    : latestRevision?.status === "rework_requested"
-      ? theme.colors.statusDanger
-      : theme.colors.statusWarning;
+  const openNoteCount = ticket.mockup?.elementComments.length ?? 0;
+  const isApproved = ticket.mockup?.status === "approved";
 
   return (
     <Pressable
       onPress={onSelect}
       accessibilityRole="button"
-      accessibilityLabel={`Inspect Mockup versions for ${ticket.ticketKey} ${ticket.title}`}
+      accessibilityLabel={`Inspect Mockup for ${ticket.ticketKey} ${ticket.title}`}
       style={[
         styles.card,
         {
@@ -79,13 +61,19 @@ export function MockupKanbanCard({
         </View>
 
         <View style={[styles.row, { gap: 6 }]}>
-          {totalElementComments > 0 ? (
+          {openNoteCount > 0 ? (
             <Text style={{ fontSize: 11, fontWeight: "600", color: theme.colors.accent }}>
-              {totalElementComments} {totalElementComments === 1 ? "note" : "notes"}
+              {openNoteCount} {openNoteCount === 1 ? "note" : "notes"}
             </Text>
           ) : null}
-          <Text style={{ fontSize: 11, fontWeight: "700", color: statusColor }}>
-            {statusLabel} v{ticket.currentMockupRev || versionCount}
+          <Text
+            style={{
+              fontSize: 11,
+              fontWeight: "700",
+              color: isApproved ? theme.colors.statusSuccess : theme.colors.statusWarning,
+            }}
+          >
+            {isApproved ? "Approved" : "Draft"}
           </Text>
         </View>
       </View>

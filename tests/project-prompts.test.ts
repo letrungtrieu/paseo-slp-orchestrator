@@ -161,8 +161,8 @@ describe("project system prompt composition", () => {
     expect(defaultQaPrompt).toContain("scorecard entry per criterion");
     expect(defaultQaPrompt).not.toContain("Build what the locked brief describes");
     expect(defaultDeveloperPrompt).not.toContain("scorecard entry per criterion");
-    // Seeded Lead workflow documents the optional mockup stage between planning and implement.
-    expect(defaultLeadPrompt).toContain("Pipeline shape (enforced): [planning]? -> [mockup]? -> implement.");
+    // Mockups are settled before a Run, so the seeded Lead workflow has only planning before implement.
+    expect(defaultLeadPrompt).toContain("Pipeline shape (enforced): [planning]? -> implement.");
     // The Lead's catalog shows each peer's kind because it decides which stage the peer may join.
     expect(defaultLeadPrompt).toContain("(Architect, kind: advisor)");
     for (const seededPrompt of [defaultDeveloperPrompt, defaultQaPrompt, defaultLeadPrompt]) {

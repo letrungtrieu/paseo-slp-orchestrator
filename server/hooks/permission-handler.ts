@@ -5,7 +5,7 @@ import type { AgentRecord, Run } from "../../shared/state";
 import type { PeerKind } from "../../shared/project-prompts";
 import { isPipelineLeadRole } from "../../shared/roles";
 import { agentPeerKind } from "../pipeline/stage-shape";
-import { findStandaloneSpecAgentById } from "../pipeline/spec-agent";
+import { findStandaloneProductAgentById } from "../pipeline/product-agent";
 import { decidePermission, type PermissionDecision } from "./permissions";
 import type { PipelineContext } from "../pipeline/context";
 import { isKiroProvider } from "../runtime/agent-gateway-helpers";
@@ -94,24 +94,25 @@ export async function handlePermissionRequest(
   if (answeredRequestIds.has(request.id)) return;
   const lookup = ctx.store.findAgent(agentId);
   if (!lookup) {
-    const standaloneSpecSession = findStandaloneSpecAgentById(agentId);
-    if (standaloneSpecSession) {
-      // Standalone Spec Agents operate read-only in their repository and are allowed to call slp-bus board tools.
+    const standaloneProductSession = findStandaloneProductAgentById(agentId);
+    if (standaloneProductSession) {
+      // Standalone Product Agents stay read-only in their repository except for the shared mockup source.
       answeredRequestIds.add(request.id);
       const standaloneDecision = decidePermission(request, {
         role: "supervisor",
-        agentCwd: standaloneSpecSession.repoPath,
+        agentCwd: standaloneProductSession.repoPath,
         writableScope: [],
         pipelineId: null,
         stageId: null,
         stageActive: false,
         archived: false,
+        mockupAuthor: true,
       });
       try {
         await ctx.gateway.respondToPermission(agentId, request.id, buildResponse(request, standaloneDecision));
       } catch (respondError) {
         answeredRequestIds.delete(request.id);
-        console.error("[slp] standalone Spec Agent permission response failed", respondError);
+        console.error("[slp] standalone Product Agent permission response failed", respondError);
       }
       return;
     }
@@ -140,9 +141,6 @@ export async function handlePermissionRequest(
   const pipelineRunning = pipelineIsRunningForAgent(run, agentRecord);
   const finalizingPipeline = isFinalizingLead(run, agentRecord);
   const pipelineWorktree = agentRecord.pipelineId ? run.pipelines[agentRecord.pipelineId]?.worktree : undefined;
-  const activeStageKind = agentRecord.pipelineId
-    ? run.pipelines[agentRecord.pipelineId]?.stages[run.pipelines[agentRecord.pipelineId].currentStageIndex]?.kind ?? null
-    : null;
   answeredRequestIds.add(request.id);
   const decision: PermissionDecision = pipelineRunning
     ? decidePermission(request, {
@@ -154,16 +152,13 @@ export async function handlePermissionRequest(
       stageId: agentRecord.stageId,
       stageActive,
       archived: false,
-      // Advisors and QA graders never write production code; mockup stage peers may write under .slp/mockups/**.
+      // Advisors and QA graders never write production code.
       peerKind: agentRecord.role === "peer" ? safePeerKind(run, agentRecord.projectRole) : null,
-      stageKind: activeStageKind,
       finalizingPipeline,
       additionalWritableRoots:
         agentRecord.role === "master_lead"
           ? [run.repoPath, run.devCwd, ...(pipelineWorktree ? [pipelineWorktree] : [])]
-          : activeStageKind === "mockup"
-            ? [run.repoPath, run.devCwd, ...(pipelineWorktree ? [pipelineWorktree] : [])]
-            : [],
+          : [],
     })
     : { behavior: "deny", message: "This agent belongs to an archived or inactive pipeline stage." };
   try {

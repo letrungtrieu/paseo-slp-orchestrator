@@ -4,6 +4,7 @@ import type { PluginServerContext, PluginSettings } from "@getpaseo/plugin/serve
 import { DEFAULT_SLP_SETTINGS, type SlpSettingsSchema } from "../shared/settings";
 import {
   abortRunRpc,
+  approveBoardMockupRpc,
   approveGateRpc,
   approvePipelineGateRpc,
   approveMainRpc,
@@ -15,10 +16,10 @@ import {
   readBoardMockupPreviewRpc,
   restoreRunRpc,
   resumeTaskRpc,
-  reviewBoardMockupFromUiRpc,
   saveBoardSpecFromUiRpc,
+  sendBoardMockupFeedbackRpc,
   setRunModeRpc,
-  spawnBoardSpecAgentRpc,
+  spawnBoardProductAgentRpc,
   startRunRpc,
   tailLogRpc,
   initializeProjectPromptsRpc,
@@ -29,11 +30,12 @@ import type { Run } from "../shared/state";
 import { enrichTicketWithLiveAgents } from "./pipeline/board-tools";
 import type { PipelineContext } from "./pipeline/context";
 import { bundleMockupHtmlPreview } from "./pipeline/mockup-files";
-import { executeMockupReview } from "./pipeline/mockup-tools";
+import { approveBoardMockup, sendMockupFeedback } from "./pipeline/mockup-tools";
 import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
 import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } from "./pipeline/run-lifecycle";
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
-import { spawnBoardSpecAgent } from "./pipeline/spec-agent";
+import { spawnBoardProductAgent } from "./pipeline/product-agent";
+import { liveRunForTicket, notifySupervisorOfSpecChange } from "./pipeline/ticket-change-notices";
 import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
@@ -164,6 +166,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
         leadPermissionModeId: lead.permissionModeId,
         peerPermissionModeId: peer.permissionModeId,
       },
+      ticketId: input.ticketId,
       // Allow the Start SLP form checkbox to override whether this run creates git worktrees or stays on baseBranch.
       orchestration:
         input.spawnWorktrees !== undefined
@@ -261,7 +264,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   // Persists human Spec edits from the Kanban UI and notifies the Supervisor so it can coordinate with the Lead.
   server.handle(saveBoardSpecFromUiRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const { matchedRun: activeRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(
+    const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(
       ctx,
       input.repoPath,
       input.runId,
@@ -275,47 +278,13 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
       specContent: input.specContent,
       author: "human",
       summary: input.summary,
-      activeRunId: activeRun?.id ?? null,
+      // Left undefined without a Run so editing a card can never detach it from the Run delivering it.
+      activeRunId: matchedRun?.id,
     });
 
-    let notifiedSupervisor = false;
-    if (activeRun && activeRun.supervisorAgentId && !activeRun.agents[activeRun.supervisorAgentId]?.archivedAt) {
-      const latestSpecRevision = savedTicket.specRevisions.at(-1);
-      const supervisorNotice = [
-        `## Human Updated Spec on Kanban Board — Ticket \`${savedTicket.ticketKey}\` (${savedTicket.title})`,
-        `- **New Spec Revision**: \`v${savedTicket.currentSpecRev}\``,
-        `- **Summary**: ${latestSpecRevision?.summary ?? "Human edited Spec in Kanban View"}`,
-        latestSpecRevision?.diff
-          ? `### Spec Diff\n\`\`\`diff\n${latestSpecRevision.diff}\n\`\`\``
-          : `### Updated Spec\n${savedTicket.specRevisions.at(-1)?.content ?? ""}`,
-        [
-          "### Required Supervisor Action",
-          `1. Inspect the updated Spec and diff on ticket \`${savedTicket.ticketKey}\` using \`slp_board_get_ticket({ ticketId: "${savedTicket.ticketKey}" })\`.`,
-          savedTicket.leadAgentId
-            ? `2. Notify the assigned Lead (\`${savedTicket.leadAgentId}\`) via \`slp_board_notify_lead({ ticketId: "${savedTicket.ticketKey}", message: "..." })\` so the Lead pauses its stage peers (\`slp_pause_peers\`), updates the Brief bullets from the Spec diff (\`slp_board_update_brief\`), and resumes work.`
-            : "2. If this feature is ready to run, delegate it with `slp_delegate` or inform the human in Vietnamese.",
-        ].join("\n"),
-      ].filter(Boolean).join("\n\n");
-
-      ctx.store.mutate(activeRun.id, (mutableRun) => {
-        mutableRun.productSpec = input.specContent.trim();
-      });
-      ctx.mailbox.enqueue(activeRun.id, activeRun.supervisorAgentId, supervisorNotice, {
-        taskId: savedTicket.activePipelineId,
-        awaitTool: null,
-        from: "human",
-        supersedeKey: `human-spec-edit:${savedTicket.id}`,
-        summary: `Human edited Spec v${savedTicket.currentSpecRev} on ${savedTicket.ticketKey}`,
-      });
-      notifiedSupervisor = true;
-      // Flush immediately when the Supervisor is idle so the human sees instant responsiveness.
-      if (ctx.holder.isReady()) {
-        await ctx.gateway
-          .liveStatuses(activeRun.id)
-          .then((liveStatuses) => ctx.mailbox.flush(activeRun.id, liveStatuses))
-          .catch(() => undefined);
-      }
-    }
+    const activeRun = liveRunForTicket(ctx, savedTicket);
+    if (activeRun) await notifySupervisorOfSpecChange(ctx, activeRun, savedTicket, "human");
+    const notifiedSupervisor = Boolean(activeRun);
 
     return {
       ticket: enrichTicketWithLiveAgents(activeRun, savedTicket),
@@ -323,103 +292,79 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     };
   });
 
-  // Spawns a standalone normal Paseo agent connected to the project's Kanban board for interactive Spec discussion.
-  server.handle(spawnBoardSpecAgentRpc, async (input, { paseo }) => {
-    ctx.holder.capture(paseo);
-    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath, input.runId);
+  // Product Agents have no role of their own in settings, so they follow the Supervisor's human-facing model choice.
+  const openProductAgent = async (repoPath: string, ticketId?: string) => {
     const savedSettings = globalSettings ? await globalSettings.read() : null;
     if (savedSettings?.status === "invalid") throw new Error(savedSettings.error);
     const defaults = savedSettings?.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
     const supervisorDefaults = roleRunDefaults(defaults.roles.supervisor);
-    return spawnBoardSpecAgent(ctx, {
-      repoPath: effectiveRepoPath || input.repoPath,
-      ticketId: input.ticketId,
+    return spawnBoardProductAgent(ctx, {
+      repoPath,
+      ticketId,
       provider: supervisorDefaults.provider ?? DEFAULT_PROVIDER,
       thinkingOptionId: supervisorDefaults.thinkingOptionId,
       permissionModeId: supervisorDefaults.permissionModeId,
     });
+  };
+
+  // Spawns a standalone Product Agent connected to the project's Kanban board for shaping a mockup and Spec.
+  server.handle(spawnBoardProductAgentRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath, input.runId);
+    return openProductAgent(effectiveRepoPath || input.repoPath, input.ticketId);
   });
 
-  // Bundles a specific HTML/CSS/JS mockup version (with element-comment inspector bridge) for the Kanban Mockup Preview Studio.
+  // Bundles a ticket's mockup file (with element-comment inspector bridge) for the Kanban Mockup Preview Studio.
   server.handle(readBoardMockupPreviewRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
+    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
     const targetTicket = ctx.store.board.requireTicket(
       input.ticketId,
       effectiveRepoPath || input.repoPath,
     );
-    const targetVersion = input.version ?? targetTicket.currentMockupRev;
-    const matchedRevision = targetTicket.mockupRevisions.find(
-      (candidateRev) => candidateRev.version === targetVersion,
-    );
-    if (!matchedRevision) {
-      throw new Error(
-        `Ticket '${targetTicket.ticketKey}' does not have mockup version v${targetVersion}.`,
-      );
+    if (!targetTicket.mockup) {
+      throw new Error(`Ticket '${targetTicket.ticketKey}' has no mockup yet.`);
     }
-    const ticketRun =
-      (targetTicket.activeRunId ? ctx.store.find(targetTicket.activeRunId) : undefined) ??
-      matchedRun;
-    // Resolve the Lead's worktree so relative images and CSS/JS assets resolve across both the worktree and repoPath.
-    const activePipeline =
-      targetTicket.activePipelineId && ticketRun
-        ? ticketRun.pipelines[targetTicket.activePipelineId]
-        : undefined;
-    const leadWorktreePath =
-      activePipeline?.worktree ??
-      (targetTicket.leadAgentId ? ticketRun?.agents[targetTicket.leadAgentId]?.worktreePath : null) ??
-      ticketRun?.devCwd ??
-      null;
     const { absoluteHtmlPath, bundledHtml } = await bundleMockupHtmlPreview(
       targetTicket.repoPath || effectiveRepoPath || input.repoPath,
-      matchedRevision.entryHtmlPath,
-      {
-        leadWorktreePath,
-        workingDirPath: matchedRevision.workingDirPath,
-      },
+      targetTicket.mockup.file,
     );
     return {
       ticketId: targetTicket.id,
-      version: matchedRevision.version,
-      title: matchedRevision.title,
-      featureSlug: matchedRevision.featureSlug,
-      entryHtmlPath: matchedRevision.entryHtmlPath,
+      title: targetTicket.title,
+      file: targetTicket.mockup.file,
       absoluteHtmlPath,
       bundledHtml,
     };
   });
 
-  // Handles human approval or rework requests (including HTML element comments) submitted from the Kanban Mockup Studio.
-  server.handle(reviewBoardMockupFromUiRpc, async (input, { paseo }) => {
+  // Saves the human's Studio notes and hands them to the Product Agent so the mockup can be revised right away.
+  server.handle(sendBoardMockupFeedbackRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
-    const { matchedRun: activeRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(
-      ctx,
-      input.repoPath,
-      input.runId,
-    );
-
-    const reviewOutcome = await executeMockupReview(ctx, {
-      repoPath: effectiveRepoPath || input.repoPath,
-      run: activeRun,
-      reviewerLabel: "human",
+    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
+    const repoPath = effectiveRepoPath || input.repoPath;
+    const feedbackOutcome = await sendMockupFeedback(ctx, {
+      repoPath,
       ticketIdOrKey: input.ticketId,
-      decision: input.decision,
-      version: input.version,
       feedback: input.feedback,
       elementComments: input.elementComments,
-      baseVersion: input.baseVersion,
+      openProductAgent: async (targetTicket) =>
+        (await openProductAgent(repoPath, targetTicket.id)).agentId,
     });
-
-    if (activeRun && reviewOutcome.notifiedAgentId && ctx.holder.isReady()) {
-      await ctx.gateway
-        .liveStatuses(activeRun.id)
-        .then((liveStatuses) => ctx.mailbox.flush(activeRun.id, liveStatuses))
-        .catch(() => undefined);
-    }
-
     return {
-      ticket: enrichTicketWithLiveAgents(activeRun, reviewOutcome.ticket),
-      notifiedAgentId: reviewOutcome.notifiedAgentId,
+      ticket: enrichTicketWithLiveAgents(liveRunForTicket(ctx, feedbackOutcome.ticket), feedbackOutcome.ticket),
+      productAgentId: feedbackOutcome.productAgentId,
     };
+  });
+
+  // Approves a mockup at the current commit from the Kanban UI; the gate that it is committed lives in the pipeline.
+  server.handle(approveBoardMockupRpc, async (input, { paseo }) => {
+    ctx.holder.capture(paseo);
+    const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
+    const approvedTicket = await approveBoardMockup(ctx, {
+      repoPath: effectiveRepoPath || input.repoPath,
+      ticketIdOrKey: input.ticketId,
+    });
+    return { ticket: enrichTicketWithLiveAgents(liveRunForTicket(ctx, approvedTicket), approvedTicket) };
   });
 }

@@ -1,6 +1,7 @@
 // Run-level lifecycle for model-authored pipelines. Fixed task phases remain readable in old
 // snapshots, but every new run advances through persisted PipelineState records instead.
 import { randomUUID } from "node:crypto";
+import { describeTicketRunBlocker, type BoardTicket } from "../../shared/board";
 import { ROLE_LABELS, isPipelineLeadRole, type RunMode } from "../../shared/roles";
 import type { ProviderChoices, Run } from "../../shared/state";
 import { DEFAULT_ORCHESTRATION_SETTINGS, type OrchestrationSettings } from "../../shared/orchestration";
@@ -36,6 +37,17 @@ export interface StartRunInput {
   providers: Partial<ProviderChoices>;
   // Tests and RPC callers may pin the policy; otherwise the host settings at start time apply.
   orchestration?: OrchestrationSettings;
+  // The prepared Kanban ticket this Run delivers.
+  ticketId?: string;
+}
+
+// Refuses before any agent exists, so a ticket that is not ready cannot leave a half-started Run behind.
+function requireReadyTicket(ctx: PipelineContext, ticketId: string, repoPath: string): BoardTicket {
+  const startingTicket = ctx.store.board.find(ticketId, repoPath);
+  if (!startingTicket) throw new ToolError(`Kanban ticket '${ticketId}' was not found in this project.`);
+  const runBlocker = describeTicketRunBlocker(startingTicket);
+  if (runBlocker) throw new ToolError(runBlocker);
+  return startingTicket;
 }
 
 async function currentOrchestrationSettings(ctx: PipelineContext): Promise<OrchestrationSettings> {
@@ -64,6 +76,7 @@ export function allPipelinesIntegrated(run: Run): boolean {
 
 export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   await assertGitRepository(input.repoPath);
+  const startingTicket = input.ticketId ? requireReadyTicket(ctx, input.ticketId, input.repoPath) : null;
   // Always detect the currently checked-out branch of the project repository as the base branch.
   const baseBranch = await currentBranchName(input.repoPath);
   // Reject bad Markdown before creating worktrees or agents; all children use this same project-root snapshot.
@@ -152,9 +165,13 @@ export async function startRun(ctx: PipelineContext, input: StartRunInput) {
   ctx.store.mutate(runId, (mutableRun) => {
     mutableRun.supervisorAgentId = supervisor.agentId;
     mutableRun.status = "delegating";
+    // The Spec is the human-approved contract, so delegation inherits it even when the Supervisor does not repeat it.
+    if (startingTicket) mutableRun.productSpec = startingTicket.specRevisions.at(-1)?.content ?? null;
   });
+  // Binding before the briefing means the Supervisor's first board read already finds its ticket.
+  if (startingTicket) ctx.store.board.bindRun(startingTicket.id, input.repoPath, runId);
   // Prompt only the Supervisor at startup so no idle Master Lead session clutters the workspace before delegation.
-  await ctx.gateway.prompt(supervisor.agentId, supervisorBriefing());
+  await ctx.gateway.prompt(supervisor.agentId, supervisorBriefing(startingTicket));
   ctx.logEvent(runId, { taskId: null, from: "manager", to: supervisor.agentId, kind: "run.started", summary: `${runMetadata.title} (${input.mode})`, outcome: "info" });
   return { runId, supervisorAgentId: supervisor.agentId, supervisorWorkspaceId: supervisorWorkspace.workspaceId };
 }
