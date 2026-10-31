@@ -190,6 +190,7 @@ describe("slp-manager project skill provisioning", () => {
       expect(database.prepare("SELECT name FROM sqlite_master WHERE name = ?").get(tableName)).toBeTruthy();
     }
     expect(skillMarkdown).toContain("**Spec lock:**");
+    expect(skillMarkdown).toContain("has its own provider, model, thinking and permission setting");
     database.close();
   });
 

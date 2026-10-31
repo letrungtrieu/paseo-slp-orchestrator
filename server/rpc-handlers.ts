@@ -40,7 +40,7 @@ import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
 import { join } from "node:path";
-import { roleRunDefaults } from "./runtime/run-defaults";
+import { productAgentDefaults, roleRunDefaults } from "./runtime/run-defaults";
 import { ensureSlpManagerSkill } from "./skills/slp-manager-skill";
 
 // Match a workspace directory (either main repoPath or an SLP Lead/Peer git worktree) to its owning Run and canonical repoPath.
@@ -297,13 +297,13 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     const savedSettings = globalSettings ? await globalSettings.read() : null;
     if (savedSettings?.status === "invalid") throw new Error(savedSettings.error);
     const defaults = savedSettings?.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
-    const supervisorDefaults = roleRunDefaults(defaults.roles.supervisor);
+    const productDefaults = productAgentDefaults(defaults.roles);
     return spawnBoardProductAgent(ctx, {
       repoPath,
       ticketId,
-      provider: supervisorDefaults.provider ?? DEFAULT_PROVIDER,
-      thinkingOptionId: supervisorDefaults.thinkingOptionId,
-      permissionModeId: supervisorDefaults.permissionModeId,
+      provider: productDefaults.provider ?? DEFAULT_PROVIDER,
+      thinkingOptionId: productDefaults.thinkingOptionId,
+      permissionModeId: productDefaults.permissionModeId,
     });
   };
 

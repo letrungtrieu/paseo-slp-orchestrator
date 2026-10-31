@@ -25,7 +25,8 @@ export function useRunStartOptions(repositoryPath: string, hostId?: string) {
     lead: providerModelForRole("lead"),
     peer: providerModelForRole("peer"),
   };
-  const permissionModeForRole = (providerRole: ProviderRole) =>
+  // The Product Agent works before any Run, so a Run's submitted options only cover the three roles inside it.
+  const permissionModeForRole = (providerRole: keyof typeof roleProviderModels) =>
     resolvePermissionModeId(
       roleSelections[providerRole],
       roleProviderModels[providerRole],

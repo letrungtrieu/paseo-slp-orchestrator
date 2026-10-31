@@ -4,7 +4,8 @@ import { z } from "zod";
 import { RunModeSchema } from "./roles";
 import { OrchestrationSettingsSchema } from "./orchestration";
 
-export const PROVIDER_ROLES = ["supervisor", "lead", "peer"] as const;
+// The Product Agent comes first because an idea passes through it before any Run, and so before the Supervisor.
+export const PROVIDER_ROLES = ["product", "supervisor", "lead", "peer"] as const;
 export type ProviderRole = (typeof PROVIDER_ROLES)[number];
 
 const RoleProviderSelectionSchema = z.object({
@@ -28,6 +29,7 @@ export const SlpSettingsSchema = z.object({
   // New installations run autonomously; an explicit mode choice is remembered for later runs.
   mode: RunModeSchema.default("FULL_AUTO"),
   roles: z.object({
+    product: RoleProviderSelectionSchema.prefault({}),
     supervisor: RoleProviderSelectionSchema.prefault({}),
     lead: RoleProviderSelectionSchema.prefault({}),
     peer: RoleProviderSelectionSchema.prefault({}),

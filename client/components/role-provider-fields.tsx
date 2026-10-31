@@ -13,6 +13,7 @@ import {
 } from "../models/provider-selection";
 
 const ROLE_LABELS: Record<ProviderRole, string> = {
+  product: "Product Agent",
   supervisor: "Supervisor",
   lead: "Lead",
   peer: "Peers",
