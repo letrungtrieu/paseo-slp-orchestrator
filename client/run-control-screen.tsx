@@ -124,6 +124,7 @@ export function SlpOrchestratorTabbedView({
           selectedRepositoryPath={selectedRepositoryPath}
           onSelectRepositoryPath={setSelectedRepositoryPath}
           onRunStarted={handleRunStarted}
+          onOpenAgent={openSupervisorChat}
         />
       ) : null}
 

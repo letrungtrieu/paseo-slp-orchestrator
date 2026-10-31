@@ -36,6 +36,7 @@ import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } fro
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
 import { spawnBoardProductAgent } from "./pipeline/product-agent";
 import { liveRunForTicket, notifySupervisorOfSpecChange } from "./pipeline/ticket-change-notices";
+import { releaseEndedRunTickets } from "./pipeline/ticket-run-release";
 import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
@@ -251,6 +252,8 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     ctx.holder.capture(paseo);
     const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, repoPath, runId);
     if (!effectiveRepoPath) return { repoPath: "", tickets: [] };
+    // Runs aborted before tickets were released would keep their tickets stuck on the board.
+    releaseEndedRunTickets(ctx, effectiveRepoPath);
     const storedTickets = ctx.store.board.listByRepo(effectiveRepoPath);
     return {
       repoPath: effectiveRepoPath,

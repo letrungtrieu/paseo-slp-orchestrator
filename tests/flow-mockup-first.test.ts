@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { BusCaller, BusToolOutcome } from "../server/bus/http-mcp";
 import { approveBoardMockup, sendMockupFeedback } from "../server/pipeline/mockup-tools";
+import { abortRun } from "../server/pipeline/run-lifecycle";
 import { bundleMockupHtmlPreview } from "../server/pipeline/mockup-files";
 import { buildSpecWorkPrompt, STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
 import { createBusDispatcher } from "../server/pipeline/tool-handlers";
@@ -224,6 +225,38 @@ describe("mockup-first product flow", () => {
     expect(projectTickets).toHaveLength(1);
     expect(projectTickets[0].title).toBe("Thanh toán");
     expect(projectTickets[0].leadAgentId).toBe(delegatedRun.masterLeadAgentId);
+  });
+
+  it("gives the ticket back when its Run is aborted, so the feature can start again", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const ticketKey = await prepareReadyTicket(flow);
+    const firstRunId = await flow.startRun(ticketKey);
+    await expect(flow.startRun(ticketKey)).rejects.toThrow(/already belongs to a Run/);
+
+    await abortRun(flow.ctx, firstRunId);
+    const releasedTicket = flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath);
+    // Only the delivery binding goes; what the human approved and wrote stays with the card.
+    expect(releasedTicket.activeRunId).toBeNull();
+    expect(releasedTicket.mockup?.status).toBe("approved");
+    expect(releasedTicket.currentSpecRev).toBe(1);
+    expect(describeTicketRunBlocker(releasedTicket)).toBeNull();
+    const secondRunId = await flow.startRun(ticketKey);
+    expect(secondRunId).not.toBe(firstRunId);
+  });
+
+  it("frees a ticket held by a Run that was aborted before releases existed", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    const ticketKey = await prepareReadyTicket(flow);
+    const staleRunId = await flow.startRun(ticketKey);
+    // Reproduce an old abort: the status changes but nothing lets go of the ticket.
+    flow.ctx.store.mutate(staleRunId, (mutableRun) => {
+      mutableRun.status = "aborted";
+    });
+    expect(flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath).activeRunId).toBe(staleRunId);
+
+    // Starting again must notice the dead Run instead of refusing forever.
+    const freshRunId = await flow.startRun(ticketKey);
+    expect(freshRunId).not.toBe(staleRunId);
   });
 
   it("tells the Supervisor when the Product Agent edits a Spec that is already in a Run, without detaching the ticket", async () => {

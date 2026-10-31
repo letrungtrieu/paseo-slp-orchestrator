@@ -428,6 +428,26 @@ export class BoardStore extends BoardTicketRepository {
     });
   }
 
+  // An ended Run lets go of its tickets: Spec, mockup and Brief history stay, only the delivery binding goes.
+  releaseRun(runId: string): void {
+    const database = this.resolveDatabase();
+    transaction(database, () => {
+      for (const heldTicket of this.listByRun(runId)) {
+        // A card shown in the delivery columns goes back to SPEC, where a prepared ticket waits for its next Run.
+        const deliveryColumns: readonly BoardColumn[] = ["brief", "score", "rework"];
+        this.persistTicket(database, {
+          ...heldTicket,
+          column: deliveryColumns.includes(heldTicket.column) ? "spec" : heldTicket.column,
+          activeRunId: null,
+          activePipelineId: null,
+          leadAgentId: null,
+          activeAgents: [],
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    });
+  }
+
   // Explicitly moves a ticket to a target Kanban column (for example moving to DONE on slp_approve_main).
   setColumn(ticketIdOrKey: string, column: BoardColumn, repoPath?: string): BoardTicket {
     const database = this.resolveDatabase();

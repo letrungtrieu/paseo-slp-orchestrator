@@ -200,6 +200,49 @@ describe("Lead-assigned stage access", () => {
   });
 
   // The Product Agent has no stage, so these rules are all that keeps it away from production code.
+  describe("mockup ownership", () => {
+    // Every role that can write somewhere must still be refused inside the mockup source.
+    const writers = [
+      ["Lead", contextFor("master_lead")],
+      ["developer peer", contextFor("peer", { peerKind: "developer", writableScope: [] })],
+      ["developer peer with a wide scope", contextFor("peer", { peerKind: "developer", writableScope: [".slp/", "src/"] })],
+    ] as const;
+
+    it.each(writers)("refuses file writes into the mockup source for a %s", (_label, writer) => {
+      for (const mockupPath of [".slp/mockup/checkout.html", ".slp/mockup/core/core.css", ".slp/mockups/old/index.html", `${WORKTREE}/.slp/mockup/features/x/a.js`, "src/../.slp/mockup/a.html"]) {
+        expect(isAllowed(decidePermission(fileWriteRequest(mockupPath), writer))).toBe(false);
+      }
+      // The rest of the worktree is untouched by the rule.
+      expect(isAllowed(decidePermission(fileWriteRequest("src/a.ts"), writer))).toBe(true);
+    });
+
+    it.each(writers)("refuses shell commands that could change a mockup for a %s, and allows plain reads", (_label, writer) => {
+      for (const command of [
+        "rm -rf .slp/mockup",
+        "sed -i s/a/b/ .slp/mockup/checkout.html",
+        "echo x > .slp/mockup/a.html",
+        "python3 -c \"open('.slp/mockup/a.html','w').write('x')\"",
+        "cat a.html | tee .slp/mockup/a.html",
+        "cd .slp/mockup && git checkout -- .",
+        "git add .slp/mockup && git commit -m mockup",
+        "find .slp/mockup -name '*.html' -delete",
+        "cat $(echo .slp/mockup/a.html)",
+      ]) {
+        expect(isAllowed(decidePermission(shellRequest(command), writer))).toBe(false);
+      }
+      for (const command of ["cat .slp/mockup/checkout.html", "ls -la .slp/mockup/core", "grep -rn pay .slp/mockup | head", "git diff -- .slp/mockup", "cd repo && cat .slp/mockup/a.html"]) {
+        expect(isAllowed(decidePermission(shellRequest(command), writer))).toBe(true);
+      }
+    });
+
+    it("keeps read-only roles unable to write it too, and leaves the Product Agent as the only author", () => {
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/mockup/a.html"), contextFor("supervisor")))).toBe(false);
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/mockup/a.html"), contextFor("qa_lead")))).toBe(false);
+      const productAgent = contextFor("supervisor", { stageActive: false, writableScope: [], mockupAuthor: true });
+      expect(isAllowed(decidePermission(fileWriteRequest(".slp/mockup/a.html"), productAgent))).toBe(true);
+    });
+  });
+
   describe("Product Agent mockup authoring", () => {
     const productAgent = contextFor("supervisor", { stageActive: false, writableScope: [], mockupAuthor: true });
 

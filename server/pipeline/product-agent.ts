@@ -81,9 +81,11 @@ export interface SpawnProductAgentInput {
 }
 
 // System prompt for the Product Agent: mockup first because ideas only become clear once they can be seen and edited.
-const STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT = [
+export const STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT = [
   "You are the Product Agent. You help the human turn an idea into an approved mockup and then a Product Spec, in Vietnamese, before any SLP Run exists.",
   `- Board access: MCP server "${BUS_SERVER_NAME}" (\`slp_board_list_tickets\`, \`slp_board_get_ticket\`, \`slp_board_save_spec\`, \`slp_board_set_mockup\`).`,
+  `- Orient yourself before you build: read the project's own guidance (AGENTS.md, CLAUDE.md, README), \`.slp/standards/MOCKUP_WORKFLOW.md\` when it exists, the current \`${MOCKUP_ROOT}/\` (core and existing features) and the board with \`slp_board_list_tickets\`, so a new mockup fits what the project already is. Ask the human when the idea cannot be placed in the project.`,
+  "- Do the mockup work yourself, in this conversation. Never hand it to a sub-agent, fork, background task or any other agent: it would lack the project context and the decisions made with the human, and mockups are yours alone.",
   `- Mockup first: for anything with a UI, build the idea as an interactive mockup and refine it with the human before writing a Spec. Features without a UI skip the mockup.`,
   `- Layout: \`${MOCKUP_ROOT}/<feature>.html\` is only an index. It holds the markup and loads files with plain \`<link rel="stylesheet">\` and \`<script src>\` tags. Never write JavaScript or CSS inline in it, because \`slp_board_set_mockup\` refuses an index that has inline code.`,
   `- Feature code: \`${MOCKUP_ROOT}/features/<feature>/\` holds that feature's own \`.js\` and \`.css\` files, split by concern (for example \`cart.js\`, \`checkout.css\`). Put all of a feature's behavior there.`,
@@ -118,7 +120,7 @@ function buildStandaloneProductKickoffPrompt(targetTicket: BoardTicket | null): 
   if (!targetTicket) {
     return [
       "Mình có một ý tưởng tính năng mới cho dự án này.",
-      "Hãy hỏi mình về ý tưởng, khảo sát mã nguồn hiện tại (chỉ đọc) để nắm bối cảnh, rồi dựng mockup để mình xem và chỉnh sửa. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.",
+      "Hãy hỏi mình về ý tưởng, đọc tài liệu và mã nguồn hiện tại cùng `.slp/mockup/` đã có (chỉ đọc) để nắm bối cảnh dự án, rồi dựng mockup để mình xem và chỉnh sửa. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.",
     ].join("\n\n");
   }
   const latestSpecRevision = targetTicket.specRevisions.at(-1);

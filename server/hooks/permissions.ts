@@ -82,6 +82,27 @@ function isMockupPath(relativePath: string): boolean {
   return relativePath === MOCKUP_ROOT || relativePath.startsWith(`${MOCKUP_ROOT}/`);
 }
 
+// Mockups belong to the Product Agent alone. The older versioned folder is covered too, so no role can keep a legacy copy moving.
+const LEGACY_MOCKUP_ROOT = ".slp/mockups";
+
+function isMockupSourcePath(relativePath: string): boolean {
+  return isMockupPath(relativePath) || relativePath === LEGACY_MOCKUP_ROOT || relativePath.startsWith(`${LEGACY_MOCKUP_ROOT}/`);
+}
+
+const MOCKUP_OWNERSHIP_DENIAL = "Mockups are created and edited only by the Product Agent, never by a Supervisor, Lead or peer. Read the approved mockup as the UI contract; if it is wrong or must change, report it with slp_escalate (or tell the human) instead of changing it.";
+
+// A shell command that names a mockup folder is allowed only when every part of it just reads.
+const MOCKUP_SOURCE_IN_SHELL = /\.slp[\\/]+mockups?\b/i;
+const READ_ONLY_SHELL_COMMAND = /^\s*(cd|cat|ls|head|tail|wc|grep|egrep|rg|diff|stat|file|sort|uniq|find|git\s+(status|diff|log|show|ls-files|grep))\b/;
+
+function isReadOnlyShellCommand(shellCommand: string): boolean {
+  // Redirects, substitutions and find's action flags are the ways an otherwise read-only command writes.
+  if (/[>`]|\$\(|-delete\b|-exec(dir)?\b|-ok(dir)?\b|-fprint/.test(shellCommand)) return false;
+  return shellCommand
+    .split(/&&|\|\||;|\|/)
+    .every((commandSegment) => commandSegment.trim() === "" || READ_ONLY_SHELL_COMMAND.test(commandSegment));
+}
+
 function roleMayWritePath(context: PermissionContext, relativePath: string): boolean {
   if (context.mockupAuthor) return !context.archived && isMockupPath(relativePath);
   // Runtime artifacts remain protected even when a peer has a whole-worktree grant.
@@ -111,6 +132,13 @@ function decideFileWrite(request: AgentPermissionRequest, context: PermissionCon
   for (const writePath of extractWritePaths(request)) {
     // Paths are resolved against the agent's cwd first so '../' tricks cannot reach an unauthorized directory.
     const absolutePath = isAbsolute(writePath) ? writePath : resolve(context.agentCwd, writePath);
+    // Checked against every allowed root, because the same file can be reached through the main checkout or a worktree.
+    const touchesMockupSource = allowedRoots
+      .map((rootPath) => relative(rootPath, absolutePath).replace(/\\/g, "/"))
+      .some((candidateRelative) => !candidateRelative.startsWith("..") && !isAbsolute(candidateRelative) && isMockupSourcePath(candidateRelative));
+    if (touchesMockupSource && !context.mockupAuthor) {
+      return { behavior: "deny", message: `Writing '${writePath}' is refused. ${MOCKUP_OWNERSHIP_DENIAL}` };
+    }
     const matchingRelativePath = allowedRoots
       .map((rootPath) => relative(rootPath, absolutePath).replace(/\\/g, "/"))
       .find((candidateRelative) => !candidateRelative.startsWith("..") && !isAbsolute(candidateRelative));
@@ -144,6 +172,10 @@ function decideShell(request: AgentPermissionRequest, context: PermissionContext
   if (shellCommand === null) return { behavior: "allow" };
   if (DAEMON_BYPASS.test(shellCommand)) {
     return { behavior: "deny", message: "Do not drive the Paseo daemon or CLI; use the slp_ bus tools." };
+  }
+  // Shell cannot be fully parsed, so anything that names a mockup folder must be plainly read-only for every role but the Product Agent.
+  if (!context.mockupAuthor && MOCKUP_SOURCE_IN_SHELL.test(shellCommand) && !isReadOnlyShellCommand(shellCommand)) {
+    return { behavior: "deny", message: `This command could change a mockup. ${MOCKUP_OWNERSHIP_DENIAL}` };
   }
   // The human may ask the Product Agent to commit and push the mockup; that exception covers nothing else it could run.
   if (context.mockupAuthor && isMockupGitCommand(shellCommand)) return { behavior: "allow" };

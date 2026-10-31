@@ -20,6 +20,7 @@ import {
   handleSupervisorArchived,
 } from "./agent-hierarchy";
 import { archiveAgentLogged, type PipelineContext } from "./context";
+import { releaseEndedRunTickets } from "./ticket-run-release";
 import { ToolError } from "./tool-error";
 import { stageMail } from "./stage-mail";
 
@@ -43,6 +44,8 @@ export interface StartRunInput {
 
 // Refuses before any agent exists, so a ticket that is not ready cannot leave a half-started Run behind.
 function requireReadyTicket(ctx: PipelineContext, ticketId: string, repoPath: string): BoardTicket {
+  // A ticket still tied to an aborted Run would otherwise refuse every new Run.
+  releaseEndedRunTickets(ctx, repoPath);
   const startingTicket = ctx.store.board.find(ticketId, repoPath);
   if (!startingTicket) throw new ToolError(`Kanban ticket '${ticketId}' was not found in this project.`);
   const runBlocker = describeTicketRunBlocker(startingTicket);
@@ -383,5 +386,7 @@ export async function abortRun(ctx: PipelineContext, runId: string): Promise<voi
     }
   }
   await archiveOwnedWorkspaces(ctx, ctx.store.require(runId));
+  // The feature goes back to the board so the human can start it again once the problem is fixed.
+  ctx.store.board.releaseRun(runId);
   ctx.logEvent(runId, { taskId: null, from: "manager", to: "pipeline", kind: "run.aborted", summary: "aborted by the Supreme Manager", outcome: "info" });
 }

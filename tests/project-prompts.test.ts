@@ -146,6 +146,20 @@ describe("Markdown role discovery", () => {
   });
 });
 
+describe("mockup ownership in system prompts", () => {
+  it("tells every role, even one running a custom workflow, that only the Product Agent edits mockups", async () => {
+    const repoPath = await createDirectory("mockup-ownership");
+    const configuration = await loadProjectPrompts(repoPath);
+    // A workflow replaced by the user must not be able to drop the rule, because the engine adds it outside the workflow.
+    configuration.lead.workflow = "Custom lead workflow with nothing about mockups.";
+    for (const role of ["supervisor", "master_lead", "qa_lead"] as const) {
+      expect(systemPromptFor(role, configuration)).toContain("MOCKUP OWNERSHIP RULE");
+    }
+    expect(systemPromptFor("peer", configuration, "developer")).toContain("MOCKUP OWNERSHIP RULE");
+    expect(systemPromptFor("master_lead", configuration)).toContain("only by the Product Agent");
+  });
+});
+
 describe("project system prompt composition", () => {
   it("includes full default workflows in seeded .slp files while letting custom .slp edits completely replace the workflow without hardcoded wrappers", async () => {
     const repoPath = await createDirectory("project-prompts");

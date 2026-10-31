@@ -2,9 +2,9 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { describeTicketRunBlocker } from "../../shared/board";
+import { describeTicketRunBlocker, type BoardTicket } from "../../shared/board";
 import type { UiStyles } from "../styles";
-import { useBoardTickets } from "../use-board";
+import { useBoardActions, useBoardTickets } from "../use-board";
 import { describeRpcError, useRunActions } from "../use-run";
 import { useRunStartOptions } from "../use-run-start-options";
 import { ActionButton } from "./action-button";
@@ -19,6 +19,8 @@ interface StartRunFormProps {
   currentHost?: { id: string; label: string };
   selectedHostId?: string;
   onSelectHostId?: (nextHostId: string) => void;
+  // Opens an agent's chat, used to land in the Product Agent after it is spawned from this form.
+  onOpenAgent?: (agentId: string) => void;
 }
 
 export function StartRunForm({
@@ -30,8 +32,10 @@ export function StartRunForm({
   currentHost,
   selectedHostId,
   onSelectHostId,
+  onOpenAgent,
 }: StartRunFormProps) {
   const { startRun } = useRunActions();
+  const { spawnProductAgent } = useBoardActions();
   // Support controlled repository selection shared across tabs while keeping local state as a fallback.
   const [internalRepoPath, setInternalRepoPath] = useState("");
   const effectiveRepoPath = selectedRepositoryPath ?? internalRepoPath;
@@ -58,6 +62,19 @@ export function StartRunForm({
   );
   const selectedTicket =
     readyTickets.find((ticket) => ticket.ticketKey === selectedTicketKey) ?? null;
+  // Tickets that cannot start yet are listed with the reason, so "no ready ticket" never leaves the human guessing.
+  const blockedTickets = (boardQuery.data?.tickets ?? [])
+    .map((ticket) => ({ ticket, blockerReason: describeTicketRunBlocker(ticket) }))
+    .filter((blockedEntry): blockedEntry is { ticket: BoardTicket; blockerReason: string } => blockedEntry.blockerReason !== null);
+
+  // Mockups are made only by the Product Agent, so every way of making or changing one starts by opening it.
+  const openProductAgent = (targetTicketKey?: string) => {
+    if (!effectiveRepoPath.trim()) return;
+    spawnProductAgent.mutate(
+      { repoPath: effectiveRepoPath.trim(), ticketId: targetTicketKey },
+      { onSuccess: (spawnedResponse) => onOpenAgent?.(spawnedResponse.agentId) },
+    );
+  };
 
   // Trimmed here because a pasted path often carries a trailing newline that git would reject.
   const submitRun = () => {
@@ -103,7 +120,7 @@ export function StartRunForm({
       <Text style={styles.fieldLabel}>Ready Ticket</Text>
       {readyTickets.length === 0 ? (
         <Text style={styles.mutedText}>
-          No ready tickets. Open the project Kanban board, shape a feature with + New Feature, approve its mockup and write its Spec.
+          No ready tickets. A ticket is ready when its mockup is approved and its Spec is written and reviewed. Create a new mockup with the Product Agent below, or approve one on the Kanban board.
         </Text>
       ) : (
         <View style={styles.row}>
@@ -129,6 +146,37 @@ export function StartRunForm({
           })}
         </View>
       )}
+      {blockedTickets.length > 0 ? (
+        <View style={styles.stack}>
+          <Text style={styles.fieldLabel}>Not ready yet</Text>
+          {blockedTickets.map(({ ticket, blockerReason }) => (
+            <View key={ticket.id} style={styles.stack}>
+              <Text style={styles.bodyText}>{ticket.ticketKey} · {ticket.title}</Text>
+              <Text style={styles.mutedText}>{blockerReason}</Text>
+              {/* A ticket already inside a Run is fixed by ending that Run, not by the Product Agent. */}
+              {!ticket.activeRunId ? (
+                <ActionButton
+                  styles={styles}
+                  label="Continue with Product Agent"
+                  accessibilityLabel={`Continue ${ticket.ticketKey} with the Product Agent`}
+                  disabled={spawnProductAgent.isPending}
+                  onPress={() => openProductAgent(ticket.ticketKey)}
+                />
+              ) : null}
+            </View>
+          ))}
+        </View>
+      ) : null}
+      <ActionButton
+        styles={styles}
+        label={spawnProductAgent.isPending ? "Opening Agent..." : "+ New mockup with Product Agent"}
+        accessibilityLabel="Create a new mockup with the Product Agent"
+        disabled={!effectiveRepoPath.trim() || spawnProductAgent.isPending}
+        onPress={() => openProductAgent()}
+      />
+      {describeRpcError(spawnProductAgent.error) ? (
+        <Text style={styles.dangerText}>{describeRpcError(spawnProductAgent.error)}</Text>
+      ) : null}
       {/* Checkbox allowing the user to disable worktree spawning so all SLP agents work directly on baseBranch. */}
       <Pressable
         accessibilityRole="checkbox"
