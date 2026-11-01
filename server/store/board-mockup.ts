@@ -7,6 +7,7 @@ import {
   type BoardTicket,
   type MockupElementComment,
   type MockupElementCommentInput,
+  type MockupElementTarget,
   type TicketMockup,
 } from "../../shared/board";
 
@@ -23,14 +24,20 @@ export interface RecordMockupFeedbackParams {
 
 // Format element-level HTML tag comments into a structured Markdown list for Product Agent prompts.
 export function formatMockupElementCommentsMarkdown(
-  elementComments: readonly Pick<MockupElementComment, "selector" | "tagName" | "elementText" | "comment">[],
+  elementComments: readonly Pick<MockupElementComment, "selector" | "tagName" | "elementText" | "comment" | "targets">[],
 ): string {
   if (elementComments.length === 0) return "";
+  const describeTarget = (target: Pick<MockupElementTarget, "selector" | "tagName" | "elementText">): string => {
+    const snippetLabel = target.elementText.trim() ? ` ("${target.elementText.trim().slice(0, 60)}")` : "";
+    return `\`<${target.tagName}>\` selector \`${target.selector}\`${snippetLabel}`;
+  };
   const formattedLines = elementComments.map((commentEntry, commentIndex) => {
-    const snippetLabel = commentEntry.elementText.trim()
-      ? ` ("${commentEntry.elementText.trim().slice(0, 60)}")`
-      : "";
-    return `${commentIndex + 1}. \`<${commentEntry.tagName}>\` selector \`${commentEntry.selector}\`${snippetLabel}: ${commentEntry.comment.trim()}`;
+    // A drag-select note names every picked element on its own line so the agent edits all of them.
+    if (commentEntry.targets.length > 1) {
+      const targetLines = commentEntry.targets.map((target) => `   - ${describeTarget(target)}`).join("\n");
+      return `${commentIndex + 1}. ${commentEntry.targets.length} elements: ${commentEntry.comment.trim()}\n${targetLines}`;
+    }
+    return `${commentIndex + 1}. ${describeTarget(commentEntry)}: ${commentEntry.comment.trim()}`;
   });
   return `### HTML Element Comments\n${formattedLines.join("\n")}`;
 }
@@ -114,6 +121,7 @@ export function applyMockupFeedbackToTicket(
       selector: rawComment.selector.trim(),
       tagName: rawComment.tagName.trim().toLowerCase() || "div",
       elementText: rawComment.elementText.trim(),
+      targets: rawComment.targets ?? [],
       comment: rawComment.comment.trim(),
       createdAt: nowIsoTimestamp,
     }),

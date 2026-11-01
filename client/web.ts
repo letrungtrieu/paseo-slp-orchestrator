@@ -37,25 +37,29 @@ function InteractiveMockupIframeHost(props: {
   reloadNonce: number;
   maxWidthPx: number | null;
   inspectModeEnabled: boolean;
-  highlightedSelector: string | null;
-  onElementPicked: (pickedElement: PickedMockupHtmlElement) => void;
+  // Every selector of the comment being reviewed; a drag-select note has several.
+  highlightedSelectors: string[] | null;
+  onElementsPicked: (pickedElements: PickedMockupHtmlElement[]) => void;
 }) {
   const iframeElementRef = useRef<WebIframeElement | null>(null);
-  const elementPickedCallbackRef = useRef(props.onElementPicked);
-  elementPickedCallbackRef.current = props.onElementPicked;
+  const elementsPickedCallbackRef = useRef(props.onElementsPicked);
+  elementsPickedCallbackRef.current = props.onElementsPicked;
 
-  // Listen for postMessage events emitted when the human clicks an HTML tag in "Pick Element to Comment" mode.
+  // Listen for postMessage events emitted when the human clicks, or drag-selects, HTML tags in "Pick HTML" mode.
   useEffect(() => {
     const webHost = globalThis as unknown as WebGlobalMessageHost;
     if (!webHost.addEventListener) return;
 
     const handleIframeMessage = (messageEvent: WebWindowMessageEvent) => {
       const payload = messageEvent.data as Record<string, unknown> | undefined;
-      if (!payload || payload.type !== "slp-mockup-element-picked") return;
-      const selector = typeof payload.selector === "string" ? payload.selector : "body";
-      const tagName = typeof payload.tagName === "string" ? payload.tagName : "div";
-      const elementText = typeof payload.elementText === "string" ? payload.elementText : "";
-      elementPickedCallbackRef.current({ selector, tagName, elementText });
+      if (!payload || payload.type !== "slp-mockup-elements-picked" || !Array.isArray(payload.elements)) return;
+      // The iframe is sandboxed but still foreign input, so every field is coerced rather than trusted.
+      const pickedElements = payload.elements.map((rawElement: Record<string, unknown>) => ({
+        selector: typeof rawElement.selector === "string" ? rawElement.selector : "body",
+        tagName: typeof rawElement.tagName === "string" ? rawElement.tagName : "div",
+        elementText: typeof rawElement.elementText === "string" ? rawElement.elementText : "",
+      }));
+      if (pickedElements.length > 0) elementsPickedCallbackRef.current(pickedElements);
     };
 
     webHost.addEventListener("message", handleIframeMessage);
@@ -75,17 +79,17 @@ function InteractiveMockupIframeHost(props: {
     );
   }, [props.inspectModeEnabled, props.reloadNonce, props.bundledHtml, props.previewUrl]);
 
-  // Scroll to and outline a specific HTML element inside the mockup when the user clicks an existing comment.
+  // Scroll to and outline the HTML elements of a comment when the user clicks an existing comment.
   useEffect(() => {
-    if (!props.highlightedSelector) return;
+    if (!props.highlightedSelectors) return;
     iframeElementRef.current?.contentWindow?.postMessage(
       {
-        type: "slp-mockup-highlight-selector",
-        selector: props.highlightedSelector,
+        type: "slp-mockup-highlight-selectors",
+        selectors: props.highlightedSelectors,
       },
       "*",
     );
-  }, [props.highlightedSelector]);
+  }, [props.highlightedSelectors]);
 
   // Use React.createElement("iframe") with allow-scripts so HTML+CSS+JS mockups execute interactively inside Paseo Desktop.
   return React.createElement("iframe", {
@@ -128,8 +132,9 @@ export function renderMockupPreviewIframe(props: {
   reloadNonce: number;
   maxWidthPx: number | null;
   inspectModeEnabled: boolean;
-  highlightedSelector: string | null;
-  onElementPicked: (pickedElement: PickedMockupHtmlElement) => void;
+  // Every selector of the comment being reviewed; a drag-select note has several.
+  highlightedSelectors: string[] | null;
+  onElementsPicked: (pickedElements: PickedMockupHtmlElement[]) => void;
 }): React.ReactNode {
   if (Platform.OS !== "web") {
     return null;

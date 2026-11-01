@@ -6,7 +6,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { extname, resolve, sep } from "node:path";
 import { MOCKUP_ROOT } from "../../shared/board";
-import { buildMockupInspectorBridgeScript, MIME_TYPE_BY_EXTENSION } from "./mockup-asset-resolver";
+import { MIME_TYPE_BY_EXTENSION } from "./mockup-asset-resolver";
+import { buildMockupInspectorBridgeScript } from "./mockup-inspector-bridge";
 
 // Text types the asset resolver does not need to inline, but a page loaded by URL does.
 const PAGE_MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {

@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   buildCandidateBaseDirectories,
-  buildMockupInspectorBridgeScript,
   collectMockupDirectoryAssetMap,
   encodeFileAsDataUri,
   EXTERNAL_ASSET_SCHEME_REGEX,
   resolveLocalAssetFilePath,
 } from "./mockup-asset-resolver";
+import { buildMockupInspectorBridgeScript } from "./mockup-inspector-bridge";
 
 const STYLESHEET_LINK_TAG_REGEX = /<link\b([^>]*?)>/gi;
 const EXTERNAL_SCRIPT_TAG_REGEX =

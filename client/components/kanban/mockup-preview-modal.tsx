@@ -24,6 +24,22 @@ export interface MockupPreviewModalProps {
   onClose: () => void;
 }
 
+type CommentTargetFields = Pick<MockupElementCommentInput, "selector" | "tagName" | "targets">;
+
+// Every selector a note points at: the group of a drag-select, or the single element of a plain click.
+function selectorsOfComment(commentItem: CommentTargetFields): string[] {
+  return commentItem.targets && commentItem.targets.length > 0
+    ? commentItem.targets.map((target) => target.selector)
+    : [commentItem.selector];
+}
+
+// One-line label for a note or a fresh selection, collapsing a group into a count instead of a long selector.
+function describeCommentTarget(commentItem: CommentTargetFields): string {
+  return commentItem.targets && commentItem.targets.length > 1
+    ? `${commentItem.targets.length} elements: ${commentItem.targets.map((target) => target.tagName).join(", ")}`
+    : `[${commentItem.tagName}] ${commentItem.selector}`;
+}
+
 // Renders the interactive HTML/CSS/JS mockup iframe on the left and the compact HTML Element Comment panel on the right.
 export function MockupPreviewModal({
   styles,
@@ -41,10 +57,11 @@ export function MockupPreviewModal({
   const [iframeReloadNonce, setIframeReloadNonce] = useState<number>(0);
   const [viewportWidthPx, setViewportWidthPx] = useState<number | null>(null);
 
-  // When true, clicking inside the mockup iframe selects the clicked HTML element (`selector`, `tagName`, `elementText`) for commenting.
+  // When true, clicking or drag-selecting inside the mockup iframe picks HTML elements (`selector`, `tagName`, `elementText`) for commenting.
   const [inspectModeEnabled, setInspectModeEnabled] = useState<boolean>(false);
-  const [pickedHtmlElement, setPickedHtmlElement] = useState<PickedMockupHtmlElement | null>(null);
-  const [highlightedSelector, setHighlightedSelector] = useState<string | null>(null);
+  // A drag-select can pick several elements at once; they all share the one note written for them.
+  const [pickedHtmlElements, setPickedHtmlElements] = useState<PickedMockupHtmlElement[]>([]);
+  const [highlightedSelectors, setHighlightedSelectors] = useState<string[] | null>(null);
   const [elementCommentDraft, setElementCommentDraft] = useState<string>("");
   const [pendingElementComments, setPendingElementComments] = useState<MockupElementCommentInput[]>([]);
   const [overallFeedbackDraft, setOverallFeedbackDraft] = useState<string>("");
@@ -56,8 +73,8 @@ export function MockupPreviewModal({
   useEffect(() => {
     setPendingElementComments(mockupState?.elementComments ?? []);
     setOverallFeedbackDraft(mockupState?.feedback ?? "");
-    setPickedHtmlElement(null);
-    setHighlightedSelector(null);
+    setPickedHtmlElements([]);
+    setHighlightedSelectors(null);
   }, [ticket.id]);
 
   // The file has no versions to pick, so re-read it whenever the agent saves or the human presses Reload.
@@ -78,17 +95,20 @@ export function MockupPreviewModal({
   }, [ticket.id, ticket.repoPath, ticket.ticketKey, mockupState?.updatedAt, iframeReloadNonce, useInlinedFallback]);
 
   const handleAddElementComment = () => {
-    if (!pickedHtmlElement || !elementCommentDraft.trim()) return;
+    const [primaryPickedElement] = pickedHtmlElements;
+    if (!primaryPickedElement || !elementCommentDraft.trim()) return;
     const newCommentEntry: MockupElementCommentInput = {
       id: `el-cmt-${Date.now()}`,
-      selector: pickedHtmlElement.selector,
-      tagName: pickedHtmlElement.tagName,
-      elementText: pickedHtmlElement.elementText,
+      // The first element fills the flat fields so one note on one element stays in the original shape.
+      selector: primaryPickedElement.selector,
+      tagName: primaryPickedElement.tagName,
+      elementText: primaryPickedElement.elementText,
+      ...(pickedHtmlElements.length > 1 ? { targets: pickedHtmlElements } : {}),
       comment: elementCommentDraft.trim(),
     };
     setPendingElementComments((previousComments) => [...previousComments, newCommentEntry]);
     setElementCommentDraft("");
-    setPickedHtmlElement(null);
+    setPickedHtmlElements([]);
   };
 
   const handleRemoveElementComment = (targetIndex: number) => {
@@ -131,9 +151,9 @@ export function MockupPreviewModal({
         reloadNonce: iframeReloadNonce,
         maxWidthPx: viewportWidthPx,
         inspectModeEnabled,
-        highlightedSelector,
-        onElementPicked: (pickedElement) => {
-          setPickedHtmlElement(pickedElement);
+        highlightedSelectors,
+        onElementsPicked: (pickedElements) => {
+          setPickedHtmlElements(pickedElements);
         },
       })
     : null;
@@ -193,7 +213,7 @@ export function MockupPreviewModal({
                 color: inspectModeEnabled ? theme.colors.statusWarning : theme.colors.accent,
               }}
             >
-              {inspectModeEnabled ? "Pick HTML: ON" : "Pick HTML"}
+              {inspectModeEnabled ? "Pick HTML: ON (drag to select)" : "Pick HTML"}
             </Text>
           </Pressable>
 
@@ -298,7 +318,7 @@ export function MockupPreviewModal({
             {pendingElementComments.map((commentItem, commentIndex) => (
               <Pressable
                 key={commentItem.id ?? `cmt-${commentIndex}`}
-                onPress={() => setHighlightedSelector(commentItem.selector)}
+                onPress={() => setHighlightedSelectors(selectorsOfComment(commentItem))}
                 style={[
                   styles.card,
                   {
@@ -319,7 +339,7 @@ export function MockupPreviewModal({
                     }}
                     numberOfLines={1}
                   >
-                    [{commentItem.tagName}] {commentItem.selector}
+                    {describeCommentTarget(commentItem)}
                   </Text>
                   <Pressable onPress={() => handleRemoveElementComment(commentIndex)}>
                     <Text style={{ fontSize: 11, color: theme.colors.statusDanger }}>Delete</Text>
@@ -332,7 +352,7 @@ export function MockupPreviewModal({
 
           {/* Bottom-pinned Comment Composer (Element Note when an HTML tag is picked, plus General Note) */}
           <View style={{ gap: 6 }}>
-            {pickedHtmlElement ? (
+            {pickedHtmlElements.length > 0 ? (
               <View
                 style={[
                   styles.card,
@@ -344,14 +364,14 @@ export function MockupPreviewModal({
                 ]}
               >
                 <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.statusWarning }}>
-                  [{pickedHtmlElement.tagName}] {pickedHtmlElement.selector}
+                  {describeCommentTarget({ ...pickedHtmlElements[0], targets: pickedHtmlElements })}
                 </Text>
                 <TextInput
                   style={[styles.input, { minHeight: 54, textAlignVertical: "top" }]}
                   multiline
                   value={elementCommentDraft}
                   onChangeText={setElementCommentDraft}
-                  placeholder="Element note..."
+                  placeholder={pickedHtmlElements.length > 1 ? `Note for ${pickedHtmlElements.length} elements...` : "Element note..."}
                   placeholderTextColor={theme.colors.foregroundMuted}
                 />
                 <View style={styles.row}>
@@ -367,7 +387,7 @@ export function MockupPreviewModal({
                     styles={styles}
                     label="Cancel"
                     accessibilityLabel="Cancel selected HTML element"
-                    onPress={() => setPickedHtmlElement(null)}
+                    onPress={() => setPickedHtmlElements([])}
                   />
                 </View>
               </View>

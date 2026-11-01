@@ -16,11 +16,22 @@ export const MockupStatusSchema = z.enum(MOCKUP_STATUSES);
 export type MockupStatus = z.infer<typeof MockupStatusSchema>;
 
 // Review comment anchored to a specific HTML element/tag inside a feature mockup file.
-export const MockupElementCommentSchema = z.object({
-  id: z.string().trim().min(1),
+// One HTML element a review note points at.
+export const MockupElementTargetSchema = z.object({
   selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
   tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, input, or section"),
   elementText: z.string().trim().default("").describe("Short visible text or attribute snippet of the HTML element"),
+});
+export type MockupElementTarget = z.infer<typeof MockupElementTargetSchema>;
+
+export const MockupElementCommentSchema = z.object({
+  id: z.string().trim().min(1),
+  // The first target, kept as flat fields so notes saved before multi-select still read the same.
+  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
+  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, input, or section"),
+  elementText: z.string().trim().default("").describe("Short visible text or attribute snippet of the HTML element"),
+  // Every element a drag-select picked, first one included; empty for a note on a single element.
+  targets: z.array(MockupElementTargetSchema).default([]),
   comment: z.string().trim().min(1).describe("Human review instructions for modifying this HTML element"),
   createdAt: z.string(),
 });
@@ -31,6 +42,7 @@ export const MockupElementCommentInputSchema = z.object({
   selector: z.string().trim().min(1),
   tagName: z.string().trim().default("div"),
   elementText: z.string().trim().default(""),
+  targets: z.array(MockupElementTargetSchema).optional(),
   comment: z.string().trim().min(1),
 });
 export type MockupElementCommentInput = z.infer<typeof MockupElementCommentInputSchema>;
