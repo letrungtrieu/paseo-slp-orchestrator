@@ -75,6 +75,8 @@ export async function promptProductAgentForTicket(
 export interface SpawnProductAgentInput {
   repoPath: string;
   ticketId?: string;
+  // Optional opening message typed by the human in the Start SLP form.
+  message?: string;
   provider: string;
   thinkingOptionId?: string | null;
   permissionModeId?: string | null;
@@ -116,13 +118,24 @@ export function buildSpecWorkPrompt(ticket: BoardTicket): string | null {
 }
 
 // Builds the initial user-facing prompt, resuming from whatever state the ticket has reached.
-function buildStandaloneProductKickoffPrompt(targetTicket: BoardTicket | null): string {
+function buildStandaloneProductKickoffPrompt(
+  targetTicket: BoardTicket | null,
+  openingMessage?: string,
+): string {
+  // Whitespace-only input counts as "no message" so an accidental space never replaces the default instruction.
+  const humanMessage = openingMessage?.trim() ?? "";
   if (!targetTicket) {
     return [
       "Mình có một ý tưởng tính năng mới cho dự án này.",
+      // A typed idea is the human's own words, so it is passed through untouched after the intro.
+      humanMessage ? `Ý tưởng của mình:\n\n${humanMessage}` : "",
       "Hãy hỏi mình về ý tưởng, đọc tài liệu và mã nguồn hiện tại cùng `.slp/mockup/` đã có (chỉ đọc) để nắm bối cảnh dự án, rồi dựng mockup để mình xem và chỉnh sửa. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.",
-    ].join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
+  // The engine-owed Spec step stays in the prompt next to the human's message, so typing one never drops the Spec work.
+  const closingInstructions = [buildSpecWorkPrompt(targetTicket), humanMessage].filter(Boolean);
   const latestSpecRevision = targetTicket.specRevisions.at(-1);
   const mockupState = targetTicket.mockup;
   const openNotes = mockupState
@@ -141,8 +154,10 @@ function buildStandaloneProductKickoffPrompt(targetTicket: BoardTicket | null): 
     describeSpecWriteBlocker(targetTicket) && latestSpecRevision
       ? "Mockup còn là bản nháp nên Spec đang bị khóa: chỉ sửa mockup, Spec sẽ được rà soát sau khi mình duyệt lại."
       : "",
-    buildSpecWorkPrompt(targetTicket)
-      ?? "Hãy tóm tắt ngắn gọn trạng thái hiện tại rồi làm tiếp theo góp ý, hoặc hỏi mình muốn chỉnh điểm nào.",
+    // The generic "summarize and continue" line is only a fallback for when the human has nothing to add.
+    ...(closingInstructions.length > 0
+      ? closingInstructions
+      : ["Hãy tóm tắt ngắn gọn trạng thái hiện tại rồi làm tiếp theo góp ý, hoặc hỏi mình nếu chưa hiểu."]),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -207,13 +222,16 @@ export async function spawnBoardProductAgent(
     })),
   };
 
+  // Built once so the retry path after a rejected toolPolicy sends the identical opening message.
+  const kickoffPrompt = buildStandaloneProductKickoffPrompt(targetTicket, input.message);
+
   try {
     // Skip toolPolicy for plugin/ACP providers (e.g. Antigravity, Kiro) that reject exact MCP tool preapproval.
     if (PROVIDERS_WITHOUT_TOOL_POLICY.has(selectedProviderId)) {
       await workspaceHandle.agents.create({
         agentId,
         title: agentTitle,
-        prompt: buildStandaloneProductKickoffPrompt(targetTicket),
+        prompt: kickoffPrompt,
         config: baseSessionConfig,
       });
     } else {
@@ -221,7 +239,7 @@ export async function spawnBoardProductAgent(
         await workspaceHandle.agents.create({
           agentId,
           title: agentTitle,
-          prompt: buildStandaloneProductKickoffPrompt(targetTicket),
+          prompt: kickoffPrompt,
           config: { ...baseSessionConfig, toolPolicy: preapprovedToolPolicy },
         });
       } catch (toolPolicyError) {
@@ -234,7 +252,7 @@ export async function spawnBoardProductAgent(
         await workspaceHandle.agents.create({
           agentId,
           title: agentTitle,
-          prompt: buildStandaloneProductKickoffPrompt(targetTicket),
+          prompt: kickoffPrompt,
           config: baseSessionConfig,
         });
       }

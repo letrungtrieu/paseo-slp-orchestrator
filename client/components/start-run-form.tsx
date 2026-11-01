@@ -1,7 +1,7 @@
 // Focused "SLP" tab form for starting an SLP run from a ticket prepared on the project Kanban board.
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Pressable, Text, TextInput, View } from "react-native";
 import { describeTicketRunBlocker, type BoardTicket } from "../../shared/board";
 import type { UiStyles } from "../styles";
 import { useBoardActions, useBoardTickets } from "../use-board";
@@ -42,6 +42,8 @@ export function StartRunForm({
   const handleSelectRepoPath = onSelectRepositoryPath ?? setInternalRepoPath;
 
   const [selectedTicketKey, setSelectedTicketKey] = useState<string | null>(null);
+  // One shared message serves both "Continue" and "New mockup", since only one agent is opened per press.
+  const [productAgentMessage, setProductAgentMessage] = useState("");
   const { runInput, isReady, settings, promptsErrorMessage } = useRunStartOptions(
     effectiveRepoPath,
     selectedHostId,
@@ -71,8 +73,18 @@ export function StartRunForm({
   const openProductAgent = (targetTicketKey?: string) => {
     if (!effectiveRepoPath.trim()) return;
     spawnProductAgent.mutate(
-      { repoPath: effectiveRepoPath.trim(), ticketId: targetTicketKey },
-      { onSuccess: (spawnedResponse) => onOpenAgent?.(spawnedResponse.agentId) },
+      {
+        repoPath: effectiveRepoPath.trim(),
+        ticketId: targetTicketKey,
+        message: productAgentMessage,
+      },
+      {
+        onSuccess: (spawnedResponse) => {
+          // The message was delivered to the new agent, so a stale copy must not leak into the next one.
+          setProductAgentMessage("");
+          onOpenAgent?.(spawnedResponse.agentId);
+        },
+      },
     );
   };
 
@@ -146,6 +158,20 @@ export function StartRunForm({
           })}
         </View>
       )}
+      <View>
+        {/* Separate label so the field stays readable after typing, unlike a placeholder that disappears. */}
+        <Text style={styles.fieldLabel}>Message for Product Agent (optional)</Text>
+        <TextInput
+          accessibilityLabel="Message for the Product Agent"
+          value={productAgentMessage}
+          onChangeText={setProductAgentMessage}
+          placeholder="Góp ý hoặc điều bạn muốn chỉnh; gửi kèm khi bấm Continue / New mockup"
+          placeholderTextColor={theme.colors.foregroundMuted}
+          // Free-form prose, so multiple lines are allowed and the default capitalization/correction is kept.
+          multiline
+          style={[styles.input, { minHeight: 72, textAlignVertical: "top" }]}
+        />
+      </View>
       {blockedTickets.length > 0 ? (
         <View style={styles.stack}>
           <Text style={styles.fieldLabel}>Not ready yet</Text>

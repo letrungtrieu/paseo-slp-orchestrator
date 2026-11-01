@@ -211,6 +211,8 @@ export const spawnBoardProductAgentRpc = defineRpc({
     repoPath: z.string().trim().min(1),
     runId: z.string().optional(),
     ticketId: z.string().optional(),
+    // The human's own opening message, appended after the ticket/mockup header the engine builds.
+    message: z.string().optional(),
   }),
   output: z.object({
     agentId: z.string(),

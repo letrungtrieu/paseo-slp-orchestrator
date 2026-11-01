@@ -297,7 +297,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   });
 
   // Product Agents have no role of their own in settings, so they follow the Supervisor's human-facing model choice.
-  const openProductAgent = async (repoPath: string, ticketId?: string) => {
+  const openProductAgent = async (repoPath: string, ticketId?: string, openingMessage?: string) => {
     const savedSettings = globalSettings ? await globalSettings.read() : null;
     if (savedSettings?.status === "invalid") throw new Error(savedSettings.error);
     const defaults = savedSettings?.status === "ready" ? savedSettings.values : DEFAULT_SLP_SETTINGS;
@@ -305,6 +305,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     return spawnBoardProductAgent(ctx, {
       repoPath,
       ticketId,
+      message: openingMessage,
       provider: productDefaults.provider ?? DEFAULT_PROVIDER,
       thinkingOptionId: productDefaults.thinkingOptionId,
       permissionModeId: productDefaults.permissionModeId,
@@ -315,7 +316,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   server.handle(spawnBoardProductAgentRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
     const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath, input.runId);
-    return openProductAgent(effectiveRepoPath || input.repoPath, input.ticketId);
+    return openProductAgent(effectiveRepoPath || input.repoPath, input.ticketId, input.message);
   });
 
   // Serves a ticket's mockup (with element-comment inspector bridge) to the Kanban Mockup Preview Studio by URL, or inlined on request.
