@@ -303,12 +303,12 @@ export async function bundleMockupHtmlPreview(
   }
 
   // Pre-index all images in the mockup folder so dynamic JS template strings (`img.src = "assets/" + id`) also resolve.
-  const preindexedAssetMap = await collectMockupDirectoryAssetMap(
+  const preindexedAssets = await collectMockupDirectoryAssetMap(
     mockupDirectoriesToIndex,
     allowedRoots,
     encodedUriCache,
   );
-  const inspectorBridgeScript = buildMockupInspectorBridgeScript(preindexedAssetMap);
+  const inspectorBridgeScript = buildMockupInspectorBridgeScript(preindexedAssets);
 
   const bundledHtmlWithInspector = /<\/body>/i.test(bundledHtml)
     ? bundledHtml.replace(/<\/body>/i, `${inspectorBridgeScript}\n</body>`)

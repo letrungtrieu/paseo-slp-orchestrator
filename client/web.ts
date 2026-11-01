@@ -30,7 +30,9 @@ interface WebGlobalMessageHost {
 }
 
 function InteractiveMockupIframeHost(props: {
-  bundledHtml: string;
+  // Exactly one source is set: a loopback URL (normal) or a self-contained HTML string (remote-UI fallback).
+  previewUrl: string | null;
+  bundledHtml: string | null;
   title: string;
   reloadNonce: number;
   maxWidthPx: number | null;
@@ -71,7 +73,7 @@ function InteractiveMockupIframeHost(props: {
       },
       "*",
     );
-  }, [props.inspectModeEnabled, props.reloadNonce, props.bundledHtml]);
+  }, [props.inspectModeEnabled, props.reloadNonce, props.bundledHtml, props.previewUrl]);
 
   // Scroll to and outline a specific HTML element inside the mockup when the user clicks an existing comment.
   useEffect(() => {
@@ -91,7 +93,7 @@ function InteractiveMockupIframeHost(props: {
     ref: (mountedNode: WebIframeElement | null) => {
       iframeElementRef.current = mountedNode;
     },
-    srcDoc: props.bundledHtml,
+    ...(props.previewUrl ? { src: props.previewUrl } : { srcDoc: props.bundledHtml ?? "" }),
     title: props.title,
     sandbox: "allow-scripts allow-forms allow-modals allow-popups",
     onLoad: () => {
@@ -119,7 +121,9 @@ function InteractiveMockupIframeHost(props: {
 
 // Entry point called by MockupPreviewModal; returns null on non-web platforms where DOM iframes are unavailable.
 export function renderMockupPreviewIframe(props: {
-  bundledHtml: string;
+  // Exactly one source is set: a loopback URL (normal) or a self-contained HTML string (remote-UI fallback).
+  previewUrl: string | null;
+  bundledHtml: string | null;
   title: string;
   reloadNonce: number;
   maxWidthPx: number | null;

@@ -30,6 +30,7 @@ import type { Run } from "../shared/state";
 import { enrichTicketWithLiveAgents } from "./pipeline/board-tools";
 import type { PipelineContext } from "./pipeline/context";
 import { bundleMockupHtmlPreview } from "./pipeline/mockup-files";
+import { getMockupPreviewUrl } from "./pipeline/mockup-preview-server";
 import { approveBoardMockup, sendMockupFeedback } from "./pipeline/mockup-tools";
 import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/peer-messaging/question-metrics";
 import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } from "./pipeline/run-lifecycle";
@@ -40,7 +41,7 @@ import { releaseEndedRunTickets } from "./pipeline/ticket-run-release";
 import { approvePipelineGate } from "./pipeline/stage-control";
 import { assertGitRepository } from "./git/git";
 import { loadProjectPrompts } from "./project-prompts/load";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { productAgentDefaults, roleRunDefaults } from "./runtime/run-defaults";
 import { ensureSlpManagerSkill } from "./skills/slp-manager-skill";
 
@@ -317,7 +318,7 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     return openProductAgent(effectiveRepoPath || input.repoPath, input.ticketId);
   });
 
-  // Bundles a ticket's mockup file (with element-comment inspector bridge) for the Kanban Mockup Preview Studio.
+  // Serves a ticket's mockup (with element-comment inspector bridge) to the Kanban Mockup Preview Studio by URL, or inlined on request.
   server.handle(readBoardMockupPreviewRpc, async (input, { paseo }) => {
     ctx.holder.capture(paseo);
     const { effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, input.repoPath);
@@ -328,17 +329,26 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
     if (!targetTicket.mockup) {
       throw new Error(`Ticket '${targetTicket.ticketKey}' has no mockup yet.`);
     }
-    const { absoluteHtmlPath, bundledHtml } = await bundleMockupHtmlPreview(
-      targetTicket.repoPath || effectiveRepoPath || input.repoPath,
-      targetTicket.mockup.file,
-    );
-    return {
+    const mockupRepoPath = targetTicket.repoPath || effectiveRepoPath || input.repoPath;
+    const previewIdentity = {
       ticketId: targetTicket.id,
       title: targetTicket.title,
       file: targetTicket.mockup.file,
-      absoluteHtmlPath,
-      bundledHtml,
     };
+    // Default path never reads the assets: the iframe fetches them from the loopback server on demand.
+    if (!input.inline) {
+      return {
+        ...previewIdentity,
+        absoluteHtmlPath: resolve(mockupRepoPath, targetTicket.mockup.file),
+        previewUrl: await getMockupPreviewUrl(mockupRepoPath, targetTicket.mockup.file),
+        bundledHtml: null,
+      };
+    }
+    const { absoluteHtmlPath, bundledHtml } = await bundleMockupHtmlPreview(
+      mockupRepoPath,
+      targetTicket.mockup.file,
+    );
+    return { ...previewIdentity, absoluteHtmlPath, previewUrl: null, bundledHtml };
   });
 
   // Saves the human's Studio notes and hands them to the Product Agent so the mockup can be revised right away.

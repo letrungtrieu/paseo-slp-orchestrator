@@ -7,10 +7,18 @@ export const EXTERNAL_ASSET_SCHEME_REGEX = /^(?:https?:|data:|blob:|mailto:|tel:
 
 // Maximum file size (10 MB) for inlining local binary assets into base64 data URIs.
 const MAX_INLINE_ASSET_BYTES = 10 * 1024 * 1024;
-// Maximum number of mockup directory images pre-indexed into `window.__slpMockupAssets` for dynamic JS rendering.
+// Maximum number of mockup directory images pre-indexed for dynamic JS rendering.
 const MAX_PREINDEXED_MOCKUP_IMAGES = 64;
+// Budget for the pre-indexed data URIs: the whole bundle travels through one RPC and one iframe `srcDoc`, so it must stay small.
+const MAX_PREINDEXED_ASSET_CHARS = 8 * 1024 * 1024;
 
-const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
+// Each image is stored once; every path spelling a script may use points at its slot in `assetUris`.
+export interface PreindexedMockupAssets {
+  assetUris: string[];
+  assetIndexByKey: Record<string, number>;
+}
+
+export const MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -152,16 +160,17 @@ export async function encodeFileAsDataUri(
 }
 
 // Pre-index image files inside the mockup folder so dynamic JS DOM rendering (`img.src = ...`) can resolve them at runtime.
+// Files already inlined by the static passes (`encodedUriCache`) are skipped: their data URI is already in the page.
 export async function collectMockupDirectoryAssetMap(
   mockupDirectories: readonly string[],
   allowedRoots: readonly string[],
   encodedUriCache: Map<string, string>,
-): Promise<Record<string, string>> {
-  const assetMapByRelativeKey: Record<string, string> = {};
+): Promise<PreindexedMockupAssets> {
+  const preindexedAssets: PreindexedMockupAssets = { assetUris: [], assetIndexByKey: {} };
   let indexedImageCount = 0;
+  let indexedUriChars = 0;
 
   async function walkDirectory(rootMockupDir: string, currentDir: string): Promise<void> {
-    if (indexedImageCount >= MAX_PREINDEXED_MOCKUP_IMAGES) return;
     let entries;
     try {
       entries = await readdir(currentDir, { withFileTypes: true });
@@ -169,7 +178,7 @@ export async function collectMockupDirectoryAssetMap(
       return;
     }
     for (const directoryEntry of entries) {
-      if (indexedImageCount >= MAX_PREINDEXED_MOCKUP_IMAGES) break;
+      if (indexedImageCount >= MAX_PREINDEXED_MOCKUP_IMAGES) return;
       const fullEntryPath = join(currentDir, directoryEntry.name);
       if (!isPathInsideAllowedRoots(fullEntryPath, allowedRoots)) {
         continue;
@@ -178,52 +187,68 @@ export async function collectMockupDirectoryAssetMap(
         await walkDirectory(rootMockupDir, fullEntryPath);
         continue;
       }
-      if (!directoryEntry.isFile()) {
+      if (!directoryEntry.isFile() || encodedUriCache.has(fullEntryPath)) {
         continue;
       }
+      // The size is only known after encoding, so the budget check follows it; an over-budget file is skipped, not truncated.
       const assetDataUri = await encodeFileAsDataUri(fullEntryPath, encodedUriCache);
       if (!assetDataUri) {
         continue;
       }
+      if (indexedUriChars + assetDataUri.length > MAX_PREINDEXED_ASSET_CHARS) {
+        continue;
+      }
       indexedImageCount += 1;
+      indexedUriChars += assetDataUri.length;
+      const assetSlot = preindexedAssets.assetUris.push(assetDataUri) - 1;
       const relativeKey = relative(rootMockupDir, fullEntryPath).replace(/\\/g, "/");
-      assetMapByRelativeKey[relativeKey] ??= assetDataUri;
-      assetMapByRelativeKey[`./${relativeKey}`] ??= assetDataUri;
-      assetMapByRelativeKey[basename(fullEntryPath)] ??= assetDataUri;
+      preindexedAssets.assetIndexByKey[relativeKey] ??= assetSlot;
+      preindexedAssets.assetIndexByKey[`./${relativeKey}`] ??= assetSlot;
+      preindexedAssets.assetIndexByKey[basename(fullEntryPath)] ??= assetSlot;
     }
   }
 
   for (const mockupDir of mockupDirectories) {
     await walkDirectory(mockupDir, mockupDir);
   }
-  return assetMapByRelativeKey;
+  return preindexedAssets;
 }
 
 // Build the inspector + dynamic asset fallback bridge injected at the end of the bundled mockup HTML.
 export function buildMockupInspectorBridgeScript(
-  preindexedAssetMap: Readonly<Record<string, string>>,
+  preindexedAssets: PreindexedMockupAssets,
 ): string {
-  // Serialize the pre-indexed mockup image map safely so dynamic JS `img.src = "assets/" + name` resolves inside srcDoc.
-  const serializedAssetMap = JSON.stringify(preindexedAssetMap).replace(/<\/script/gi, "<\\/script");
+  // Serialize the pre-indexed mockup images safely so dynamic JS `img.src = "assets/" + name` resolves inside srcDoc.
+  const serializeForScript = (jsonValue: unknown): string =>
+    JSON.stringify(jsonValue).replace(/<\/script/gi, "<\\/script");
+  const serializedAssetUris = serializeForScript(preindexedAssets.assetUris);
+  const serializedAssetIndexByKey = serializeForScript(preindexedAssets.assetIndexByKey);
   return `<script data-slp-mockup-inspector="true">
 (function () {
   var inspectEnabled = false;
   var hoveredElement = null;
   var selectedElement = null;
-  var mockupAssetMap = ${serializedAssetMap};
-  window.__slpMockupAssets = mockupAssetMap;
+  var mockupAssetUris = ${serializedAssetUris};
+  var mockupAssetIndexByKey = ${serializedAssetIndexByKey};
+
+  // Own-property check so a path such as "constructor" never resolves to an inherited object member.
+  function lookupIndexedAssetUri(assetKey) {
+    if (!Object.prototype.hasOwnProperty.call(mockupAssetIndexByKey, assetKey)) return null;
+    return mockupAssetUris[mockupAssetIndexByKey[assetKey]] || null;
+  }
 
   function lookupMockupAssetDataUri(rawAssetPath) {
     if (!rawAssetPath || typeof rawAssetPath !== "string") return null;
     var trimmedPath = rawAssetPath.trim();
     if (!trimmedPath || /^(?:https?:|data:|blob:|\\/\\/)/i.test(trimmedPath)) return null;
     var cleanPath = (trimmedPath.split(/[?#]/)[0] || trimmedPath).replace(/\\\\/g, "/");
-    if (mockupAssetMap[cleanPath]) return mockupAssetMap[cleanPath];
+    var exactUri = lookupIndexedAssetUri(cleanPath);
+    if (exactUri) return exactUri;
     var normalizedRelative = cleanPath.replace(/^(?:\\.\\/|\\/|\\.\\.\\/)*/, "");
-    if (mockupAssetMap[normalizedRelative]) return mockupAssetMap[normalizedRelative];
+    var relativeUri = lookupIndexedAssetUri(normalizedRelative);
+    if (relativeUri) return relativeUri;
     var fileBasename = normalizedRelative.split("/").pop();
-    if (fileBasename && mockupAssetMap[fileBasename]) return mockupAssetMap[fileBasename];
-    return null;
+    return fileBasename ? lookupIndexedAssetUri(fileBasename) : null;
   }
 
   function rewriteDynamicElementAssetAttributes(rootNode) {

@@ -218,19 +218,22 @@ export const spawnBoardProductAgentRpc = defineRpc({
   }),
 });
 
-// Reads and bundles a ticket's mockup file (inlining relative .css and .js files) for instant live preview on the Kanban board.
+// Prepares a ticket's mockup for live preview: a loopback URL by default, or one self-contained inlined HTML when `inline` is set.
 export const readBoardMockupPreviewRpc = defineRpc({
   name: "slp.board.read_mockup_preview",
   input: z.object({
     repoPath: z.string().trim().min(1),
     ticketId: z.string().trim().min(1),
+    // The UI may run on another device (relay), where the daemon's 127.0.0.1 is unreachable; inline works anywhere but is heavy.
+    inline: z.boolean().optional(),
   }),
   output: z.object({
     ticketId: z.string(),
     title: z.string(),
     file: z.string(),
     absoluteHtmlPath: z.string(),
-    bundledHtml: z.string(),
+    previewUrl: z.string().nullable(),
+    bundledHtml: z.string().nullable(),
   }),
 });
 

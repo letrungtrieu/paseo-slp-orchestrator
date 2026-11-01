@@ -34,7 +34,10 @@ export function MockupPreviewModal({
 }: MockupPreviewModalProps) {
   const { approveMockup, readMockupPreview, sendMockupFeedback } = useBoardActions();
   const specColor = resolveSpecColorIdentity(ticket);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [bundledHtmlContent, setBundledHtmlContent] = useState<string>("");
+  // The loopback URL only works when the UI runs on the daemon's machine; this switches to the heavy inlined copy.
+  const [useInlinedFallback, setUseInlinedFallback] = useState<boolean>(false);
   const [iframeReloadNonce, setIframeReloadNonce] = useState<number>(0);
   const [viewportWidthPx, setViewportWidthPx] = useState<number | null>(null);
 
@@ -63,14 +66,16 @@ export function MockupPreviewModal({
       {
         repoPath: ticket.repoPath,
         ticketId: ticket.ticketKey,
+        inline: useInlinedFallback,
       },
       {
         onSuccess: (previewPayload) => {
-          setBundledHtmlContent(previewPayload.bundledHtml);
+          setPreviewUrl(previewPayload.previewUrl);
+          setBundledHtmlContent(previewPayload.bundledHtml ?? "");
         },
       },
     );
-  }, [ticket.id, ticket.repoPath, ticket.ticketKey, mockupState?.updatedAt, iframeReloadNonce]);
+  }, [ticket.id, ticket.repoPath, ticket.ticketKey, mockupState?.updatedAt, iframeReloadNonce, useInlinedFallback]);
 
   const handleAddElementComment = () => {
     if (!pickedHtmlElement || !elementCommentDraft.trim()) return;
@@ -114,9 +119,14 @@ export function MockupPreviewModal({
     describeRpcError(sendMockupFeedback.error) ??
     describeRpcError(approveMockup.error);
 
-  const iframeNode = bundledHtmlContent
+  // The query string defeats browser caching when the agent saves: the URL path is otherwise identical between saves.
+  const cacheBustedPreviewUrl = previewUrl
+    ? `${previewUrl}?v=${encodeURIComponent(`${mockupState?.updatedAt ?? ""}-${iframeReloadNonce}`)}`
+    : null;
+  const iframeNode = cacheBustedPreviewUrl || bundledHtmlContent
     ? renderMockupPreviewIframe({
-        bundledHtml: bundledHtmlContent,
+        previewUrl: cacheBustedPreviewUrl,
+        bundledHtml: bundledHtmlContent || null,
         title: ticket.title,
         reloadNonce: iframeReloadNonce,
         maxWidthPx: viewportWidthPx,
@@ -207,6 +217,12 @@ export function MockupPreviewModal({
             );
           })}
 
+          <ActionButton
+            styles={styles}
+            label={useInlinedFallback ? "Use URL" : "Blank? Inline"}
+            accessibilityLabel="Switch between loading the mockup by URL and one inlined copy"
+            onPress={() => setUseInlinedFallback((previousMode) => !previousMode)}
+          />
           <ActionButton
             styles={styles}
             label="Reload"
