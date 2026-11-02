@@ -1,10 +1,14 @@
 // MCP bus tool and UI operations for the single HTML/CSS/JS mockup file linked to a Kanban ticket.
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import {
+  DESIGN_ROOT,
   deriveFeatureMockupSlug,
   type BoardTicket,
   type MockupElementCommentInput,
 } from "../../shared/board";
 import type { BusCaller } from "../bus/http-mcp";
+import { mirrorBoardMockupToDesignStudioManifest } from "../runtime/design-plugin-detector";
 import { formatMockupElementCommentsMarkdown } from "../store/board-mockup";
 import { resolveTargetTicketForCaller } from "./board-tools";
 import type { PipelineContext } from "./context";
@@ -32,9 +36,14 @@ export async function setBoardMockup(
   if (!input.file && !fallbackFeatureName) {
     throw new ToolError("Provide file (for example 'checkout.html') or title for a new mockup.");
   }
-  const mockupFile = normalizeMockupFilePath(
-    input.file ?? `${deriveFeatureMockupSlug(fallbackFeatureName ?? "feature")}.html`,
-  );
+  const defaultSlugHtml = `${deriveFeatureMockupSlug(fallbackFeatureName ?? "feature")}.html`;
+  // Prefer `.design/<slug>.html` when the agent omitted `file` and wrote the prototype inside `.design/`.
+  const inferredFilePath =
+    input.file ??
+    (existsSync(resolve(repoPath, DESIGN_ROOT, defaultSlugHtml))
+      ? `${DESIGN_ROOT}/${defaultSlugHtml}`
+      : defaultSlugHtml);
+  const mockupFile = normalizeMockupFilePath(inferredFilePath);
   await assertMockupIndexLoadsOnly(repoPath, mockupFile);
 
   const wasApproved = existingTicket?.mockup?.status === "approved";
@@ -46,6 +55,7 @@ export async function setBoardMockup(
     summary: input.summary,
     authorAgentId: caller.agentId,
   });
+  mirrorBoardMockupToDesignStudioManifest(repoPath, updatedTicket);
   bindProductAgentToTicket(caller.agentId, updatedTicket.id);
 
   // Editing an approved mockup withdraws what a running Lead may be building against, so that Lead's Supervisor must hear about it.
@@ -73,6 +83,7 @@ export async function sendMockupFeedback(
   },
 ): Promise<{ ticket: BoardTicket; productAgentId: string }> {
   const updatedTicket = ctx.store.board.recordMockupFeedback(params);
+  mirrorBoardMockupToDesignStudioManifest(params.repoPath, updatedTicket);
   const mockupState = updatedTicket.mockup;
   const feedbackPrompt = [
     `## Góp ý mockup — \`${updatedTicket.ticketKey}\` (\`${mockupState?.file ?? ""}\`)`,
@@ -107,6 +118,7 @@ export async function approveBoardMockup(
     ticketIdOrKey: params.ticketIdOrKey,
     approvedCommit,
   });
+  mirrorBoardMockupToDesignStudioManifest(params.repoPath, approvedTicket);
 
   const boundRun = liveRunForTicket(ctx, approvedTicket);
   if (boundRun) await notifySupervisorOfMockupChange(ctx, boundRun, approvedTicket);

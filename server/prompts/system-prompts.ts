@@ -52,8 +52,8 @@ function sharedCheckoutDelegationSection(): string {
 // The engine states this itself because .slp workflows are user-owned and older ones predate it; the permission hook enforces it.
 function mockupOwnershipSection(): string {
   return [
-    "MOCKUP OWNERSHIP RULE: mockups are created and edited only by the Product Agent, outside any Run. You never create, edit, regenerate, restyle, move or delete anything under `.slp/mockup/` (or the older `.slp/mockups/`), and the permission policy refuses them wherever it is consulted. It cannot see every agent, so this rule binds you whether or not a check runs.",
-    "Never plan, delegate or accept a task whose work is making or changing a mockup. Read the approved mockup as the UI source of truth.",
+    "MOCKUP OWNERSHIP RULE: mockups are created and edited only by the Product Agent, outside any Run. You never create, edit, regenerate, restyle, move or delete anything under `.design/` (`paseo-design` plugin) or `.slp/mockup/` (or the older `.slp/mockups/`), and the permission policy refuses them wherever it is consulted. It cannot see every agent, so this rule binds you whether or not a check runs.",
+    "Never plan, delegate or accept a task whose work is making or changing a mockup. Read the approved mockup in `.design/` or `.slp/mockup/` as the UI source of truth.",
     "If it is missing, wrong or has to change, do not work around it: peers and Leads call slp_escalate, and the Supervisor tells the human, who returns to the Product Agent. This rule overrides any workflow text below.",
   ].join("\n");
 }

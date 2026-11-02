@@ -1,7 +1,7 @@
 // Path resolution, base64 data-URI encoding, and pre-indexed image collection for `.slp/mockup` previews.
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { MOCKUP_ROOT } from "../../shared/board";
+import { DESIGN_ROOT, MOCKUP_ROOT } from "../../shared/board";
 
 export const EXTERNAL_ASSET_SCHEME_REGEX = /^(?:https?:|data:|blob:|mailto:|tel:|javascript:|about:|\/\/|#)/i;
 
@@ -69,6 +69,7 @@ export function buildCandidateBaseDirectories(
     allowedRoots: [repoRoot],
     candidateBaseDirectories: [...new Set([
       entryDirectory,
+      resolve(repoRoot, DESIGN_ROOT),
       resolve(repoRoot, MOCKUP_ROOT),
       repoRoot,
       resolve(repoRoot, "public"),

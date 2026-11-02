@@ -260,7 +260,11 @@ export async function bundleMockupHtmlPreview(
     }
     const encodedDataUri = await encodeFileAsDataUri(resolvedAssetFilePath, encodedUriCache);
     if (encodedDataUri) {
-      bundledHtml = bundledHtml.replace(fullAttributeMatch, `${attributeName}="${encodedDataUri}"`);
+      const cleanRelativePath = rawAttributeValue.replace(/[?#].*$/, "").replace(/^(?:\.\/)+/, "");
+      bundledHtml = bundledHtml.replace(
+        fullAttributeMatch,
+        `${attributeName}="${encodedDataUri}" data-slp-asset-path="${cleanRelativePath}"`,
+      );
     }
   }
 
@@ -310,9 +314,12 @@ export async function bundleMockupHtmlPreview(
   );
   const inspectorBridgeScript = buildMockupInspectorBridgeScript(preindexedAssets);
 
-  const bundledHtmlWithInspector = /<\/body>/i.test(bundledHtml)
-    ? bundledHtml.replace(/<\/body>/i, `${inspectorBridgeScript}\n</body>`)
-    : `${bundledHtml}\n${inspectorBridgeScript}`;
+  // Inject the bridge in <head> when present so HTMLImageElement.prototype.src and Canvas drawImage hooks precede synchronous page scripts.
+  const bundledHtmlWithInspector = /<\/head>/i.test(bundledHtml)
+    ? bundledHtml.replace(/<\/head>/i, () => `${inspectorBridgeScript}\n</head>`)
+    : /<\/body>/i.test(bundledHtml)
+      ? bundledHtml.replace(/<\/body>/i, () => `${inspectorBridgeScript}\n</body>`)
+      : `${bundledHtml}\n${inspectorBridgeScript}`;
 
   return { absoluteHtmlPath, bundledHtml: bundledHtmlWithInspector };
 }

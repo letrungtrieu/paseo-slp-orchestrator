@@ -10,29 +10,39 @@ export type BoardColumn = z.infer<typeof BoardColumnSchema>;
 // Single git-tracked mockup source for the whole project: one HTML file per feature sharing `core/` CSS and JS so every mockup keeps one style.
 export const MOCKUP_ROOT = ".slp/mockup";
 
+// Standalone Paseo Design Studio (`paseo-design` plugin) directory storing pure HTML/CSS/JS interactive designs.
+export const DESIGN_ROOT = ".design";
+
 // Git owns the history of a mockup file, so a ticket only tracks whether the human has approved its current content.
 export const MOCKUP_STATUSES = ["draft", "approved"] as const;
 export const MockupStatusSchema = z.enum(MOCKUP_STATUSES);
 export type MockupStatus = z.infer<typeof MockupStatusSchema>;
 
-// Review comment anchored to a specific HTML element/tag inside a feature mockup file.
-// One HTML element a review note points at.
+// Review comment anchored to a specific HTML element/tag or displayed Design-mode image/Canvas sprite inside a feature mockup file.
+// One HTML element or visual image/sprite asset a review note points at.
 export const MockupElementTargetSchema = z.object({
-  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
-  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, input, or section"),
-  elementText: z.string().trim().default("").describe("Short visible text or attribute snippet of the HTML element"),
+  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element or canvas sprite"),
+  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, img, svg, canvas-img, or section"),
+  elementText: z.string().trim().default("").describe("Short visible text, alt label, or attribute snippet of the element"),
+  // Populated in Design mode when the target is an <img>, <svg>, CSS background-image, or individual <canvas> drawImage sprite.
+  assetPath: z.string().trim().optional().describe("Relative image/SVG/sprite file path inside .slp/mockup (e.g. assets/hero.png) for direct Codex editing"),
+  imagePreviewUri: z.string().trim().optional().describe("Preview URL or data URI of the displayed image or cropped canvas sprite"),
+  imageDimensions: z.string().trim().optional().describe("Intrinsic and rendered dimensions of the image or canvas sprite"),
 });
 export type MockupElementTarget = z.infer<typeof MockupElementTargetSchema>;
 
 export const MockupElementCommentSchema = z.object({
   id: z.string().trim().min(1),
   // The first target, kept as flat fields so notes saved before multi-select still read the same.
-  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element"),
-  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, input, or section"),
-  elementText: z.string().trim().default("").describe("Short visible text or attribute snippet of the HTML element"),
+  selector: z.string().trim().min(1).describe("CSS selector or DOM path of the target HTML element or canvas sprite"),
+  tagName: z.string().trim().default("div").describe("Lowercase HTML tag name such as button, img, svg, canvas-img, or section"),
+  elementText: z.string().trim().default("").describe("Short visible text, alt label, or attribute snippet of the element"),
+  assetPath: z.string().trim().optional().describe("Relative image/SVG/sprite file path inside .slp/mockup (e.g. assets/hero.png) for direct Codex editing"),
+  imagePreviewUri: z.string().trim().optional().describe("Preview URL or data URI of the displayed image or cropped canvas sprite"),
+  imageDimensions: z.string().trim().optional().describe("Intrinsic and rendered dimensions of the image or canvas sprite"),
   // Every element a drag-select picked, first one included; empty for a note on a single element.
   targets: z.array(MockupElementTargetSchema).default([]),
-  comment: z.string().trim().min(1).describe("Human review instructions for modifying this HTML element"),
+  comment: z.string().trim().min(1).describe("Human review instructions for modifying this HTML element or editing its image asset"),
   createdAt: z.string(),
 });
 export type MockupElementComment = z.infer<typeof MockupElementCommentSchema>;
@@ -42,6 +52,9 @@ export const MockupElementCommentInputSchema = z.object({
   selector: z.string().trim().min(1),
   tagName: z.string().trim().default("div"),
   elementText: z.string().trim().default(""),
+  assetPath: z.string().trim().optional(),
+  imagePreviewUri: z.string().trim().optional(),
+  imageDimensions: z.string().trim().optional(),
   targets: z.array(MockupElementTargetSchema).optional(),
   comment: z.string().trim().min(1),
 });

@@ -38,6 +38,8 @@ describe("mockup preview server", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");
     expect(body).toContain("data-slp-mockup-inspector");
+    expect(body).toContain("CanvasRenderingContext2D.prototype.drawImage");
+    expect(body).toContain("resolveCanvasSpriteAtPoint");
     // The page must reference the image by URL, otherwise the bundle-size problem is back.
     expect(body).toContain('src="assets/a.png"');
     expect(body).not.toContain("data:image");

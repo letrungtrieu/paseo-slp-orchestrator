@@ -23,4 +23,22 @@ describe("formatMockupElementCommentsMarkdown", () => {
     expect(groupNote).toContain("selector `div#card-a`");
     expect(groupNote).toContain("selector `div#card-b`");
   });
+
+  it("includes disk asset path, dimensions, and direct image-edit instructions for Design-mode image and canvas sprite notes", () => {
+    const designNote = formatMockupElementCommentsMarkdown([
+      {
+        selector: "canvas#game-hud [sprite: assets/golden-chest.png [frame 0,0 64x64]]",
+        tagName: "canvas-img",
+        elementText: "assets/golden-chest.png [frame 0,0 64x64]",
+        assetPath: "assets/golden-chest.png",
+        imageDimensions: "256x64px · canvas(120,80 64x64px)",
+        targets: [],
+        comment: "Nhờ Codex vẽ lại rương vàng kim sáng hơn và thêm hiệu ứng lấp lánh",
+      },
+    ]);
+    expect(designNote).toContain(
+      "[Image Asset: `assets/golden-chest.png` · 256x64px · canvas(120,80 64x64px)]",
+    );
+    expect(designNote).toContain("Design / Image Asset Edit Note:");
+  });
 });

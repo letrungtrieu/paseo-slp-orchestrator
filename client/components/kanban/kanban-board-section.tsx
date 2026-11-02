@@ -125,6 +125,13 @@ export function KanbanBoardSection({
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
 
   const allProjectTickets = boardQuery.data?.tickets ?? [];
+  // Inject the `.design` / mockup column whenever `paseo-design` is installed or the repository already has mockup tickets.
+  const designPluginInstalled = boardQuery.data?.designPluginInstalled ?? true;
+  const hasDesignWorkflow =
+    designPluginInstalled || allProjectTickets.some((ticket) => Boolean(ticket.mockup));
+  const activeBoardColumns = hasDesignWorkflow
+    ? BOARD_COLUMNS
+    : BOARD_COLUMNS.filter((columnKey) => columnKey !== "mockup");
   // Scope tickets belonging to the active Supervisor's run so finished/aborted runs do not clutter the board.
   // Tickets not yet in any Run stay visible because features are prepared before their Run exists.
   const activeSupervisorTickets = activeProjectRun
@@ -303,8 +310,12 @@ export function KanbanBoardSection({
             style={{ flex: 1, minWidth: 0, minHeight: 0 }}
             contentContainerStyle={{ gap: 12, alignItems: "flex-start" }}
           >
-            {BOARD_COLUMNS.map((columnKey) => {
+            {activeBoardColumns.map((columnKey, columnIndex) => {
               const columnAccent = resolveColumnAccentColor(theme, columnKey);
+              const columnDisplayTitle =
+                columnKey === "mockup" && designPluginInstalled
+                  ? `${columnIndex + 1}. DESIGN (.design)`
+                  : `${columnIndex + 1}. ${COLUMN_TITLES[columnKey].replace(/^\d+\.\s*/, "")}`;
               const columnCardCount =
                 columnKey === "spec"
                   ? specTicketsInColumn.length
@@ -331,7 +342,7 @@ export function KanbanBoardSection({
                 >
                   <View style={[styles.row, { justifyContent: "space-between" }]}>
                     <Text style={{ color: columnAccent, fontWeight: "700", fontSize: 13 }}>
-                      {COLUMN_TITLES[columnKey]}
+                      {columnDisplayTitle}
                     </Text>
                     <Text style={styles.mutedText}>{columnCardCount}</Text>
                   </View>

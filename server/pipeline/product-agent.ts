@@ -1,6 +1,12 @@
 // Spawns the standalone Product Agent (outside any SLP Run) that shapes a feature's mockup and Spec with the human.
 import { randomBytes, randomUUID } from "node:crypto";
-import { describeSpecWriteBlocker, MOCKUP_ROOT, specNeedsMockupReview, type BoardTicket } from "../../shared/board";
+import {
+  DESIGN_ROOT,
+  describeSpecWriteBlocker,
+  MOCKUP_ROOT,
+  specNeedsMockupReview,
+  type BoardTicket,
+} from "../../shared/board";
 import { BUS_SERVER_NAME } from "../../shared/roles";
 import type { BusToolName } from "../bus/tool-schemas";
 import { assertGitRepository } from "../git/git";
@@ -11,6 +17,7 @@ import {
   permissionModeFor,
   PROVIDERS_WITHOUT_TOOL_POLICY,
 } from "../runtime/agent-gateway-helpers";
+import { isPaseoDesignPluginInstalled } from "../runtime/design-plugin-detector";
 import { formatMockupElementCommentsMarkdown } from "../store/board-mockup";
 import type { PipelineContext } from "./context";
 
@@ -89,14 +96,15 @@ export const STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT = [
   `- Orient yourself before you build: read the project's own guidance (AGENTS.md, CLAUDE.md, README), \`.slp/standards/MOCKUP_WORKFLOW.md\` when it exists, the current \`${MOCKUP_ROOT}/\` (core and existing features) and the board with \`slp_board_list_tickets\`, so a new mockup fits what the project already is. Ask the human when the idea cannot be placed in the project.`,
   "- Do the mockup work yourself, in this conversation. Never hand it to a sub-agent, fork, background task or any other agent: it would lack the project context and the decisions made with the human, and mockups are yours alone.",
   `- Mockup first: for anything with a UI, build the idea as an interactive mockup and refine it with the human before writing a Spec. Features without a UI skip the mockup.`,
-  `- Layout: \`${MOCKUP_ROOT}/<feature>.html\` is only an index. It holds the markup and loads files with plain \`<link rel="stylesheet">\` and \`<script src>\` tags. Never write JavaScript or CSS inline in it, because \`slp_board_set_mockup\` refuses an index that has inline code.`,
+  `- Paseo Design Studio (\`paseo-design\`, \`${DESIGN_ROOT}/\`): when the \`paseo-design\` plugin is installed, designs can be saved directly inside \`${DESIGN_ROOT}/<feature>.html\` written in pure interactive HTML-JS-CSS (including inline \`<style>\` and \`<script>\` or separate files in \`${DESIGN_ROOT}/\`) so the human can interact rapidly and view the whole design. Link it with \`slp_board_set_mockup({ ticketId?, title?, file: "${DESIGN_ROOT}/<feature>.html", summary })\`.`,
+  `- Layout (\`${MOCKUP_ROOT}/\`): \`${MOCKUP_ROOT}/<feature>.html\` is only an index. It holds the markup and loads files with plain \`<link rel="stylesheet">\` and \`<script src>\` tags. Never write JavaScript or CSS inline in \`${MOCKUP_ROOT}/<feature>.html\`, because \`slp_board_set_mockup\` refuses a \`${MOCKUP_ROOT}/\` index that has inline code.`,
   `- Feature code: \`${MOCKUP_ROOT}/features/<feature>/\` holds that feature's own \`.js\` and \`.css\` files, split by concern (for example \`cart.js\`, \`checkout.css\`). Put all of a feature's behavior there.`,
-  `- Shared code: \`${MOCKUP_ROOT}/core/\` holds the style and logic every mockup uses (\`core.css\`, \`core.js\`), and \`${MOCKUP_ROOT}/assets/\` holds shared images. Create core from the project's real design tokens the first time it is missing.`,
+  `- Shared code: \`${MOCKUP_ROOT}/core/\` holds the style and logic every mockup uses (\`core.css\`, \`core.js\`), and \`${MOCKUP_ROOT}/assets/\` holds shared images. Create core from the project's real design tokens the first time it is missing. When the human attaches Design-mode image or \`<canvas>\` sprite comments (\`[Image Asset: ...]\`), directly edit or regenerate the referenced image/SVG/sprite files inside \`${DESIGN_ROOT}/\` or \`${MOCKUP_ROOT}/\` alongside the HTML/CSS/JS files.`,
   "- Change core only for something truly shared, and tell the human because it affects every other mockup. Prefer editing the feature's own files.",
   "- Load every file with plain tags, because the preview inlines only those. ES module `import` statements between files will not run.",
-  `- You may write only inside \`${MOCKUP_ROOT}/\`. Everything else in the repository is read-only, so read the real screens and terminology but never edit source files.`,
+  `- You may write only inside \`${DESIGN_ROOT}/\` or \`${MOCKUP_ROOT}/\`. Everything else in the repository is read-only, so read the real screens and terminology but never edit source files.`,
   "- After each meaningful mockup change, call `slp_board_set_mockup({ ticketId?, title?, file, summary })` so the card and preview stay current. That resets any approval and clears notes you have addressed.",
-  `- Approval belongs to the human, through the Approve button on the board. It requires \`${MOCKUP_ROOT}\` to be committed. Commit or push only when the human asks, and stage only paths under \`${MOCKUP_ROOT}/\`.`,
+  `- Approval belongs to the human, through the Approve button on the board. It requires \`${DESIGN_ROOT}\` or \`${MOCKUP_ROOT}\` to be committed. Commit or push only when the human asks, and stage only paths under \`${DESIGN_ROOT}/\` or \`${MOCKUP_ROOT}/\`.`,
   "- The Spec depends on the mockup. While the mockup is a draft, `slp_board_save_spec` is refused for that ticket, even to keep an existing Spec in step with your edits. Change only the mockup and do not look for a way around the refusal.",
   "- Approval starts the Spec work, and the engine tells you which kind. With no Spec yet, write a thin one with `slp_board_save_spec({ ticketId, spec, summary })`: reference the mockup file for the UI and record only what it cannot show (business rules, data, permissions, edge cases, out of scope). Never restate the UI in prose, because that duplicates the mockup.",
   "- When a mockup was edited after approval and then approved again, the Spec exists already: review it against the mockup. Save a revised Spec if something changed, or save the same text again to confirm it still matches. Until you save, the ticket cannot start a Run.",
@@ -121,6 +129,7 @@ export function buildSpecWorkPrompt(ticket: BoardTicket): string | null {
 function buildStandaloneProductKickoffPrompt(
   targetTicket: BoardTicket | null,
   openingMessage?: string,
+  designPluginInstalled = false,
 ): string {
   // Whitespace-only input counts as "no message" so an accidental space never replaces the default instruction.
   const humanMessage = openingMessage?.trim() ?? "";
@@ -129,7 +138,9 @@ function buildStandaloneProductKickoffPrompt(
       "Mình có một ý tưởng tính năng mới cho dự án này.",
       // A typed idea is the human's own words, so it is passed through untouched after the intro.
       humanMessage ? `Ý tưởng của mình:\n\n${humanMessage}` : "",
-      "Hãy hỏi mình về ý tưởng, đọc tài liệu và mã nguồn hiện tại cùng `.slp/mockup/` đã có (chỉ đọc) để nắm bối cảnh dự án, rồi dựng mockup để mình xem và chỉnh sửa. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.",
+      designPluginInstalled
+        ? `Plugin \`paseo-design\` đã được cài đặt: hãy đọc tài liệu và mã nguồn hiện tại cùng \`${DESIGN_ROOT}/\` (hoặc \`${MOCKUP_ROOT}/\`) đã có (chỉ đọc) để nắm bối cảnh dự án, rồi dựng thiết kế tương tác bằng HTML/CSS/JS trong \`${DESIGN_ROOT}/<feature>.html\` (hoặc \`${MOCKUP_ROOT}/<feature>.html\`) để mình xem và chỉnh sửa nhanh. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.`
+        : "Hãy hỏi mình về ý tưởng, đọc tài liệu và mã nguồn hiện tại cùng `.slp/mockup/` đã có (chỉ đọc) để nắm bối cảnh dự án, rồi dựng mockup để mình xem và chỉnh sửa. Nếu tính năng không có giao diện, hãy bỏ qua mockup và cùng mình viết Spec.",
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -223,7 +234,12 @@ export async function spawnBoardProductAgent(
   };
 
   // Built once so the retry path after a rejected toolPolicy sends the identical opening message.
-  const kickoffPrompt = buildStandaloneProductKickoffPrompt(targetTicket, input.message);
+  const designPluginInstalled = isPaseoDesignPluginInstalled(input.repoPath);
+  const kickoffPrompt = buildStandaloneProductKickoffPrompt(
+    targetTicket,
+    input.message,
+    designPluginInstalled,
+  );
 
   try {
     // Skip toolPolicy for plugin/ACP providers (e.g. Antigravity, Kiro) that reject exact MCP tool preapproval.

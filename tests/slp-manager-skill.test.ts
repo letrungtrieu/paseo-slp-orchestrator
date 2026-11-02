@@ -258,6 +258,8 @@ describe("slp-manager project skill provisioning", () => {
     expect(skillMarkdown).toContain("slp_board_notify_lead");
     // Mockups are settled before a Run, so the skill must teach the Product Agent flow rather than the retired mockup stage.
     expect(skillMarkdown).toContain("slp_board_set_mockup");
+    expect(skillMarkdown).toContain("paseo-design");
+    expect(skillMarkdown).toContain(".design/<feature>.html");
     expect(skillMarkdown).toContain(".slp/mockup/<feature>.html");
     expect(skillMarkdown).not.toContain("[mockup");
     expect(skillMarkdown).toContain("slp_pause_peers");

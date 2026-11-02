@@ -5,7 +5,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, resolve, sep } from "node:path";
-import { MOCKUP_ROOT } from "../../shared/board";
+import { DESIGN_ROOT, MOCKUP_ROOT } from "../../shared/board";
 import { MIME_TYPE_BY_EXTENSION } from "./mockup-asset-resolver";
 import { buildMockupInspectorBridgeScript } from "./mockup-inspector-bridge";
 
@@ -22,6 +22,7 @@ const PAGE_MIME_TYPE_BY_EXTENSION: Readonly<Record<string, string>> = {
 
 interface PreviewRoot {
   mockupRootDirectory: string;
+  repoRootDirectory: string;
 }
 
 // One token per repository keeps URLs stable across reloads, so the browser can reuse its cache for unchanged assets.
@@ -34,33 +35,70 @@ function sendPlainStatus(response: ServerResponse, statusCode: number, message: 
   response.end(message);
 }
 
-// Resolves a URL path to a real file inside the mockup root; symlinks are followed first so they cannot escape it.
-async function resolveFileInsideRoot(mockupRootDirectory: string, requestedRelativePath: string): Promise<string | null> {
+// Why: `.design/assets` or `.slp/mockup/assets` often symlinks into repository asset folders (such as `../Assets/_Project/Resources`),
+// so resolved targets are valid when they stay inside either the mockup root or the owning repository root.
+function isRealPathInsideAllowedDirectory(
+  resolvedFilePath: string,
+  allowedRootDirectory: string,
+): boolean {
+  return (
+    resolvedFilePath === allowedRootDirectory ||
+    resolvedFilePath.startsWith(`${allowedRootDirectory}${sep}`)
+  );
+}
+
+// Resolves a URL path to a real file inside the mockup or repository root; symlinks are followed first so they cannot escape the repo.
+async function resolveFileInsideRoot(
+  previewRoot: PreviewRoot,
+  requestedRelativePath: string,
+): Promise<string | null> {
   let decodedRelativePath: string;
   try {
     decodedRelativePath = decodeURIComponent(requestedRelativePath);
   } catch {
     return null;
   }
-  const candidateAbsolutePath = resolve(mockupRootDirectory, decodedRelativePath);
-  try {
-    const realRootDirectory = await realpath(mockupRootDirectory);
-    const realCandidatePath = await realpath(candidateAbsolutePath);
-    const staysInsideRoot = realCandidatePath === realRootDirectory || realCandidatePath.startsWith(`${realRootDirectory}${sep}`);
-    const candidateStats = await stat(realCandidatePath);
-    return staysInsideRoot && candidateStats.isFile() ? realCandidatePath : null;
-  } catch {
+  const normalizedRelativePath = decodedRelativePath.replace(/^\/+/, "");
+  const candidateLogicalPaths = [
+    resolve(previewRoot.mockupRootDirectory, normalizedRelativePath),
+    resolve(previewRoot.repoRootDirectory, normalizedRelativePath),
+  ];
+
+  const realMockupRootDirectory = await realpath(previewRoot.mockupRootDirectory).catch(() => null);
+  const realRepoRootDirectory = await realpath(previewRoot.repoRootDirectory).catch(() => null);
+  if (!realMockupRootDirectory || !realRepoRootDirectory) {
     return null;
   }
+
+  for (const candidateLogicalPath of candidateLogicalPaths) {
+    try {
+      const realCandidateFilePath = await realpath(candidateLogicalPath);
+      const staysInsideAuthorizedRoot =
+        isRealPathInsideAllowedDirectory(realCandidateFilePath, realMockupRootDirectory) ||
+        isRealPathInsideAllowedDirectory(realCandidateFilePath, realRepoRootDirectory);
+      if (!staysInsideAuthorizedRoot) {
+        continue;
+      }
+      const candidateFileStats = await stat(realCandidateFilePath);
+      if (candidateFileStats.isFile()) {
+        return realCandidateFilePath;
+      }
+    } catch {
+      // Why: missing candidate in `mockupRootDirectory` is expected when falling back to `repoRootDirectory`.
+    }
+  }
+  return null;
 }
 
-// The entry page gets the element-picker bridge; assets are already addressable by URL, so the bridge carries none.
+// The entry page gets the element-picker and Canvas sprite bridge early in <head> so synchronous <canvas> scripts are hooked.
 async function sendEntryHtml(response: ServerResponse, absoluteHtmlPath: string): Promise<void> {
   const rawHtml = await readFile(absoluteHtmlPath, "utf8");
   const inspectorBridgeScript = buildMockupInspectorBridgeScript({ assetUris: [], assetIndexByKey: {} });
-  const htmlWithInspector = /<\/body>/i.test(rawHtml)
-    ? rawHtml.replace(/<\/body>/i, () => `${inspectorBridgeScript}\n</body>`)
-    : `${rawHtml}\n${inspectorBridgeScript}`;
+  const htmlWithInspector = /<\/head>/i.test(rawHtml)
+    ? rawHtml.replace(/<\/head>/i, () => `${inspectorBridgeScript}\n</head>`)
+    : /<\/body>/i.test(rawHtml)
+      ? rawHtml.replace(/<\/body>/i, () => `${inspectorBridgeScript}\n</body>`)
+      : `${inspectorBridgeScript}\n${rawHtml}`;
   response.writeHead(200, {
     "Content-Type": PAGE_MIME_TYPE_BY_EXTENSION[".html"],
     "Cache-Control": "no-cache",
@@ -86,7 +124,7 @@ async function handlePreviewRequest(request: IncomingMessage, response: ServerRe
     sendPlainStatus(response, 404, "Unknown preview");
     return;
   }
-  const absoluteFilePath = await resolveFileInsideRoot(previewRoot.mockupRootDirectory, pathSegments.join("/"));
+  const absoluteFilePath = await resolveFileInsideRoot(previewRoot, pathSegments.join("/"));
   if (!absoluteFilePath) {
     sendPlainStatus(response, 404, "Not found");
     return;
@@ -101,6 +139,8 @@ async function handlePreviewRequest(request: IncomingMessage, response: ServerRe
     "Content-Type": PAGE_MIME_TYPE_BY_EXTENSION[fileExtension] ?? "application/octet-stream",
     "Cache-Control": "no-cache",
     "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Private-Network": "true",
+    "Cross-Origin-Resource-Policy": "cross-origin",
   });
   if (request.method === "HEAD") {
     response.end();
@@ -132,17 +172,24 @@ function ensurePreviewServer(): Promise<{ server: Server; port: number }> {
   return runningServer;
 }
 
-// Returns the URL the iframe should load for a mockup entry file such as `.slp/mockup/checkout.html`.
+// Returns the URL the iframe should load for a mockup entry file such as `.design/checkout.html` or `.slp/mockup/checkout.html`.
 export async function getMockupPreviewUrl(repoPath: string, mockupFile: string): Promise<string> {
-  const mockupRootDirectory = resolve(repoPath, MOCKUP_ROOT);
+  const normalizedMockupFile = mockupFile.replace(/\\/g, "/");
+  // Serve `.design/` files from the `.design` root and `.slp/mockup/` files from the `.slp/mockup` root.
+  const activeDesignRoot = normalizedMockupFile.startsWith(`${DESIGN_ROOT}/`)
+    ? DESIGN_ROOT
+    : MOCKUP_ROOT;
+  const repoRootDirectory = resolve(repoPath);
+  const mockupRootDirectory = resolve(repoRootDirectory, activeDesignRoot);
   let previewToken = tokenByMockupRoot.get(mockupRootDirectory);
   if (!previewToken) {
     previewToken = randomBytes(24).toString("hex");
     tokenByMockupRoot.set(mockupRootDirectory, previewToken);
-    previewRootByToken.set(previewToken, { mockupRootDirectory });
   }
+  // Why: update the token entry on each call so `repoRootDirectory` stays accurate for symlinked asset resolution.
+  previewRootByToken.set(previewToken, { mockupRootDirectory, repoRootDirectory });
   const { port } = await ensurePreviewServer();
-  const entryPathInsideRoot = mockupFile.replace(/\\/g, "/").replace(`${MOCKUP_ROOT}/`, "");
+  const entryPathInsideRoot = normalizedMockupFile.replace(`${activeDesignRoot}/`, "");
   const encodedEntryPath = entryPathInsideRoot.split("/").map(encodeURIComponent).join("/");
   return `http://127.0.0.1:${port}/${previewToken}/${encodedEntryPath}`;
 }

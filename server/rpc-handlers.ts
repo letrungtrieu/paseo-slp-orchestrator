@@ -36,6 +36,10 @@ import { buildPeerQuestionViews, computePeerQuestionMetrics } from "./pipeline/p
 import { abortRun, approveMain, approveRunGate, DEFAULT_PROVIDER, startRun } from "./pipeline/run-lifecycle";
 import { archiveRunSafely, dismissArchiveWarning, restoreRun } from "./pipeline/run-restore";
 import { spawnBoardProductAgent } from "./pipeline/product-agent";
+import {
+  isPaseoDesignPluginInstalled,
+  syncDesignStudioManifestToBoard,
+} from "./runtime/design-plugin-detector";
 import { liveRunForTicket, notifySupervisorOfSpecChange } from "./pipeline/ticket-change-notices";
 import { releaseEndedRunTickets } from "./pipeline/ticket-run-release";
 import { approvePipelineGate } from "./pipeline/stage-control";
@@ -252,12 +256,18 @@ export function registerRpcHandlers(server: PluginServerContext, ctx: PipelineCo
   server.handle(listBoardTicketsRpc, ({ repoPath, runId }, { paseo }) => {
     ctx.holder.capture(paseo);
     const { matchedRun, effectiveRepoPath } = resolveRunAndCanonicalRepoPath(ctx, repoPath, runId);
-    if (!effectiveRepoPath) return { repoPath: "", tickets: [] };
+    const designPluginInstalled = isPaseoDesignPluginInstalled(effectiveRepoPath || repoPath);
+    if (!effectiveRepoPath) return { repoPath: "", designPluginInstalled, tickets: [] };
     // Runs aborted before tickets were released would keep their tickets stuck on the board.
     releaseEndedRunTickets(ctx, effectiveRepoPath);
+    // When `paseo-design` is installed, automatically link any `.design/designs.json` entries into the Kanban board.
+    if (designPluginInstalled) {
+      syncDesignStudioManifestToBoard(ctx.store.board, effectiveRepoPath);
+    }
     const storedTickets = ctx.store.board.listByRepo(effectiveRepoPath);
     return {
       repoPath: effectiveRepoPath,
+      designPluginInstalled,
       tickets: storedTickets.map((ticket) => {
         const ticketRun = (ticket.activeRunId ? ctx.store.find(ticket.activeRunId) : undefined) ?? matchedRun;
         return enrichTicketWithLiveAgents(ticketRun, ticket);

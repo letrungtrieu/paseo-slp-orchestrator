@@ -9,6 +9,11 @@ import { abortRun } from "../server/pipeline/run-lifecycle";
 import { bundleMockupHtmlPreview } from "../server/pipeline/mockup-files";
 import { buildSpecWorkPrompt, STANDALONE_PRODUCT_AGENT_SYSTEM_PROMPT, STANDALONE_PRODUCT_AGENT_TOOLS } from "../server/pipeline/product-agent";
 import { createBusDispatcher } from "../server/pipeline/tool-handlers";
+import {
+  isPaseoDesignPluginInstalled,
+  setDesignPluginInstalledOverrideForTests,
+  syncDesignStudioManifestToBoard,
+} from "../server/runtime/design-plugin-detector";
 import { upgradeLegacyTicketPayload } from "../server/store/board-mockup";
 import { BoardTicketSchema, BOARD_COLUMNS, describeTicketRunBlocker, type BoardTicket } from "../shared/board";
 import { StageStateSchema } from "../shared/pipeline";
@@ -406,5 +411,48 @@ describe("mockup-first product flow", () => {
     const upgradedTicket = BoardTicketSchema.parse(upgradeLegacyTicketPayload(legacyPayload));
     expect(upgradedTicket.mockup?.file).toBe(".slp/mockups/old/versions/v2/index.html");
     expect(upgradedTicket.mockup?.status).toBe("approved");
+  });
+
+  it("supports `.design/<feature>.html` written in pure inline HTML/CSS/JS when `paseo-design` is used and syncs `.design/designs.json`", async () => {
+    const flow = await createFlow({ mode: "FULL_AUTO" });
+    setDesignPluginInstalledOverrideForTests(true);
+    try {
+      expect(isPaseoDesignPluginInstalled(flow.repoPath)).toBe(true);
+      const designDir = join(flow.repoPath, ".design");
+      await mkdir(designDir, { recursive: true });
+      await writeFile(
+        join(designDir, "checkout.html"),
+        `<!doctype html><html><head><style>.pay { background: #10b981; }</style></head><body><button class="pay">Pay Now</button><script>window.__designReady = true;</script></body></html>`,
+        "utf8",
+      );
+
+      // Unlike `.slp/mockup/`, `.design/checkout.html` permits inline <style> and <script> for rapid prototyping.
+      const linkOutcome = await callAsProductAgent(flow, "slp_board_set_mockup", {
+        title: "Fast Design Checkout",
+        file: ".design/checkout.html",
+        summary: "Pure HTML/CSS/JS interactive prototype in .design",
+      });
+      expect(linkOutcome.isError).toBe(false);
+      const { ticketKey } = JSON.parse(linkOutcome.text) as { ticketKey: string };
+      const linkedTicket = flow.ctx.store.board.requireTicket(ticketKey, flow.repoPath);
+      expect(linkedTicket.mockup?.file).toBe(".design/checkout.html");
+
+      // Mirroring to `.design/designs.json` keeps the standalone `paseo-design` plugin synchronized.
+      const manifestRaw = await readFile(join(designDir, "designs.json"), "utf8");
+      const parsedManifest = JSON.parse(manifestRaw) as { entries: Record<string, { file: string; status: string }> };
+      expect(parsedManifest.entries[".design/checkout.html"]?.file).toBe(".design/checkout.html");
+
+      // Syncing a new `.design/dashboard.html` entry created inside `paseo-design` adds it to the SLP Kanban board.
+      parsedManifest.entries[".design/dashboard.html"] = {
+        file: ".design/dashboard.html",
+        status: "draft",
+      };
+      await writeFile(join(designDir, "designs.json"), JSON.stringify(parsedManifest, null, 2), "utf8");
+      syncDesignStudioManifestToBoard(flow.ctx.store.board, flow.repoPath);
+      const allTickets = flow.ctx.store.board.listByRepo(flow.repoPath);
+      expect(allTickets.some((ticket) => ticket.mockup?.file === ".design/dashboard.html")).toBe(true);
+    } finally {
+      setDesignPluginInstalledOverrideForTests(null);
+    }
   });
 });

@@ -2,7 +2,7 @@
 // The agent's current pipeline/stage identity is the authorization boundary for writes.
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
-import { MOCKUP_ROOT } from "../../shared/board";
+import { DESIGN_ROOT, MOCKUP_ROOT } from "../../shared/board";
 import type { PeerKind } from "../../shared/project-prompts";
 import { BUS_SERVER_NAME, type SlpRole } from "../../shared/roles";
 import { PROTECTED_TASK_FILES, matchesAnyScope } from "../git/scope";
@@ -79,7 +79,13 @@ function isReadOnlyPeer(context: PermissionContext): boolean {
 }
 
 function isMockupPath(relativePath: string): boolean {
-  return relativePath === MOCKUP_ROOT || relativePath.startsWith(`${MOCKUP_ROOT}/`);
+  // Both `.slp/mockup/` and `.design/` (`paseo-design` plugin) belong exclusively to the Product/Design Agent.
+  return (
+    relativePath === MOCKUP_ROOT ||
+    relativePath.startsWith(`${MOCKUP_ROOT}/`) ||
+    relativePath === DESIGN_ROOT ||
+    relativePath.startsWith(`${DESIGN_ROOT}/`)
+  );
 }
 
 // Mockups belong to the Product Agent alone. The older versioned folder is covered too, so no role can keep a legacy copy moving.
@@ -91,8 +97,8 @@ function isMockupSourcePath(relativePath: string): boolean {
 
 const MOCKUP_OWNERSHIP_DENIAL = "Mockups are created and edited only by the Product Agent, never by a Supervisor, Lead or peer. Read the approved mockup as the UI contract; if it is wrong or must change, report it with slp_escalate (or tell the human) instead of changing it.";
 
-// A shell command that names a mockup folder is allowed only when every part of it just reads.
-const MOCKUP_SOURCE_IN_SHELL = /\.slp[\\/]+mockups?\b/i;
+// A shell command that names a mockup or `.design` folder is allowed only when every part of it just reads.
+const MOCKUP_SOURCE_IN_SHELL = /(\.slp[\\/]+mockups?|(?:^|[\\/\s"'])\.design)\b/i;
 const READ_ONLY_SHELL_COMMAND = /^\s*(cd|cat|ls|head|tail|wc|grep|egrep|rg|diff|stat|file|sort|uniq|find|git\s+(status|diff|log|show|ls-files|grep))\b/;
 
 function isReadOnlyShellCommand(shellCommand: string): boolean {

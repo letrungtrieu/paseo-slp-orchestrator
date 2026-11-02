@@ -182,6 +182,8 @@ export const listBoardTicketsRpc = defineRpc({
   }),
   output: z.object({
     repoPath: z.string(),
+    // Indicates whether the standalone `paseo-design` plugin is installed so the UI can inject the `.design` workflow.
+    designPluginInstalled: z.boolean().optional(),
     tickets: z.array(BoardTicketSchema),
   }),
 });
